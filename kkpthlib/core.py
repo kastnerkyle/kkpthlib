@@ -7,7 +7,6 @@ import torch
 import uuid
 from scipy import linalg
 from scipy.stats import truncnorm
-from scipy.misc import factorial
 import shutil
 import socket
 import os

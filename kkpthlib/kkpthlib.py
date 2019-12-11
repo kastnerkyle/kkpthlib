@@ -2,7 +2,6 @@ import numpy as np
 import torch
 from scipy import linalg
 from scipy.stats import truncnorm
-from scipy.misc import factorial
 
 def np_zeros(shape):
     """
