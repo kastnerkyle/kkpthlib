@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from scipy import linalg
 from scipy.stats import truncnorm
+from .hparams import HParams
 
 def np_zeros(shape):
     """
@@ -477,6 +478,7 @@ class Embedding(torch.nn.Module):
                  n_symbols,
                  output_dim,
                  random_state=None,
+                 config=None,
                  init="embedding_normal",
                  scale=1.,
                  strict=None,
@@ -487,6 +489,9 @@ class Embedding(torch.nn.Module):
         Last dimension of indices tensor must be 1!!!!
         """
         super(Embedding, self).__init__()
+        if config is not None:
+            print("config setup {}!".format(self.__class__.__name__))
+            from IPython import embed; embed(); raise ValueError()
 
         if name is None:
             name = _get_name()
@@ -606,6 +611,7 @@ class Linear(torch.nn.Module):
                  list_of_input_dims,
                  output_dim,
                  random_state=None,
+                 config=None,
                  name=None,
                  init=None,
                  scale="default",
@@ -616,6 +622,10 @@ class Linear(torch.nn.Module):
                  dtype="default",
                  device="default"):
         super(Linear, self).__init__()
+        if config is not None:
+            print("config setup {}!".format(self.__class__.__name__))
+            from IPython import embed; embed(); raise ValueError()
+
         if random_state is None:
             raise ValueError("Must pass instance of np.random.RandomState!")
         input_dim = sum(list_of_input_dims)
@@ -762,9 +772,16 @@ class Conv2d(torch.nn.Module):
                  custom_weight_mask=None,
                  init=None, scale="default",
                  biases=True, bias_offset=0.,
-                 name=None, random_state=None, strict=None,
+                 name=None,
+                 config=None,
+                 random_state=None, strict=None,
                  dtype="default", device="default"):
         super(Conv2d, self).__init__()
+
+        if config is not None:
+            print("config setup {}!".format(self.__class__.__name__))
+            from IPython import embed; embed(); raise ValueError()
+
         if strides != [1, 1]:
             raise ValueError("Alternate strides not yet supported in conv2d")
         if dilation != [1, 1]:
@@ -1159,9 +1176,13 @@ class BatchNorm2d(torch.nn.Module):
                  eps=1E-3,
                  strict=None,
                  name=None,
+                 config=None,
                  dtype="default",
                  device="default"):
         super(BatchNorm2d, self).__init__()
+        if config is not None:
+            print("config setup {}!".format(self.__class__.__name__))
+            from IPython import embed; embed(); raise ValueError()
         # https://r2rt.com/implementing-batch-normalization-in-tensorflow.html
         # NCHW convention
         if name is None:
@@ -1307,10 +1328,16 @@ class SequenceConv1dStack(torch.nn.Module):
                  bias_offset=0.,
                  name=None,
                  random_state=None,
+                 config=None,
                  strict=None,
                  dtype="default",
                  device="default"):
         super(SequenceConv1dStack, self).__init__()
+
+        if config is not None:
+            print("config setup {}!".format(self.__class__.__name__))
+            from IPython import embed; embed(); raise ValueError()
+
         if name is None:
             name = _get_name()
 
@@ -1436,10 +1463,14 @@ class LSTMCell(torch.nn.Module):
                  output_dim=None,
                  input_mask=None,
                  random_state=None,
+                 config=None,
                  name=None, init=None, scale="default",
                  forget_bias=1.,
                  strict=None):
         super(LSTMCell, self).__init__()
+        if config is not None:
+            print("config setup {}!".format(self.__class__.__name__))
+            from IPython import embed; embed(); raise ValueError()
         # cell_dropout should be a value in [0., 1.], or None
         # output is the thing to use in following layers, state is a tuple that feeds into the next call
         if random_state is None:
@@ -1737,10 +1768,14 @@ class BiLSTMLayer(torch.nn.Module):
                  num_units,
                  output_dim=None,
                  random_state=None,
+                 config=None,
                  name=None, init=None, scale="default",
                  forget_bias=1.,
                  strict=None):
         super(BiLSTMLayer, self).__init__()
+        if config is not None:
+            print("config setup {}!".format(self.__class__.__name__))
+            from IPython import embed; embed(); raise ValueError()
         if name is None:
             name = _get_name()
         name = name + "_bidirlstm_layer"
@@ -1833,9 +1868,13 @@ class GaussianAttentionCell(torch.nn.Module):
                  step_op="exp",
                  cell_type="lstm",
                  name=None,
+                 config=None,
                  random_state=None,
                  strict=None, init=None):
         super(GaussianAttentionCell, self).__init__()
+        if config is not None:
+            print("config setup {}!".format(self.__class__.__name__))
+            from IPython import embed; embed(); raise ValueError()
         #returns w_t, k_t, phi_t, state
         # where state is the state tuple returned by the inner cell_type
 

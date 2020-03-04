@@ -41,7 +41,7 @@ rnn_init = "truncated_normal"
 bn_flag = 0.
 
 #basedir = "/Tmp/kastner/lj_speech/LJSpeech-1.0/"
-#ljspeech = rsync_fetch(fetch_ljspeech, "leto01")
+peech = rsync_fetch(fetch_ljspeech, "leto01")
 
 # THESE ARE CANNOT BE PAIRED (SOME MISSING), ITERATOR PAIRS THEM UP BY NAME
 #wavfiles = ljspeech["wavfiles"]
