@@ -21,6 +21,7 @@ import json
 import zipfile
 import glob
 import threading
+import inspect
 try:
     from StringIO import StringIO
 except ImportError:
@@ -265,7 +266,7 @@ def archive_code():
     empty = len(existing_reports) == 0
 
     if not os.path.exists(save_script_path) or empty:
-        logger.info("Saving runscript and models.py file to {}".format(checkpoint_dir))
+        logger.info("Saving script file to {}".format(checkpoint_dir))
         shutil.copy2(script_location, save_script_path)
 
 
@@ -431,20 +432,47 @@ def threaded_html_writer(interp=True, maxsize=25):
     except GeneratorExit:
         messages.put((1, GeneratorExit))
 
+
 def save_checkpoint(state, filename):
     torch.save(state, filename)
+
+
+def save_model_skeleton(serialization_dict, filename):
+    model = serialization_dict["model"]
+    optimizer = serialization_dict["optimizer"]
+    model_source_skeleton_lines = inspect.getsourcelines(type(model))
+    model_file = inspect.getsourcefile(type(model))
+    with open(filename, "w") as f:
+        f.write(repr(serialization_dict["hparams"]))
+        f.writelines(["\n", "model from line {} of {}\n".format(model_source_skeleton_lines[1], model_file), "\n"])
+        f.writelines(model_source_skeleton_lines[0])
+        f.writelines(["\n", "\n"])
+        f.writelines(["\n", "pytorch model representation:\n", "\n"])
+        f.write(repr(model))
+        f.writelines(["\n", "pytorch optimizer representation:\n", "\n"])
+        f.write(repr(optimizer))
+
 
 class Saver(object):
     def __init__(self, max_to_keep=5):
         self.max_to_keep = max_to_keep
         self.counter = 0
 
-    def save(self, model, path_stub, global_step=None):
+    def save(self, serialization_dict, path_stub, global_step=None):
+        assert "model" in serialization_dict
+        assert "hparams" in serialization_dict
+        assert "optimizer" in serialization_dict
+        if sorted(serialization_dict.keys()) != ["hparams", "model", "optimizer"]:
+            logger.info("Detected more than just 'hparams', 'model', 'optimizer' keys in serialization dict to Saver - not currently saving anything but the model, {}".format(sorted(serialization_dict.keys())))
+
         if global_step is not None:
-            full_path = path_stub + "-{}.pth".format(global_step)
+            full_model_path = path_stub + "model-{}.pth".format(global_step)
+            full_optimizer_path = path_stub + "optimizer-{}.pth".format(global_step)
         else:
-            full_path = path_stub + "-{}.pth".format(self.counter)
+            full_model_path = path_stub + "model-{}.pth".format(self.counter)
+            full_optimizer_path = path_stub + "optimizer-{}.pth".format(self.counter)
             self.counter += 1
+
         folder = "/".join(path_stub.split("/")[:-1])
         if not os.path.exists(folder):
             logger.info("Folder {} not found, creating".format(folder))
@@ -456,24 +484,87 @@ class Saver(object):
         if len(match_files) > self.max_to_keep:
             # delete oldest file, assumed sort in descending order so [0] is the oldest model
             os.remove(match_files[0])
-        state_dict = model.state_dict()
-        save_checkpoint(state_dict, full_path)
+
+        skeleton_path = folder + "/_model_source_skeleton.txt"
+        save_model_skeleton(serialization_dict, skeleton_path)
+
+        model = serialization_dict["model"]
+        optimizer = serialization_dict["optimizer"]
+
+        model_state_dict = model.state_dict()
+        optimizer_state_dict = optimizer.state_dict()
+
+        save_checkpoint(model_state_dict, full_model_path)
+        save_checkpoint(optimizer_state_dict, full_optimizer_path)
+
 
 # TODO: Time based saver?
 def run_loop(train_loop_function, train_itr,
              valid_loop_function, valid_itr,
-             model_reference,
+             serialization_dict,
              n_steps=np.inf,
-             n_train_steps_per=1000,
+             n_epochs=np.inf,
+             n_train_steps_per=-1,
              train_stateful_args=None,
-             n_valid_steps_per=50,
+             n_valid_steps_per=-1,
              valid_stateful_args=None,
              status_every_s=5,
              models_to_keep=5,
              permanent_models_to_keep=100,
              permanent_step_upper_lim=50000,
              permanent_step_lower_lim=1000):
+    """
+    loop function signature
 
+    r = train_loop_function(train_itr, extras, this_train_stateful_args)
+
+    train_itr is the train iterator, used for going through dataset
+    extras is a dictionary containing info like whether the model is in train or test model, is mutable / editable
+    train_stateful_args are stateful arguments, which come from previous iterations of the train_loop function
+
+    returned r should be something like
+
+    return loss, None, stateful_args
+
+    or
+
+    return loss, None (if train_stateful_args or valid_stateful_args doesn't exist, you can just drop it)
+
+    or
+
+    return [loss1, ..., lossN], None, stateful_args
+
+    or
+
+    return [loss1, ..., lossN], None
+
+    where middle argument is a "summary variable", which is either None or a dict of {"name": name_value} you wish to save in the plotter
+    to force lines to plot by default, make sure the last part of the name is "_auto" such as "kl_divergence_auto"
+
+    stateful_args is a list of variables which will be passed into the next loop iteration (useful for RNNs)
+
+    multiple loss support is available through passing a list of losses, names will simply be values
+
+
+    validation function behaves similarly, but validation values are interpolated in the plot to make arrangement smoother
+
+
+    n_epochs and n_steps are exclusive! use one or the other
+
+
+    serialization_dict is a dict containing (at least) {"model": pytorch_model_instance,
+                                                        "optimizer": pytorch_optimizer_instance,
+                                                        "hparams": kkpthlib_hparams_instance}
+    TODO: support custom serialization functions
+    """
+
+    if not np.isinf(n_steps):
+        if not np.isinf(n_epochs):
+            raise ValueError("Both n_steps and n_epochs set - only 1 can be used! Set either n_steps or n_epochs (or both) to np.inf")
+
+    assert "model" in serialization_dict
+    assert "hparams" in serialization_dict
+    assert "optimizer" in serialization_dict
     # This could be configurable, but I prefer a hard required file and name for serialization
     script = get_script()
     full_script_path = os.path.abspath(script + ".py")
@@ -483,11 +574,13 @@ def run_loop(train_loop_function, train_itr,
     archive_code()
 
     hostname = socket.gethostname()
-    logger.info("Host %s, script %s" % (hostname, script))
+    logger.info("Host %s, script %s" % (hostname, script + ".py"))
     train_itr_steps_taken = 0
     valid_itr_steps_taken = 0
     overall_train_loss = []
     overall_valid_loss = []
+    overall_train_summaries = {}
+    overall_valid_summaries = {}
     # won't match exactly due to this - even after replaying itr stateful args may change
     # however, should be *close* since data is at least iterated in the same way...
     #this_train_stateful_args = copy.deepcopy(train_stateful_args)
@@ -519,7 +612,27 @@ def run_loop(train_loop_function, train_itr,
     min_last_train_loss = np.inf
     min_valid_loss = np.inf
     was_best_valid_loss = False
+    # todo: allow -1 to use default iterator stop point?
+    if n_train_steps_per == -1:
+        # this should natively use the "StopIteration" protocol of the underlying iterator
+        n_train_steps_per = 1000000000
+        print_n_train_steps_per = -1
+    else:
+        print_n_train_steps_per = n_train_steps_per
+
+    if n_valid_steps_per == -1:
+        # this should natively use the "StopIteration" protocol of the underlying iterator
+        n_valid_steps_per = 1000000000
+        print_n_valid_steps_per = -1
+    else:
+        print_n_valid_steps_per = n_valid_steps_per
+
+    total_epochs = 0
     while True:
+        if total_epochs + 1 >= n_epochs:
+            break
+        total_epochs += 1
+
         # stop at the start of an epoch
         if train_itr_steps_taken + 1 >= n_steps:
             break
@@ -527,19 +640,23 @@ def run_loop(train_loop_function, train_itr,
         extras["train"] = True
         assert n_train_steps_per >= 1
         this_train_loss = []
+        this_train_summaries = {}
         train_start_time = time.time()
         for tsi in range(n_train_steps_per):
             s = time.time()
-            r = train_loop_function(train_itr, extras, this_train_stateful_args)
+            try:
+                r = train_loop_function(train_itr, extras, this_train_stateful_args)
+            except StopIteration:
+                break
             e = time.time()
             if train_stateful_args is not None:
                 this_train_stateful_args = r[-1]
-            train_loss = float(r[0])
+            train_loss = r[0]
             # use the first loss returned to do train best checkpoint
-            if not hasattr(train_loss, "__len__"):
-                all_train_loss = [train_loss]
-            else:
-                all_train_loss = train_loss
+            try:
+                all_train_loss = [float(t) for t in train_loss]
+            except TypeError:
+                all_train_loss = [float(train_loss)]
 
             train_loss = all_train_loss[0]
             # should only happen for first mb of each epoch
@@ -559,10 +676,16 @@ def run_loop(train_loop_function, train_itr,
             cumulative_train_time.append(minibatch_time + train_time_accumulator)
             minibatch_train_time.append(minibatch_time)
             train_summary = r[1]
+            if train_summary is not None:
+                for k, v in train_summary.items():
+                    if k not in this_train_summaries:
+                        this_train_summaries[k] = []
+                    this_train_summaries[k].append(v)
+
             train_itr_steps_taken += 1
             minibatch_train_count.append(train_itr_steps_taken)
             if (i + 1) == n_train_steps_per or (time.time() - last_status) > status_every_s:
-                logger.info("[{}, script {}] train step {}/{}, overall train step {}".format(hostname, script, tsi + 1, n_train_steps_per, train_itr_steps_taken))
+                logger.info("[{}, script {}] train step {}/{}, overall train step {}".format(hostname, script, tsi + 1, print_n_train_steps_per, train_itr_steps_taken))
                 for n, tl in enumerate(all_train_loss):
                     logger.info("train loss {} {}, overall train average {}".format(n + 1, tl, np.mean(overall_train_loss[n] + this_train_loss[n])))
                 logger.info(" ")
@@ -570,28 +693,37 @@ def run_loop(train_loop_function, train_itr,
         for i in range(len(this_train_loss)):
             overall_train_loss[i] += this_train_loss[i]
 
+        if len(this_train_summaries) > 0:
+            for k in this_train_summaries:
+                if k not in overall_train_summaries:
+                    overall_train_summaries[k] = []
+                overall_train_summaries[k] += this_train_summaries[k]
+
         if train_loss < min_last_train_loss:
             min_last_train_loss = train_loss
             logger.info("had best train, step {}".format(train_itr_steps_taken))
-            print("train_saver")
-            train_best_model_saver.save(model_reference, os.path.join(checkpoint_dir, "saved_models", "train_model"),
+            train_best_model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "train_model"),
                                         train_itr_steps_taken)
 
         extras["train"] = False
         if n_valid_steps_per > 0:
             this_valid_loss = []
+            this_valid_summaries = {}
             valid_start_time = time.time()
             for vsi in range(n_valid_steps_per):
                 s = time.time()
-                r = valid_loop_function(valid_itr, extras, this_valid_stateful_args)
+                try:
+                    r = valid_loop_function(valid_itr, extras, this_valid_stateful_args)
+                except StopIteration:
+                    break
                 e = time.time()
                 if valid_stateful_args is not None:
                     this_valid_stateful_args = r[-1]
-                valid_loss = float(r[0])
-                if not hasattr(valid_loss, "__len__"):
-                    all_valid_loss = [valid_loss]
-                else:
-                    all_valid_loss = valid_loss
+                valid_loss = r[0]
+                try:
+                    all_valid_loss = [float(v) for v in valid_loss]
+                except TypeError:
+                    all_valid_loss = [float(valid_loss)]
 
                 valid_loss = all_valid_loss[0]
                 # should only happen for first mb of each epoch
@@ -615,10 +747,17 @@ def run_loop(train_loop_function, train_itr,
                 cumulative_valid_time.append(minibatch_time + valid_time_accumulator)
                 minibatch_valid_time.append(minibatch_time)
                 valid_summary = r[1]
+                if valid_summary is not None:
+                    for k, v in valid_summary.items():
+                        # same summary variable entries for train and valid
+                        assert k in this_train_summaries
+                        if k not in this_valid_summaries:
+                            this_valid_summaries[k] = []
+                    this_valid_summaries[k].append(v)
                 valid_itr_steps_taken += 1
                 minibatch_valid_count.append(valid_itr_steps_taken)
                 if (i + 1) == n_valid_steps_per or (time.time() - last_status) > status_every_s:
-                    logger.info("[{}, script {}] valid step {}/{}, overall valid step {}".format(hostname, script, vsi + 1, n_valid_steps_per, valid_itr_steps_taken))
+                    logger.info("[{}, script {}] valid step {}/{}, overall valid step {}".format(hostname, script, vsi + 1, print_n_valid_steps_per, valid_itr_steps_taken))
                     for n, vl in enumerate(all_valid_loss):
                         logger.info("valid loss {} {}, overall valid average {}".format(n, vl, np.mean(overall_valid_loss[n] + this_valid_loss[n])))
                     logger.info(" ")
@@ -626,6 +765,13 @@ def run_loop(train_loop_function, train_itr,
             for i in range(len(this_valid_loss)):
                 valid_interpd = [vi for vi in np.interp(np.arange(len(this_train_loss[i])), np.arange(len(this_valid_loss[i])), this_valid_loss[i])]
                 overall_valid_loss[i] += valid_interpd
+
+            if len(this_valid_summaries) > 0:
+                for k in this_valid_summaries:
+                    if k not in overall_valid_summaries:
+                        overall_valid_summaries[k] = []
+                    valid_interpd = [vi for vi in np.interp(np.arange(len(this_train_summaries[k])), np.arange(len(this_valid_summaries[k])), this_valid_summaries[k])]
+                    overall_valid_summaries[k] += valid_interpd
 
         if train_itr_steps_taken > 1E9:
             save_html_path = "model_step_{}m.html".format(train_itr_steps_taken // 1E6)
@@ -637,6 +783,9 @@ def run_loop(train_loop_function, train_itr,
         results_dict = {}
         for i in range(len(overall_train_loss)):
             results_dict["train_loss_{}".format(i)] = overall_train_loss[i]
+        if len(this_train_summaries) > 0:
+            for k, vl in overall_train_summaries.items():
+                results_dict["train_" + k] = overall_train_summaries[k]
         results_dict["train_minibatch_time_auto"] = minibatch_train_time
         results_dict["train_cumulative_time_auto"] = cumulative_train_time
         results_dict["train_minibatch_count_auto"] = minibatch_train_count
@@ -644,28 +793,28 @@ def run_loop(train_loop_function, train_itr,
         if len(overall_valid_loss) > 0 and len(overall_valid_loss[0]) > 0:
             for i in range(len(overall_valid_loss)):
                 results_dict["valid_loss_{}".format(i)] = overall_valid_loss[i]
+            for k, vl in overall_valid_summaries.items():
+                results_dict["valid_" + k] = overall_valid_summaries[k]
             results_dict["valid_minibatch_time_auto"] = minibatch_valid_time
             results_dict["valid_cumulative_time_auto"] = cumulative_valid_time
             results_dict["valid_minibatch_count_auto"] = minibatch_valid_count
 
         thw.send((save_html_path, results_dict))
 
-        model_saver.save(model_reference, os.path.join(checkpoint_dir, "saved_models", "checkpoint_model"),
+        model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "checkpoint_model"),
                          train_itr_steps_taken)
 
-        print(n_steps)
         if np.isinf(n_steps):
             # just set it to a very large number
             tmp_n_steps = 10E6
         else:
             tmp_n_steps = n_steps
         if train_itr_steps_taken % min(permanent_step_upper_lim, max(permanent_step_lower_lim, int(tmp_n_steps // permanent_models_to_keep))) == 0:
-            perma_saver.save(model_reference, os.path.join(checkpoint_dir, "saved_models", "permanent_model"),
-            train_itr_steps_taken)
+            perma_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "permanent_model"), train_itr_steps_taken)
 
         if was_best_valid_loss:
-            logger.info("had best valid, step {}".format(train_itr_steps_taken))
-            valid_best_model_saver.save(model_reference, os.path.join(checkpoint_dir, "saved_models", "valid_model"),
+            logger.info("valid saver had best valid, step {}".format(train_itr_steps_taken))
+            valid_best_model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "valid_model"),
                                         train_itr_steps_taken)
             was_best_valid_loss = False
 
