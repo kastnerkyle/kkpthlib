@@ -219,22 +219,31 @@ class MusicJSONRasterIterator(object):
                  max_sequence_length,
                  random_seed,
                  n_voices=4,
+                 iterate_once=False,
+                 with_clocks=[2, 4, 8, 16, 32, 64],
+                 #with_clocks=None,
                  resolution="sixteenth"):
         super(MusicJSONRasterIterator, self).__init__()
         self.list_of_music_json_files = list_of_music_json_files
         self.random_seed = random_seed
         self.random_state = np.random.RandomState(random_seed)
         self.file_list_indices_ = list(range(len(self.list_of_music_json_files)))
-        self.random_state.shuffle(self.file_list_indices_)
-        self.file_list_indices_ = self.file_list_indices_[:batch_size]
+        self.iterate_once = iterate_once
+        self.iterate_at_ = 0
+        self.batch_size = batch_size
+        if self.iterate_once:
+            pass
+        else:
+            self.random_state.shuffle(self.file_list_indices_)
+        self.file_list_indices_ = self.file_list_indices_[self.iterate_at_:self.iterate_at_ + self.batch_size]
         self.resolution = resolution
         self.max_sequence_length = max_sequence_length
         self.n_voices = n_voices
-        self.batch_size = batch_size
         if self.resolution != "sixteenth":
             raise ValueError("Currently only support 16th note resolution")
         if self.n_voices != 4:
             raise ValueError("Currently only support 4 voices")
+        self.with_clocks = with_clocks
         # build vocabularies now?
 
     def next(self):
@@ -300,11 +309,25 @@ class MusicJSONRasterIterator(object):
                     else:
                        roll_voices[v].append(current_note)
             all_roll_voices.append(roll_voices)
+
         raster_roll_voices = np.zeros((self.max_sequence_length, self.batch_size, 1)) - 1.
+
+        if self.with_clocks is not None:
+            all_clocks = [np.zeros((self.max_sequence_length, self.batch_size, 1)) for ac in self.with_clocks]
+
         for n, rv in enumerate(all_roll_voices):
             # transpose from 4 long sequences, to a long sequence of 4 "tuples"
             i_rv = [[t_rv[i] for t_rv in rv] for i in range(len(rv[0]))]
             raster_i_rv = [r for step in i_rv for r in step]
+            if self.with_clocks is not None:
+                # create clock signals, by taking time index modulo each value
+                clock_base = [[t for t_rv in rv] for t in range(len(rv[0]))]
+                clock_base = [clk for step in clock_base for clk in step]
+                lcl_clocks = []
+                for cl_i in self.with_clocks:
+                    this_clock = [cb % cl_i for cb in clock_base]
+                    lcl_clocks.append(this_clock)
+
             slicer = 0
             if len(raster_i_rv) > self.max_sequence_length:
                 # find a point to start where either all voices rest, or all voices are onsets!
@@ -331,11 +354,31 @@ class MusicJSONRasterIterator(object):
                 slicer = step_slicer * self.n_voices
             subslice = raster_i_rv[slicer:slicer + self.max_sequence_length]
             raster_roll_voices[:len(subslice), n, 0] = subslice
+            # we broadcast it to self.batch_size soon
+            for _i, ac in enumerate(lcl_clocks):
+                all_clocks[_i][:len(subslice), n, 0] = ac[slicer:slicer + self.max_sequence_length]
         # take off trailing 1 from shape
         mask = np.array(raster_roll_voices >= 0.).astype(np.float32)[..., 0]
         # np.abs to get rid of -0. , is annoying to me
         raster_roll_voices = np.abs(raster_roll_voices * mask[..., None])
-        return raster_roll_voices, mask
+
+        # setup new file_list_indices - use a new song for each batch element
+        self.file_list_indices_ = list(range(len(self.list_of_music_json_files)))
+        if self.iterate_once:
+            self.iterate_at_ += self.batch_size
+        else:
+            self.random_state.shuffle(self.file_list_indices_)
+        self.file_list_indices_ = self.file_list_indices_[self.iterate_at_:self.iterate_at_ + self.batch_size]
+        if len(self.file_list_indices_) != self.batch_size:
+            if self.iterate_once and len(self.file_list_indices_) > 0:
+                # let the last batch through for iterate_once / vocabulary and statistics checks, etc
+                pass
+            else:
+                raise ValueError("Unknown error, not enough file list indices to iterate! Current indices {}".format(self.file_list_indices_))
+        if self.with_clocks is None:
+            return raster_roll_voices, mask
+        else:
+            return raster_roll_voices, mask, [ac.astype(np.float32) * mask[..., None] for ac in all_clocks]
 
 
 def fetch_jsb_chorales():

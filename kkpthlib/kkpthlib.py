@@ -2,6 +2,10 @@ import numpy as np
 import torch
 from scipy import linalg
 from scipy.stats import truncnorm
+import math
+
+import torch.nn.functional as F
+
 from .hparams import HParams
 
 def np_zeros(shape):
@@ -358,24 +362,29 @@ def sigmoid(x):
     return torch.sigmoid(x)
 
 
-def Sigmoid(x):
-    return sigmoid(x)
-
-
 def tanh(x):
     return torch.tanh(x)
-
-
-def Tanh(x):
-    return tanh(x)
 
 
 def relu(x):
     return torch.nn.functional.relu(x)
 
 
-def ReLU(x):
-    return relu(x)
+def gelu(x):
+    return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
+
+
+def softmax(x):
+    # should work for both 2D and 3D
+    e_x = torch.exp(x - x.max(dim=-1, keepdims=True)[0])
+    out = e_x / e_x.sum(dim=-1, keepdims=True)
+    return out
+
+def softmax_np(x):
+    # should work for both 2D and 3D
+    e_x = np.exp(x - x.max(dim=-1, keepdims=True))
+    out = e_x / e_x.sum(dim=-1, keepdims=True)
+    return out
 
 
 def make_tensor(arr, dtype, device, requires_grad=True):
@@ -388,9 +397,9 @@ def make_tensor(arr, dtype, device, requires_grad=True):
         dtype = get_dtype_default()
 
     if dtype == "float32":
-        tensor = torch.FloatTensor(arr, device=device)
+        tensor = torch.from_numpy(arr.astype("float32")).to(device)
     elif dtype == "float64":
-        tensor = torch.DoubleTensor(arr, device=device)
+        tensor = torch.from_numpy(arr.astype("float64")).to(device)
     else:
         raise ValueError("Not yet implemented for dtype {}".format(dtype))
     if not requires_grad:
@@ -462,9 +471,12 @@ def scan(fn, sequences, outputs_info):
     return [torch.stack(rj) for rj in r]
 
 
-def clipping_grad_norm_(parameters, rescale):
+def clipping_grad_norm_(parameters, rescale, named_parameters=False):
     # is a generator... get a static reference so the second iteration isn't empty
-    _params = [p for p in parameters]
+    if not named_parameters:
+        _params = [p for p in parameters]
+    else:
+        _params = [p[1] for p in parameters]
     grad_norm = torch.sqrt(sum([torch.sqrt(torch.pow(p.grad.data, 2).sum()) for p in _params]))
     scaling_num = rescale
     scaling_den = max([1.0 * rescale, grad_norm])
@@ -478,7 +490,6 @@ class Embedding(torch.nn.Module):
                  n_symbols,
                  output_dim,
                  random_state=None,
-                 config=None,
                  init="embedding_normal",
                  scale=1.,
                  strict=None,
@@ -489,9 +500,6 @@ class Embedding(torch.nn.Module):
         Last dimension of indices tensor must be 1!!!!
         """
         super(Embedding, self).__init__()
-        if config is not None:
-            print("config setup {}!".format(self.__class__.__name__))
-            from IPython import embed; embed(); raise ValueError()
 
         if name is None:
             name = _get_name()
@@ -546,64 +554,355 @@ class Embedding(torch.nn.Module):
         return lu, self.vectors
 
 
-'''
-def Embedding(indices, n_symbols, output_dim, random_state=None,
-              init="embedding_normal", scale=1.,
-              strict=None, name=None, dtype="default", device="default"):
-    """
-    Last dimension of indices tensor must be 1!!!!
-    """
-    shp = _shape(indices)
+class LayerNorm(torch.nn.Module):
+    def __init__(self,
+                 input_dim,
+                 eps=1E-12,
+                 name=None,
+                 strict=None,
+                 dtype="default",
+                 device="default"):
+        super(LayerNorm, self).__init__()
+        if name is None:
+            name = _get_name()
 
-    if name is None:
-        name = _get_name()
+        self.input_dim = input_dim
+        self.eps = eps
 
-    if random_state is None:
-        raise ValueError("Must pass random_state argument to Embedding")
+        name_w = name + "_layer_norm_w"
+        name_b = name + "_layer_norm_b"
 
-    name_w = name + "_embedding_w"
+        if strict is None:
+            strict = get_strict_mode_default()
 
-    if strict is None:
-        strict = get_strict_mode_default()
+        if strict:
+            cur_defs = get_params_dict()
+            if name_w in cur_defs:
+                raise ValueError("Name {} already created in params dict!".format(name_w))
 
-    if strict:
-        cur_defs = get_params_dict()
-        if name_w in cur_defs:
-            raise ValueError("Name {} already created in params dict!".format(name_w))
+            if name_b in cur_defs:
+                raise ValueError("Name {} already created in params dict!".format(name_b))
+        try:
+            weight = _get_shared(name_w)
+        except NameError:
+            weight_values = np.ones((input_dim,)).astype(np.float32)
+            bias_values = np.zeros((input_dim,)).astype(np.float32)
+            weight = make_tensor(weight_values, dtype=dtype, device=device)
+            bias = make_tensor(bias_values, dtype=dtype, device=device)
+            _set_shared(name_w, weight)
+            _set_shared(name_b, bias)
 
-    if init != "embedding_normal":
-        raise ValueError("Currently unsupported init type {}".format(init))
+        self.weight = torch.nn.Parameter(weight)
+        self.bias = torch.nn.Parameter(bias)
 
-    try:
-        vectors = _get_shared(name_w)
-    except NameError:
-        vectors_weight, = make_numpy_weights(n_symbols, [output_dim],
-                                             random_state, init=init,
-                                             scale=scale, name=name_w)
-        vectors = make_tensor(vectors_weight, dtype=dtype, device=device)
-        #vectors = torch.from_numpy(vectors_weight).to(lcl_device)
-        _set_shared(name_w, vectors)
+    def forward(self, x):
+        u = x.mean(-1, keepdim=True)
+        s = (x - u).pow(2).mean(-1, keepdim=True)
+        x = (x - u) / torch.sqrt(s + self.eps)
+        return self.weight * x + self.bias
 
-    th_embed = torch.nn.Embedding(n_symbols, output_dim)
-    th_embed.weight.data.copy_(vectors)
 
-    ii = indices.long()
-    shp = _shape(ii)
-    nd = _ndim(ii)
-    if shp[-1] != 1:
-        if nd < 3:
-            logger.info("Embedding input should have last dimension 1, inferring dimension to 1, from shape {} to {}".format(shp, tuple(list(shp) + [1])))
-            ii = ii[..., None]
+class TransformerConv1d(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_dims,
+                 output_dim,
+                 name=None,
+                 init="normal",
+                 scale=0.02,
+                 biases=True,
+                 strict=None,
+                 dtype="default",
+                 device="default",
+                 random_state=None):
+        super(TransformerConv1d, self).__init__()
+
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("must pass instance of np.random.RandomState!")
+
+        input_dim = sum(list_of_input_dims)
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+
+        name_w = name + "_transformer_conv1d_w"
+        name_b = name + "_transformer_conv1d_b"
+
+        if strict is None:
+            strict = get_strict_mode_default()
+
+        if strict:
+            cur_defs = get_params_dict()
+            if name_w in cur_defs:
+                raise ValueError("Name {} already created in params dict!".format(name_w))
+
+            if name_b in cur_defs:
+                raise ValueError("Name {} already created in params dict!".format(name_b))
+
+        if init is None or type(init) is str:
+            weight_values, = make_numpy_weights(input_dim, [output_dim],
+                                                random_state=random_state,
+                                                init=init, scale=scale, name=name_w)
         else:
-            raise ValueError("Embedding layer input must have last dimension 1 for input size > 3D, got {}".format(shp))
+            # rely on announcement from parent class
+            weight_values=init[0]
 
-    shp = _shape(ii)
-    nd = len(shp)
-    # force 3d for consistency, then slice
-    lu = th_embed(ii[..., 0])
-    return lu, vectors
-'''
+        try:
+            weight = _get_shared(name_w)
+        except NameError:
+            weight = make_tensor(weight_values, dtype=dtype, device=device)
+            _set_shared(name_w, weight)
 
+        self.weight = torch.nn.Parameter(weight)
+        self.biases = None
+
+        if biases:
+            if (init is None) or (type(init) is str):
+                b, = make_numpy_biases([output_dim], name=name_b)
+            else:
+                b = init[1]
+            b = b
+            try:
+                biases = _get_shared(name_b)
+            except NameError:
+                biases = make_tensor(b, dtype=dtype, device=device)
+                _set_shared(name_b, biases)
+            self.biases = torch.nn.Parameter(biases)
+
+
+    def forward(self, list_of_inputs):
+        x = torch.cat(list_of_inputs, dim=-1)
+        size_out = x.size()[:-1] + (self.output_dim,)
+        x = torch.addmm(self.biases, x.view(-1, x.size(-1)), self.weight)
+        x = x.view(*size_out)
+        return x
+
+
+class TransformerMLP(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_dims,
+                 output_dim,
+                 name=None,
+                 strict=None,
+                 random_state=None,
+                 activation_function=gelu,
+                 device="default",
+                 dtype="default"):
+        super(TransformerMLP, self).__init__()
+
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("must pass instance of np.random.RandomState!")
+
+        input_dim = sum(list_of_input_dims)
+
+        if strict is None:
+            strict = get_strict_mode_default()
+
+        name_fc = name + "_transformer_mlp_fc"
+        name_proj = name + "_transformer_mlp_proj"
+
+        self.c_fc = TransformerConv1d([input_dim], output_dim,
+                                       random_state=random_state,
+                                       name=name_fc,
+                                       device=device,
+                                       dtype=dtype)
+
+        self.c_proj = TransformerConv1d([output_dim], input_dim,
+                                        random_state=random_state,
+                                        name=name_proj,
+                                        device=device,
+                                        dtype=dtype)
+        self.activation_function = activation_function
+
+    def forward(self, list_of_inputs):
+        h = self.activation_function(self.c_fc(list_of_inputs))
+        h2 = self.c_proj([h])
+        return h2
+
+
+class TransformerSelfAttention(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_dims,
+                 context_length,
+                 n_attention_heads,
+                 scale_attention=True,
+                 name=None,
+                 strict=None,
+                 random_state=None,
+                 dtype="default",
+                 device="default"):
+        super(TransformerSelfAttention, self).__init__()
+
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("must pass instance of np.random.RandomState!")
+
+        input_dim = sum(list_of_input_dims)
+
+        if input_dim % n_attention_heads != 0:
+            raise ValueError("input_dim % n_attention heads must be 0!")
+
+        if strict is None:
+            strict = get_strict_mode_default()
+
+        self.input_dim = input_dim
+        self.context_length = context_length
+        self.n_attention_heads = n_attention_heads
+        self.scale_attention = scale_attention
+        self.split_size = input_dim
+        self.random_state = random_state
+        self.device = device
+        self.dtype = dtype
+
+        conv_attn_name = name + "_transformer_self_attention_conv_attn"
+        conv_proj_name = name + "_transformer_self_attention_conv_proj"
+
+        self.c_attn = TransformerConv1d([input_dim], input_dim * 3,
+                                        random_state=random_state,
+                                        name=conv_attn_name,
+                                        device=device,
+                                        dtype=dtype)
+
+        self.c_proj = TransformerConv1d([input_dim], input_dim,
+                                        random_state=random_state,
+                                        name=conv_proj_name,
+                                        device=device,
+                                        dtype=dtype)
+
+    def _attn(self, q, k, v, dropout_keep_prob=1., mask_tensor=None, mask_fill=-1E-9):
+        dropout = 1. - dropout_keep_prob
+        # mask tensor of batch, target_length, source_length
+        # q of torch.Size([10, 8, 1000, 24])
+        # q of batch, head, seq_length, head_features
+        # k of batch, head, head_features, seq_length
+        # v of batch, head, seq_length, head_features
+        scores = torch.matmul(q, k) # w of batch, head, seq_length, seq_length
+        if self.scale_attention:
+            scores = scores / math.sqrt(v.size(-1))
+        if mask_tensor is not None:
+            scores = scores.masked_fill(mask_tensor[:, None] == 0, mask_fill)
+        p_attn = F.softmax(scores, dim=-1)
+        p_attn = F.dropout(p_attn, p=dropout)
+        return torch.matmul(scores, v), p_attn
+
+    def _subsequent_mask(self, size):
+        attn_shape = (1, size, size)
+        subsequent_mask = np.triu(np.ones(attn_shape), k=1).astype('uint8')
+        base_mask = make_tensor(subsequent_mask, device=self.device, dtype=self.dtype) == 0
+        return base_mask
+
+    def _split_heads(self, x, k=False):
+        # in - seq_length, batch, features
+        new_x_shape = x.size()[:-1] + (self.n_attention_heads, x.size(-1) // self.n_attention_heads)
+        x = x.view(*new_x_shape)  # (seq_length, batch, head, head_features
+        if k:
+            return x.permute(1, 2, 3, 0) # (batch, head, head_features, seq_length)
+        else:
+            return x.permute(1, 2, 0, 3) # (batch, head, seq_length, head_features)
+
+    def _merge_heads(self, x):
+        # in x, (batch, head, seq_length, head_features)
+        x = x.permute(0, 2, 1, 3).contiguous()
+        # now, (batch, seq_length, head, head_features)
+        new_x_shape = x.size()[:-2] + (x.size(-2) * x.size(-1),)
+        return x.view(*new_x_shape)  # (batch, seq_length, features)
+
+    def forward(self, list_of_inputs, dropout_keep_prob=1., make_ar_mask=True, layer_past=None,
+                source_mask=None, target_mask=None):
+        x = self.c_attn(list_of_inputs)
+        ones_mask = make_tensor(np.ones((1, x.size(0), x.size(0))).astype('uint8'), device=self.device, dtype=self.dtype)
+        partial_mask = ones_mask
+        if target_mask is not None:
+            # could make this more generic by having a target list and source list...)(
+            partial_mask = partial_mask * target_mask.transpose(1, 0).int()[..., None]
+        if source_mask is not None:
+            partial_mask = partial_mask * source_mask.transpose(1, 0).int()[:, None, :]
+        if make_ar_mask:
+            ar_mask_tensor = self._subsequent_mask(x.size(0))
+            mask_tensor = ar_mask_tensor * partial_mask
+        # mask tensor of batch, target_length, source_length
+        query, key, value = x.split(self.split_size, dim=-1)
+        query = self._split_heads(query)
+        key = self._split_heads(key, k=True)
+        value = self._split_heads(value)
+        if layer_past is not None:
+           ##past_key, past_value = layer_past[0].transpose(-2, -1), layer_past[1]
+           past_key, past_value = layer_past[0], layer_past[1]
+           print("past key")
+           from IPython import embed; embed(); raise ValueError()
+           key = torch.cat((past_key, key), dim=-1)
+           value = torch.cat((past_value, value), dim=-2)
+        # form current attention values to pass
+        present = (key, value)
+        #present = torch.stack((key.transpose(-2, -1), value))  # transpose to have same shapes for stacking
+        a, probs = self._attn(query, key, value, dropout_keep_prob=dropout_keep_prob, mask_tensor=mask_tensor)
+        a = self._merge_heads(a)
+        #  batch, seq_length, features -> seq_length, batch, features
+        a = a.permute(1, 0, 2)
+        a = self.c_proj([a])
+        return a, present
+
+
+class BasicTransformerBlock(torch.nn.Module):
+    #https://github.com/graykode/gpt-2-Pytorch/blob/master/GPT2/model.py
+    #https://github.com/scpark20/Music-GPT-2/blob/master/Music-GPT-2.ipynb
+    #https://mlexplained.com/2019/07/04/building-the-transformer-xl-from-scratch/
+    def __init__(self,
+                 list_of_input_dims,
+                 context_length,
+                 n_attention_heads=8,
+                 name=None,
+                 strict=None,
+                 random_state=None,
+                 dtype="default",
+                 device="default"):
+        super(BasicTransformerBlock, self).__init__()
+
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("must pass instance of np.random.RandomState!")
+
+        input_dim = sum(list_of_input_dims)
+        ln_1_name = name + "_transformer_block_layer_norm_1"
+        self.ln_1 = LayerNorm(input_dim, name=ln_1_name,
+                              dtype=dtype, device=device)
+
+        attention_name = name + "_transformer_block_self_attention"
+        self.attn = TransformerSelfAttention([input_dim],
+                                             context_length=context_length,
+                                             n_attention_heads=n_attention_heads,
+                                             name=attention_name,
+                                             dtype=dtype,
+                                             device=device,
+                                             random_state=random_state)
+
+        ln_2_name = name + "_transformer_block_layer_norm_2"
+        self.ln_2 = LayerNorm(input_dim, name=ln_2_name,
+                              dtype=dtype, device=device)
+
+        mlp_name = name + "_transformer_block_mlp"
+        self.mlp = TransformerMLP([input_dim],
+                                  4 * input_dim,
+                                  name=mlp_name,
+                                  dtype=dtype,
+                                  device=device,
+                                  random_state=random_state)
+
+    def forward(self, list_of_inputs, source_mask=None, target_mask=None, layer_past=None):
+        inp = torch.cat(list_of_inputs)
+        a, present = self.attn([self.ln_1(inp)], layer_past=layer_past, source_mask=source_mask, target_mask=target_mask)
+        inp = inp + a
+        m = self.mlp([self.ln_2(inp)])
+        inp = inp + m
+        return inp, present
 
 
 class Linear(torch.nn.Module):
@@ -611,7 +910,6 @@ class Linear(torch.nn.Module):
                  list_of_input_dims,
                  output_dim,
                  random_state=None,
-                 config=None,
                  name=None,
                  init=None,
                  scale="default",
@@ -622,12 +920,9 @@ class Linear(torch.nn.Module):
                  dtype="default",
                  device="default"):
         super(Linear, self).__init__()
-        if config is not None:
-            print("config setup {}!".format(self.__class__.__name__))
-            from IPython import embed; embed(); raise ValueError()
 
         if random_state is None:
-            raise ValueError("Must pass instance of np.random.RandomState!")
+            raise ValueError("must pass instance of np.random.RandomState!")
         input_dim = sum(list_of_input_dims)
 
         if name is None:
@@ -662,6 +957,7 @@ class Linear(torch.nn.Module):
         except NameError:
             weight = make_tensor(weight_values, dtype=dtype, device=device)
             _set_shared(name_w, weight)
+
         self.weight = torch.nn.Parameter(weight)
         self.biases = None
 
@@ -695,70 +991,6 @@ class Linear(torch.nn.Module):
             out = out + self.biases
         return out
 
-"""
-def Linear(list_of_inputs, list_of_input_dims, output_dim, random_state=None,
-           name=None, init=None, scale="default", biases=True, bias_offset=0.,
-           dropout_flag_prob_keep=None, strict=None, dtype="default", device="default"):
-    if random_state is None:
-        raise ValueError("Must pass instance of np.random.RandomState!")
-    nd = _ndim(list_of_inputs[0])
-    input_var = torch.cat(list_of_inputs, dim=nd - 1)
-    input_dim = sum(list_of_input_dims)
-
-    if name is None:
-        name = _get_name()
-
-    name_w = name + "_linear_w"
-    name_b = name + "_linear_b"
-    name_out = name + "_linear_out"
-
-    if init is None or type(init) is str:
-        #logger.info("Linear layer {} initialized using init {}".format(name, init))
-        weight_values, = make_numpy_weights(input_dim, [output_dim],
-                                            random_state=random_state,
-                                            init=init, scale=scale, name=name_w)
-    else:
-        # rely on announcement from parent class
-        weight_values=init[0]
-
-
-    if strict is None:
-        strict = get_strict_mode_default()
-
-    if strict:
-        cur_defs = get_params_dict()
-        if name_w in cur_defs:
-            raise ValueError("Name {} already created in params dict!".format(name_w))
-
-        if name_b in cur_defs:
-            raise ValueError("Name {} already created in params dict!".format(name_b))
-
-    try:
-        weight = _get_shared(name_w)
-    except NameError:
-        weight = make_tensor(weight_values, dtype=dtype, device=device)
-        _set_shared(name_w, weight)
-
-    if dropout_flag_prob_keep is not None:
-        # no seed set here, it might not be repeatable
-        input_var = torch.nn.functional.dropout(input_var, p=1. - dropout_flag_prob_keep, inplace=False)
-
-    out = dot(input_var, weight)
-
-    if biases:
-        if (init is None) or (type(init) is str):
-            b, = make_numpy_biases([output_dim], name=name_b)
-        else:
-            b = init[1]
-        b = b + bias_offset
-        try:
-            biases = _get_shared(name_b)
-        except NameError:
-            biases = make_tensor(b, dtype=dtype, device=device)
-            _set_shared(name_b, biases)
-        out = out + biases
-    return out
-"""
 
 class Conv2d(torch.nn.Module):
     def __init__(self,
@@ -773,14 +1005,9 @@ class Conv2d(torch.nn.Module):
                  init=None, scale="default",
                  biases=True, bias_offset=0.,
                  name=None,
-                 config=None,
                  random_state=None, strict=None,
                  dtype="default", device="default"):
         super(Conv2d, self).__init__()
-
-        if config is not None:
-            print("config setup {}!".format(self.__class__.__name__))
-            from IPython import embed; embed(); raise ValueError()
 
         if strides != [1, 1]:
             raise ValueError("Alternate strides not yet supported in conv2d")
@@ -993,180 +1220,6 @@ class Conv2d(torch.nn.Module):
         return out
 
 
-'''
-def Conv2d(list_of_inputs, list_of_input_dims, num_feature_maps,
-           kernel_size=(3, 3),
-           dilation=[1, 1],
-           strides=[1, 1],
-           border_mode="same",
-           custom_weight_mask=None,
-           init=None, scale="default",
-           biases=True, bias_offset=0.,
-           name=None, random_state=None, strict=None,
-           dtype="default", device="default"):
-    if strides != [1, 1]:
-        raise ValueError("Alternate strides not yet supported in conv2d")
-    if dilation != [1, 1]:
-        raise ValueError("Alternate dilation not yet supported in conv2d")
-    # kernel is H, W
-    # input assumption is N C H W
-    if name is None:
-        name = _get_name()
-
-    if random_state is None:
-        raise ValueError("Must pass instance of np.random.RandomState!")
-
-    if strides != [1, 1]:
-        if hasattr(strides, "__len__") and len(strides) == 2:
-            pass
-        else:
-            try:
-                int(strides)
-                strides = [int(strides), int(strides)]
-            except:
-                raise ValueError("Changing strides by non-int not yet supported")
-
-    if dilation != [1, 1]:
-        raise ValueError("Changing dilation not yet supported")
-
-    input_t = torch.cat(list_of_inputs, dim=-1)
-    input_channels = sum(list_of_input_dims)
-    input_height = _shape(input_t)[2]
-    input_width = _shape(input_t)[3]
-
-    if type(name) is str:
-        name_w = name + "_conv2d_w"
-        name_b = name + "_conv2d_b"
-        name_out = name + "_conv2d_out"
-        name_mask = name + "_conv2d_mask"
-
-    if strict is None:
-        strict = get_strict_mode_default()
-
-    if strict:
-        cur_defs = get_params_dict()
-        if name_w in cur_defs:
-            raise ValueError("Name {} already created in params dict!".format(name_w))
-
-        if name_b in cur_defs:
-            raise ValueError("Name {} already created in params dict!".format(name_b))
-
-    if init is None or type(init) is str:
-        weight_values, = make_numpy_weights((input_channels, input_width, input_height),
-                                            [(num_feature_maps, kernel_size[0], kernel_size[1])],
-                                            init=init,
-                                            scale=scale,
-                                            random_state=random_state, name=name_w)
-    else:
-        weight_values = init[0]
-        name_w = name[0]
-    weight_values = weight_values.transpose(3, 2, 0, 1)
-    #weight_values = weight_values[::-1, ::-1].copy()
-
-    try:
-        weight = _get_shared(name_w)
-    except NameError:
-        weight = make_tensor(weight_values, dtype=dtype, device=device)
-        _set_shared(name_w, weight)
-
-    if custom_weight_mask is not None:
-        """
-        try:
-            mask = _get_shared(name_mask)
-        except NameError:
-            mask = tf.Variable(custom_weight_mask, trainable=False, name=name_mask)
-            _set_shared(name_mask, mask)
-        """
-        raise ValueError("custom_weight_mask not yet implemented in conv")
-        weight = tf.constant(custom_weight_mask) * weight
-
-    # need to custom handle SAME and VALID
-    # rip
-
-    if border_mode == "same":
-        pad = "same"
-    elif border_mode == "valid":
-        pad = "valid"
-    else:
-        pad = border_mode
-        if hasattr(pad, "__len__") and len(pad) == 2:
-            pass
-        else:
-            try:
-                int(pad)
-                strides = [int(strides), int(strides)]
-            except:
-                raise ValueError("Pad must be integer, tuple of integer (hpad, wpad), or string 'same', 'valid'")
-
-    # https://github.com/pytorch/pytorch/issues/3867
-    # credit to @mirceamironenco
-    def conv_outdim(in_dim, padding, ks, stride, dilation):
-        if isinstance(padding, int) or isinstance(padding, tuple):
-            return conv_outdim_general(in_dim, padding, ks, stride, dilation)
-        elif isinstance(padding, str):
-            assert padding in ['same', 'valid']
-            if padding == 'same':
-                return conv_outdim_samepad(in_dim, stride)
-            else:
-                return conv_outdim_general(in_dim, 0, ks, stride, dilation)
-        else:
-            raise TypeError('Padding can be int/tuple or str=same/valid')
-
-    # https://github.com/pytorch/pytorch/issues/3867
-    # credit to @mirceamironenco
-    def conv_outdim_general(in_dim, padding, ks, stride, dilation=1):
-        # See https://arxiv.org/pdf/1603.07285.pdf, eq (15)
-        return ((in_dim + 2 * padding - ks - (ks - 1) * (dilation - 1)) // stride) + 1
-
-    # https://github.com/pytorch/pytorch/issues/3867
-    # credit to @mirceamironenco
-    def conv_outdim_samepad(in_dim, stride):
-        return (in_dim + stride - 1) // stride
-
-    # https://github.com/pytorch/pytorch/issues/3867
-    # credit to @mirceamironenco
-    def pad_same(in_dim, ks, stride, dilation=1):
-        """
-        References:
-              https://github.com/tensorflow/tensorflow/blob/master/tensorflow/core/framework/common_shape_fns.h
-              https://github.com/tensorflow/tensorflow/blob/master/tensorflow/core/framework/common_shape_fns.cc#L21
-        """
-        assert stride > 0
-        assert dilation >= 1
-        effective_ks = (ks - 1) * dilation + 1
-        out_dim = (in_dim + stride - 1) // stride
-        p = max(0, (out_dim - 1) * stride + effective_ks - in_dim)
-
-        padding_before = p // 2
-        padding_after = p - padding_before
-        return padding_before, padding_after
-
-
-    if pad == "same":
-        ph = pad_same(input_t.shape[-2], kernel_size[0], strides[-2], dilation[-2])[0]
-        pw = pad_same(input_t.shape[-1], kernel_size[1], strides[-1], dilation[-1])[0]
-    elif pad == "valid":
-        raise ValueError("valid pad NYI")
-        from IPython import embed; embed(); raise ValueError()
-
-    # NCHW input, weights are out_chan, in_chan, H, W
-    if biases:
-        if (init is None) or (type(init) is str):
-            b, = make_numpy_biases([num_feature_maps], name=name_b)
-        else:
-            b = init[1]
-            name_b = name[1]
-            name_out = name[2]
-        b = b + bias_offset
-        try:
-            biases = _get_shared(name_b)
-        except NameError:
-            biases = make_tensor(b, dtype=dtype, device=device)
-            _set_shared(name_b, biases)
-    out = torch.nn.functional.conv2d(input_t, weight, stride=strides, dilation=dilation, padding=(ph, pw), bias=biases)
-    return out
-'''
-
 class BatchNorm2d(torch.nn.Module):
     def __init__(self,
                  input_dim,
@@ -1176,13 +1229,9 @@ class BatchNorm2d(torch.nn.Module):
                  eps=1E-3,
                  strict=None,
                  name=None,
-                 config=None,
                  dtype="default",
                  device="default"):
         super(BatchNorm2d, self).__init__()
-        if config is not None:
-            print("config setup {}!".format(self.__class__.__name__))
-            from IPython import embed; embed(); raise ValueError()
         # https://r2rt.com/implementing-batch-normalization-in-tensorflow.html
         # NCHW convention
         if name is None:
@@ -1250,67 +1299,6 @@ class BatchNorm2d(torch.nn.Module):
             out = right()
         return out
 
-'''
-def BatchNorm2d(input_tensor, train_test_flag,
-                gamma_init=1., beta_init=0.,
-                decay=0.9,
-                eps=1E-3,
-                strict=None,
-                name=None,
-                dtype="default",
-                device="default"):
-    # https://r2rt.com/implementing-batch-normalization-in-tensorflow.html
-    # NCHW convention
-    if name is None:
-        name = _get_name()
-
-    name_scale = name + "_batchnorm_s"
-    name_beta = name + "_batchnorm_b"
-    name_out = name + "_batchnorm_out"
-    if strict is None:
-        strict = get_strict_mode_default()
-
-    if strict:
-        cur_defs = get_params_dict()
-        if name_scale in cur_defs:
-            raise ValueError("Name {} already created in params dict!".format(name_scale))
-
-        if name_beta in cur_defs:
-            raise ValueError("Name {} already created in params dict!".format(name_beta))
-
-    try:
-        scale = _get_shared(name_scale)
-    except NameError:
-        scale_values = gamma_init * np.ones((input_tensor.shape[1],))
-        scale = make_tensor(scale_values, dtype=dtype, device=device)
-        _set_shared(name_scale, scale)
-
-    try:
-        beta = _get_shared(name_beta)
-    except NameError:
-        # init with ones? it's what I did in TF
-        beta_values = beta_init * np.ones((input_tensor.shape[1],))
-        beta = make_tensor(beta_values, dtype=dtype, device=device)
-        _set_shared(name_beta, beta)
-
-    # https://stackoverflow.com/questions/44887446/pytorch-nn-functional-batch-norm-for-2d-input
-    pop_mean = make_tensor(np.zeros((input_tensor.shape[1],)), dtype=dtype, device=device, requires_grad=False)
-    pop_var = make_tensor(np.ones((input_tensor.shape[1],)), dtype=dtype, device=device, requires_grad=False)
-
-    shp = _shape(input_tensor)
-    def left():
-        return torch.nn.functional.batch_norm(input_tensor, pop_mean, pop_var, weight=scale, bias=beta, momentum=1. - decay, eps=eps, training=True)
-
-    def right():
-        return torch.nn.functional.batch_norm(input_tensor, pop_mean, pop_var, training=False, weight=scale, bias=beta, eps=eps)
-
-    if train_test_flag <= 0.5:
-        out = left()
-    else:
-        out = right()
-    return out
-'''
-
 
 class SequenceConv1dStack(torch.nn.Module):
     def __init__(self,
@@ -1328,15 +1316,10 @@ class SequenceConv1dStack(torch.nn.Module):
                  bias_offset=0.,
                  name=None,
                  random_state=None,
-                 config=None,
                  strict=None,
                  dtype="default",
                  device="default"):
         super(SequenceConv1dStack, self).__init__()
-
-        if config is not None:
-            print("config setup {}!".format(self.__class__.__name__))
-            from IPython import embed; embed(); raise ValueError()
 
         if name is None:
             name = _get_name()
@@ -1409,52 +1392,6 @@ class SequenceConv1dStack(torch.nn.Module):
         post = self.layers[ii + 2][0]([prev_layer])
         return post[:, :, 0].permute(2, 0, 1)
 
-"""
-def SequenceConv1dStack(list_of_inputs, list_of_input_dims, num_feature_maps,
-                        batch_norm_flag,
-                        n_stacks=1,
-                        residual=True,
-                        activation="relu",
-                        kernel_sizes=[(1, 1), (3, 3), (5, 5)],
-                        border_mode="same",
-                        init=None, scale="default",
-                        biases=True, bias_offset=0.,
-                        name=None, random_state=None, strict=None, dtype="default", device="default"):
-    if name is None:
-        name = _get_name()
-
-    # assuming they come in as length, batch, features
-    tlist = [li[:, None].permute((2, 3, 1, 0)) for li in list_of_inputs]
-    # now N C H W, height of 1 (so laid out along width dim)
-
-    c = Conv2d(tlist, list_of_input_dims, len(kernel_sizes) * num_feature_maps,
-               kernel_size=(1, 1),
-               name=name + "_convpre", random_state=random_state,
-               border_mode=border_mode, init=init, scale=scale, biases=biases,
-               bias_offset=bias_offset, strict=strict, dtype=dtype, device=device)
-    prev_layer = c
-    for ii in range(n_stacks):
-        cs = []
-        for jj, ks in enumerate(kernel_sizes):
-            c = Conv2d([prev_layer], [len(kernel_sizes) * num_feature_maps], num_feature_maps,
-                       kernel_size=ks,
-                       name=name + "_conv{}_ks{}".format(ii, jj), random_state=random_state,
-                       border_mode=border_mode, init=init, scale=scale, biases=biases,
-                       bias_offset=bias_offset, strict=strict, dtype=dtype, device=device)
-            cs.append(c)
-        layer = torch.cat(cs, dim=1)
-        # cat along channel axis
-        bn_l = BatchNorm2d(layer, batch_norm_flag, name="bn_conv{}".format(ii), dtype=dtype, device=device)
-        r_l = ReLU(bn_l)
-        prev_layer = prev_layer + r_l
-    post = Conv2d([prev_layer], [len(kernel_sizes) * num_feature_maps], num_feature_maps,
-                   kernel_size=(1, 1),
-                   name=name + "_convpost", random_state=random_state,
-                   border_mode=border_mode, init=init, scale=scale, biases=biases,
-                   bias_offset=bias_offset, strict=strict,
-                   dtype=dtype, device=device)
-    return post[:, :, 0].permute(2, 0, 1)
-"""
 
 class LSTMCell(torch.nn.Module):
     def __init__(self,
@@ -1463,14 +1400,10 @@ class LSTMCell(torch.nn.Module):
                  output_dim=None,
                  input_mask=None,
                  random_state=None,
-                 config=None,
                  name=None, init=None, scale="default",
                  forget_bias=1.,
                  strict=None):
         super(LSTMCell, self).__init__()
-        if config is not None:
-            print("config setup {}!".format(self.__class__.__name__))
-            from IPython import embed; embed(); raise ValueError()
         # cell_dropout should be a value in [0., 1.], or None
         # output is the thing to use in following layers, state is a tuple that feeds into the next call
         if random_state is None:
@@ -1581,201 +1514,16 @@ class LSTMCell(torch.nn.Module):
         return final_out, (h, c)
 
 
-'''
-def LSTMCell(list_of_inputs, list_of_input_dims,
-             previous_hidden, previous_cell,
-             num_units,
-             output_dim=None,
-             input_mask=None,
-             random_state=None,
-             name=None, init=None, scale="default",
-             forget_bias=1.,
-             cell_dropout=None,
-             strict=None):
-    # cell_dropout should be a value in [0., 1.], or None
-    # high value - high prob to keep
-    # low value - low prob to keep
-    # output is the thing to use in following layers, state is a tuple that feeds into the next call
-    if random_state is None:
-        raise ValueError("Must pass random_state")
-
-    print("MAKE IT CLASSY LSTMCELL")
-    from IPython import embed; embed(); raise ValueError()
-    if name is None:
-        name = _get_name()
-
-    input_dim = sum(list_of_input_dims)
-    hidden_dim = 4 * num_units
-
-    if init is None:
-        inp_init = None
-        h_init = None
-        out_init = None
-    elif init == "truncated_normal":
-        inp_init = "truncated_normal"
-        h_init = "truncated_normal"
-        out_init = "truncated_normal"
-    elif init == "glorot_uniform":
-        inp_init = "glorot_uniform"
-        h_init = "glorot_uniform"
-        out_init = "glorot_uniform"
-    elif init == "normal":
-        inp_init = "normal"
-        h_init = "normal"
-        out_init = "normal"
-    else:
-        raise ValueError("Unknown init argument {}".format(init))
-
-    name_proj = name + "_lstm_proj"
-    if _check_initted_cell(name_proj):
-        l_func = _get_initted_cell(name_proj)
-    else:
-        name_w = name + "_lstm_proj_w"
-        name_b = name + "_lstm_proj_b"
-        comb_w_np, = make_numpy_weights(input_dim + num_units, [hidden_dim],
-                                        random_state=random_state,
-                                        init=inp_init, name=name_w)
-        comb_b_np, = make_numpy_biases([hidden_dim], name=name_b)
-
-        logger.info("LSTMCell {} input to hidden initialized using init {}".format(name, inp_init))
-        logger.info("LSTMCell {} hidden to hidden initialized using init {}".format(name, h_init))
-
-    lstm_proj = Linear(list_of_inputs + [ph], list_of_input_dims + [hidden_dim],
-                       hidden_dim,
-                       random_state=random_state,
-                       name=name_proj,
-                       init=(comb_w_np, comb_b_np), strict=strict)
-
-    i = lstm_proj[..., :num_units]
-    j = lstm_proj[..., num_units:2 * num_units]
-    f = lstm_proj[..., 2 * num_units:3 * num_units]
-    o = lstm_proj[..., 3 * num_units:]
-
-    if cell_dropout is not None:
-        pj = torch.nn.functional.dropout(tanh(j), 1. - cell_dropout)
-    else:
-        pj = tanh(j)
-
-    c = sigmoid(f + forget_bias) * pc + sigmoid(i) * pj
-    if input_mask is not None:
-        c = input_mask[:, None] * c + (1. - input_mask[:, None]) * pc
-
-    h = sigmoid(o) * tanh(c)
-    if input_mask is not None:
-        h = input_mask[:, None] * h + (1. - input_mask[:, None]) * h
-
-    print(h.shape)
-    print(c.shape)
-
-    if output_dim is not None:
-        name_out = name + "_lstm_h_to_out",
-        name_out_w = name + "_lstm_h_to_out_w",
-        name_out_b = name + "_lstm_h_to_out_b",
-        h_to_out_w_np, = make_numpy_weights(num_units, [output_dim],
-                                            random_state=random_state,
-                                            init=out_init, name=name_out_w)
-        h_to_out_b_np, = make_numpy_biases([output_dim], name=name_out_b)
-        h_to_out = Linear([h], [num_units], output_dim, random_state=random_state,
-                          name=name_out,
-                          init=(h_to_out_w_np, h_to_out_b_np), strict=strict)
-        final_out = h_to_out
-        #logger.info("LSTMCell {} hidden to output initialized using init {}".format(name, out_init))
-    else:
-        final_out = h
-    return final_out, (h, c)
-'''
-
-
-'''
-def BiLSTMLayer(list_of_inputs, list_of_input_dims,
-                num_units,
-                previous_forward_hidden=None, previous_forward_cell=None,
-                previous_reverse_hidden=None, previous_reverse_cell=None,
-                output_dim=None,
-                input_mask=None,
-                random_state=None,
-                name=None, init=None, scale="default",
-                forget_bias=1.,
-                cell_dropout=None,
-                strict=None):
-    if input_mask is None:
-        raise ValueError("No input mask currently unsupported")
-    if name is None:
-        name = _get_name()
-    name = name + "_bidirlstm_layer"
-    name_proj = name + "_proj"
-    hidden_dim = 4 * num_units
-    in_proj = Linear(list_of_inputs, list_of_input_dims,
-                     hidden_dim,
-                     random_state=random_state,
-                     name=name_proj,
-                     init=init, strict=strict)
-    if previous_forward_hidden == None:
-        h1_f_init = 0. * in_proj[0, :, :num_units]
-    else:
-        h1_f_init = previous_forward_hidden
-    if previous_reverse_hidden == None:
-        h1_b_init = 0. * in_proj[0, :, :num_units]
-    else:
-        h1_b_init = previous_reverse_hidden
-    if previous_forward_cell == None:
-        c1_f_init = 0. * in_proj[0, :, :num_units]
-    else:
-        c1_f_init = previous_forward_cell
-    if previous_reverse_cell == None:
-        c1_b_init = 0. * in_proj[0, :, :num_units]
-    else:
-        c1_b_init = previous_reverse_cell
-
-    def step(inp_t, inp_mask_t,
-             rev_inp_t, rev_inp_mask_t,
-             h1_f_tm1, c1_f_tm1, h1_b_tm1, c1_b_tm1):
-        output, s = LSTMCell([inp_t],
-                             [hidden_dim],
-                             h1_f_tm1, c1_f_tm1,
-                             num_units,
-                             input_mask=inp_mask_t,
-                             random_state=random_state,
-                             cell_dropout=cell_dropout,
-                             name=name + "forward_rnn",
-                             init=init)
-        h1_f_t = s[0]
-        c1_f_t = s[1]
-
-        output, s = LSTMCell([rev_inp_t],
-                             [hidden_dim],
-                             h1_b_tm1, c1_b_tm1,
-                             num_units,
-                             input_mask=rev_inp_mask_t,
-                             random_state=random_state,
-                             cell_dropout=cell_dropout,
-                             name=name + "reverse_rnn",
-                             init=init)
-        h1_b_t = s[0]
-        c1_b_t = s[1]
-        return h1_f_t, c1_f_t, h1_b_t, c1_b_t
-
-    r = scan(step,
-             [in_proj, input_mask, torch.flip(in_proj, (0,)), torch.flip(input_mask, (0,))],
-             [h1_f_init, c1_f_init, h1_b_init, c1_b_init])
-    return tf.concat([r[0], torch.flip(r[2], (0,))], axis=-1)
-
-'''
-
 class BiLSTMLayer(torch.nn.Module):
     def __init__(self,
                  list_of_input_dims,
                  num_units,
                  output_dim=None,
                  random_state=None,
-                 config=None,
                  name=None, init=None, scale="default",
                  forget_bias=1.,
                  strict=None):
         super(BiLSTMLayer, self).__init__()
-        if config is not None:
-            print("config setup {}!".format(self.__class__.__name__))
-            from IPython import embed; embed(); raise ValueError()
         if name is None:
             name = _get_name()
         name = name + "_bidirlstm_layer"
@@ -1868,18 +1616,15 @@ class GaussianAttentionCell(torch.nn.Module):
                  step_op="exp",
                  cell_type="lstm",
                  name=None,
-                 config=None,
                  random_state=None,
                  strict=None, init=None):
         super(GaussianAttentionCell, self).__init__()
-        if config is not None:
-            print("config setup {}!".format(self.__class__.__name__))
-            from IPython import embed; embed(); raise ValueError()
         #returns w_t, k_t, phi_t, state
         # where state is the state tuple returned by the inner cell_type
 
         if name is None:
             name = _get_name()
+                
         name = name + "_gaussian_attention"
 
         #check = any([len(_shape(si)) != 2 for si in list_of_step_inputs])
@@ -1991,3 +1736,53 @@ class GaussianAttentionCell(torch.nn.Module):
         phi_t = phi_t[:, 0]
         w_t = w_t[:, 0]
         return w_t, k_t, phi_t, state
+
+
+class CategoricalCrossEntropy(torch.nn.Module):
+    """
+    Multinomial negative log likelihood of predicted compared to one hot
+    true_values
+
+    Arguments to forward 
+    prediction : tensor, shape 2D or 3D
+        The predicted class probabilities out of some layer,
+        normally the output of softmax_layer
+
+    targets : tensor, shape 2D or 3D
+        One hot ground truth values. Must be the same shape as
+        predicted_values. One hot representations can be achieved using
+        dagbldr.utils.convert_to_one_hot
+    eps : float, default 0
+        Epsilon to be added during log calculation to avoid NaN values.
+
+    Returns
+    -------
+    categorical_crossentropy : tensor, shape predicted_values.shape[1:]
+        The cost per sample, or per sample per step if 3D
+    """
+    def __init__(self):
+        super(CategoricalCrossEntropy, self).__init__()
+
+    def forward(self, prediction, target, eps=0.):
+        if target.size(-1) != 1:
+            raise ValueError("Last dimension of target must be 1")
+
+        if len(prediction.size()) != len(target.size()):
+            raise ValueError("prediction and target must have the same number of dimensions! Got dimensions {} and {}".format(prediction.shape, target.shape))
+        if len(prediction.size()) not in [2, 3]:
+            raise ValueError("CategoricalCrossEntropy only supports 2D or 3D inputs, got prediction size {}".format(prediction.size()))
+
+        if len(target.size()) not in [2, 3]:
+            raise ValueError("CategoricalCrossEntropy only supports 2D or 3D inputs, got target size {}".format(target.size()))
+
+        shp = prediction.size()
+        if len(shp) == 3:
+            # seq_length, batch, 1 -> seq_length * batch
+            target_t = target.permute(2, 1, 0).reshape((shp[0] * shp[1],))
+            # seq_length, batch, classes -> seq_length * batch, classes
+            prediction_t = prediction.permute(2, 1, 0).reshape((shp[2], shp[0] * shp[1],)).transpose(1, 0)
+            prediction_c = torch.gather(prediction_t, 1, target_t.long()[..., None])
+            per_step_batch_gathered = prediction_c.reshape((shp[1], shp[0])).transpose(1, 0)
+            return per_step_batch_gathered
+        else:
+            raise ValueError("NYI CategoricalCrossEntropy 2D inputs!")
