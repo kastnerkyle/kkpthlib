@@ -144,6 +144,7 @@ optimizer = torch.optim.Adam(m.parameters(), hp.learning_rate)
 
 def loop(itr, extras, stateful_args):
     piano_roll, mask, clocks = next(itr)
+
     # bump up by 1000 so we can map them all without conflict
     for k in vocab_mapper.keys():
         piano_roll[piano_roll == k] = vocab_mapper[k]
@@ -157,7 +158,9 @@ def loop(itr, extras, stateful_args):
 
     linear_out, past = m(piano_roll[:-1], mask[:-1], clocks)
     prob_out = softmax(linear_out)
+
     loss = loss_fun(prob_out, piano_roll[1:])
+
     loss = (mask[:-1] * loss).sum(dim=0).mean()
     l = loss.cpu().data.numpy()
     optimizer.zero_grad()
@@ -174,5 +177,5 @@ s = {"model": m,
 run_loop(loop, train_itr,
          loop, valid_itr,
          s,
-         n_train_steps_per=10000,
-         n_valid_steps_per=500)
+         n_train_steps_per=1000,
+         n_valid_steps_per=50)
