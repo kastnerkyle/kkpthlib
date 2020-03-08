@@ -6,7 +6,8 @@ import torch
 from torch import nn
 import torch.functional as F
 
-from kkpthlib.datasets import fetch_mnist
+from kkpthlib.datasets import fetch_jsb_chorales
+from kkpthlib.datasets import MusicJSONRasterIterator
 from kkpthlib import Linear
 from kkpthlib import relu
 from kkpthlib import clipping_grad_norm_
@@ -14,16 +15,24 @@ from kkpthlib import ListIterator
 from kkpthlib import run_loop
 from kkpthlib import HParams
 
-mnist = fetch_mnist()
-hp = HParams(input_dim=mnist["data"].shape[-1],
+jsb = fetch_jsb_chorales()
+
+hp = HParams(input_dim=0, #mnist["data"].shape[-1],
              hidden_dim=512,
              out_dim=10,
              use_device="cuda",
              learning_rate=0.0001,
              clip=10.,
-             batch_size=100,
-             n_epochs=100,
+             batch_size=10,
+             max_sequence_length=1000,
              random_seed=2122)
+
+itr = MusicJSONRasterIterator(jsb["files"],
+                              batch_size=hp.batch_size,
+                              max_sequence_length=hp.max_sequence_length,
+                              random_seed=hp.random_seed)
+roll, mask = next(itr)
+from IPython import embed; embed(); raise ValueError()
 
 random_state = np.random.RandomState(hp.random_seed)
 class Model(nn.Module):

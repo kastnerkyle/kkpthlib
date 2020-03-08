@@ -37,7 +37,7 @@ logger = get_logger()
 
 def get_kkpthlib_dataset_dir(dirname=None):
     lookup_dir = os.getenv("KKPTHLIB_DATASETS", os.path.join(
-        os.path.expanduser("~"), "kkpthlib_datasets"))
+        os.path.expanduser("~"), "_kkpthlib_datasets"))
     if not os.path.exists(lookup_dir):
         logger.info("KKPTHLIB_DATASETS directory {} not found, creating".format(lookup_dir))
         os.mkdir(lookup_dir)
