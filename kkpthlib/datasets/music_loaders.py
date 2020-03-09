@@ -165,13 +165,18 @@ def _populate_track_from_data(data):
     return mt
 
 
-def _json_to_midi(json_file, out_name, tempo_factor=.5):
+def music_json_to_midi(json_file, out_name, tempo_factor=.5):
     """
+    string (filepath) or json.dumps object
+
     tempo factor .5, twice as slow
     tempo factor 2, twice as fast
     """
-    with open(json_file) as f:
-        data = json.load(f)
+    if json_file.endswith(".json"):
+        with open(json_file) as f:
+            data = json.load(f)
+    else:
+        data = json.loads(json_file)
     #[u'parts', u'parts_names', u'parts_cumulative_times', u'parts_times']
     #['parts_velocities'] optional
 
@@ -390,5 +395,5 @@ def fetch_jsb_chorales():
     for ex_name in sorted(os.listdir(jsb_dataset_path)):
         print("writing file {}".format(ex_name.replace(".json", "")))
         ex = jsb_dataset_path + os.sep + ex_name
-        _json_to_midi(ex, ex_name.replace(".json", "") + ".mid")
+        music_json_to_midi(ex, ex_name.replace(".json", "") + ".mid")
     """

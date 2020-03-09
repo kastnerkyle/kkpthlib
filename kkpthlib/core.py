@@ -436,7 +436,6 @@ def threaded_html_writer(interp=True, maxsize=25):
 def save_checkpoint(state, filename):
     torch.save(state, filename)
 
-
 def save_model_skeleton(serialization_dict, filename):
     model = serialization_dict["model"]
     optimizer = serialization_dict["optimizer"]
@@ -702,7 +701,7 @@ def run_loop(train_loop_function, train_itr,
         if train_loss < min_last_train_loss:
             min_last_train_loss = train_loss
             logger.info("had best train, step {}".format(train_itr_steps_taken))
-            train_best_model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "train_model"),
+            train_best_model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "train_"),
                                         train_itr_steps_taken)
 
         extras["train"] = False
@@ -801,7 +800,7 @@ def run_loop(train_loop_function, train_itr,
 
         thw.send((save_html_path, results_dict))
 
-        model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "checkpoint_model"),
+        model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "checkpoint_"),
                          train_itr_steps_taken)
 
         if np.isinf(n_steps):
@@ -810,11 +809,11 @@ def run_loop(train_loop_function, train_itr,
         else:
             tmp_n_steps = n_steps
         if train_itr_steps_taken % min(permanent_step_upper_lim, max(permanent_step_lower_lim, int(tmp_n_steps // permanent_models_to_keep))) == 0:
-            perma_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "permanent_model"), train_itr_steps_taken)
+            perma_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "permanent_"), train_itr_steps_taken)
 
         if was_best_valid_loss:
             logger.info("valid saver had best valid, step {}".format(train_itr_steps_taken))
-            valid_best_model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "valid_model"),
+            valid_best_model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "valid_"),
                                         train_itr_steps_taken)
             was_best_valid_loss = False
 

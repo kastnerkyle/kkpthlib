@@ -382,8 +382,8 @@ def softmax(x):
 
 def softmax_np(x):
     # should work for both 2D and 3D
-    e_x = np.exp(x - x.max(dim=-1, keepdims=True))
-    out = e_x / e_x.sum(dim=-1, keepdims=True)
+    e_x = np.exp(x - x.max(axis=-1, keepdims=True))
+    out = e_x / e_x.sum(axis=-1, keepdims=True)
     return out
 
 
@@ -1782,7 +1782,7 @@ class CategoricalCrossEntropy(torch.nn.Module):
             # seq_length, batch, classes -> seq_length * batch, classes
             prediction_t = prediction.permute(2, 1, 0).reshape((shp[2], shp[0] * shp[1],)).transpose(1, 0)
             prediction_c = torch.gather(prediction_t, 1, target_t.long()[..., None])
-            per_step_batch_gathered = prediction_c.reshape((shp[1], shp[0])).transpose(1, 0)
+            per_step_batch_gathered = -torch.log(prediction_c.reshape((shp[1], shp[0])).transpose(1, 0))
             return per_step_batch_gathered
         else:
             raise ValueError("NYI CategoricalCrossEntropy 2D inputs!")
