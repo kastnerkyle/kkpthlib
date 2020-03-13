@@ -163,9 +163,6 @@ def np_glorot_uniform(shape, random_state, scale=1.):
     shape, tuple of ints or tuple of tuples
         shape of values to initialize
         tuple of ints should be single shape
-        tuple of tuples is primarily for convnets and should be of form
-        ((n_in_kernels, kernel_width, kernel_height),
-         (n_out_kernels, kernel_width, kernel_height))
     random_state, numpy.random.RandomState() object
     scale, float (default 1.)
         default of 1. results in uniform random values
@@ -175,8 +172,13 @@ def np_glorot_uniform(shape, random_state, scale=1.):
     initialized_scaled, array-like
         Array-like of random values the same size as shape parameter
     """
-    shp = shape
-    kern_sum = sum(shp)
+    if type(shape[0]) is tuple:
+        from IPython import embed; embed(); raise ValueError()
+        shp = (shape[1][0], shape[0][0]) + shape[1][1:]
+        flat_shp = (shp[0], np.prod(shp[1:]))
+    else:
+        shp = shape
+        kern_sum = sum(shp)
     bound = scale * np.sqrt(6. / float(kern_sum))
     return random_state.uniform(low=-bound, high=bound, size=shp).astype(
         "float32")
@@ -233,6 +235,23 @@ def make_numpy_weights(in_dim, out_dims, random_state, init=None,
     blah, = make_weights(...)
     or
     [blah] = make_weights(...)
+
+    linear example:
+            weight_values, = make_numpy_weights(input_dim, [output_dim],
+                                                random_state=random_state,
+                                                init=init, scale=scale, name=name_w)
+
+    conv example:
+            shape usually constructed internally as:
+            shp = (shape[1][0], shape[0][0]) + shape[1][1:]
+
+            weight_values, = make_numpy_weights((input_channels, input_width, input_height),
+                                                [(num_feature_maps, kernel_size[0], kernel_size[1])],
+                                                init=init,
+                                                scale=scale,
+                                                random_state=random_state, name=name_w)
+
+            this means input_width, input_height are ignored for most initializers
     """
     ff = [None] * len(out_dims)
     fs = [scale] * len(out_dims)
@@ -834,7 +853,7 @@ class TransformerSelfAttention(torch.nn.Module):
         if layer_past is not None:
            ##past_key, past_value = layer_past[0].transpose(-2, -1), layer_past[1]
            past_key, past_value = layer_past[0], layer_past[1]
-           print("past key")
+           print("past basica attention key")
            from IPython import embed; embed(); raise ValueError()
            key = torch.cat((past_key, key), dim=-1)
            value = torch.cat((past_value, value), dim=-2)
@@ -889,6 +908,248 @@ class BasicTransformerBlock(torch.nn.Module):
                               dtype=dtype, device=device)
 
         mlp_name = name + "_transformer_block_mlp"
+        self.mlp = TransformerMLP([input_dim],
+                                  4 * input_dim,
+                                  name=mlp_name,
+                                  dtype=dtype,
+                                  device=device,
+                                  random_state=random_state)
+
+    def forward(self, list_of_inputs, source_mask=None, target_mask=None, layer_past=None):
+        inp = torch.cat(list_of_inputs)
+        a, present = self.attn([self.ln_1(inp)], layer_past=layer_past, source_mask=source_mask, target_mask=target_mask)
+        inp = inp + a
+        m = self.mlp([self.ln_2(inp)])
+        inp = inp + m
+        return inp, present
+
+
+class RelativeTransformerSelfAttention(torch.nn.Module):
+    # https://github.com/scpark20/Music-GPT-2/blob/master/Music-GPT-2.ipynb
+    def __init__(self,
+                 list_of_input_dims,
+                 context_length,
+                 n_attention_heads,
+                 scale_attention=True,
+                 name=None,
+                 strict=None,
+                 random_state=None,
+                 init=None,
+                 scale="default",
+                 dtype="default",
+                 device="default"):
+        super(RelativeTransformerSelfAttention, self).__init__()
+
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("must pass instance of np.random.RandomState!")
+
+        input_dim = sum(list_of_input_dims)
+
+        if input_dim % n_attention_heads != 0:
+            raise ValueError("input_dim % n_attention heads must be 0!")
+
+        if strict is None:
+            strict = get_strict_mode_default()
+
+        self.input_dim = input_dim
+        self.context_length = context_length
+        self.n_attention_heads = n_attention_heads
+        self.scale_attention = scale_attention
+        self.split_size = input_dim
+        self.random_state = random_state
+        self.device = device
+        self.dtype = dtype
+
+        conv_attn_name = name + "_relative_transformer_self_attention_conv_attn"
+        conv_proj_name = name + "_relative_transformer_self_attention_conv_proj"
+        embedding_w = name + "_relative_transformer_self_attention_relative_embedding"
+
+        embedding_shp = (self.n_attention_heads, self.context_length, input_dim // self.n_attention_heads)
+        if init is None or type(init) is str:
+            weight_values, = make_numpy_weights((embedding_shp[1], 1, 1),
+                                                [(embedding_shp[0], 1, embedding_shp[2])],
+                                                random_state=random_state,
+                                                init=init,
+                                                scale=scale,
+                                                name=embedding_w)
+            # trim it up since we used "convolutional" initializers
+            weight_values = weight_values[0].transpose(2, 1, 0)
+        else:
+            # rely on announcement from parent class
+            weight_values=init[0]
+
+        if strict is None:
+            strict = get_strict_mode_default()
+
+        if strict:
+            cur_defs = get_params_dict()
+            if embedding_w in cur_defs:
+                raise ValueError("Name {} already created in params dict!".format(name_w))
+
+        try:
+            weight = _get_shared(embedding_w)
+        except NameError:
+            weight = make_tensor(weight_values, dtype=dtype, device=device)
+            _set_shared(embedding_w, weight)
+
+        self.embedding = torch.nn.Parameter(weight)
+        # [self.n_attention_heads, self.context_length, input_dim // self.n_attention_heads]
+
+        self.c_attn = TransformerConv1d([input_dim], input_dim * 3,
+                                        random_state=random_state,
+                                        name=conv_attn_name,
+                                        device=device,
+                                        dtype=dtype)
+
+        self.c_proj = TransformerConv1d([input_dim], input_dim,
+                                        random_state=random_state,
+                                        name=conv_proj_name,
+                                        device=device,
+                                        dtype=dtype)
+
+    def _relative_attn(self, q):
+        # q [batch, heads, sequence, features]
+        batch, heads, sequence, features = q.shape
+        # e [heads, sequence, features]
+        # slice the embedding to match CURRENT sequence size
+        # not sure if should be backwards slice, or forward - or if it even matters
+        E = self.embedding[:, -sequence:]
+        # [heads, batch, sequence, features]
+        q_ = q.permute(1, 0, 2, 3)
+        # [heads, batch * sequence, features]
+        q_ = q_.reshape((heads, batch * sequence, features))
+        # [heads, batch * sequence, sequence]
+        rel = torch.matmul(q_, E.transpose(2, 1))
+        # [heads, batch, sequence, sequence]
+        rel = rel.reshape((heads, batch, sequence, sequence))
+        # [heads, batch, sequence, 1+sequence]
+        rel = F.pad(rel, (1, 0))
+        # [heads, batch, sequence+1, sequence]
+        rel = rel.reshape((heads, batch, sequence + 1, sequence))
+        # [heads, batch, sequence, sequence]
+        rel = rel[:, :, 1:]
+        # [batch, heads, sequence, sequence]
+        rel = rel.permute((1, 0, 2, 3))
+        return rel
+
+    def _attn(self, q, k, v, dropout_keep_prob=1., mask_tensor=None, mask_fill=-1E-9):
+        dropout = 1. - dropout_keep_prob
+        # mask tensor of batch, target_length, source_length
+        # q of torch.Size([10, 8, 1000, 24])
+        # q of batch, head, seq_length, head_features
+        # k of batch, head, head_features, seq_length
+        # v of batch, head, seq_length, head_features
+        scores = torch.matmul(q, k) # w of batch, head, seq_length, seq_length
+        scores = scores + self._relative_attn(q)
+        if self.scale_attention:
+            scores = scores / math.sqrt(v.size(-1))
+        if mask_tensor is not None:
+            scores = scores.masked_fill(mask_tensor[:, None] == 0, mask_fill)
+        p_attn = F.softmax(scores, dim=-1)
+        p_attn = F.dropout(p_attn, p=dropout)
+        return torch.matmul(scores, v), p_attn
+
+    def _subsequent_mask(self, size):
+        attn_shape = (1, size, size)
+        subsequent_mask = np.triu(np.ones(attn_shape), k=1).astype('uint8')
+        base_mask = make_tensor(subsequent_mask, device=self.device, dtype=self.dtype) == 0
+        return base_mask
+
+    def _split_heads(self, x, k=False):
+        # in - seq_length, batch, features
+        new_x_shape = x.size()[:-1] + (self.n_attention_heads, x.size(-1) // self.n_attention_heads)
+        x = x.view(*new_x_shape)  # (seq_length, batch, head, head_features
+        if k:
+            return x.permute(1, 2, 3, 0) # (batch, head, head_features, seq_length)
+        else:
+            return x.permute(1, 2, 0, 3) # (batch, head, seq_length, head_features)
+
+    def _merge_heads(self, x):
+        # in x, (batch, head, seq_length, head_features)
+        x = x.permute(0, 2, 1, 3).contiguous()
+        # now, (batch, seq_length, head, head_features)
+        new_x_shape = x.size()[:-2] + (x.size(-2) * x.size(-1),)
+        return x.view(*new_x_shape)  # (batch, seq_length, features)
+
+    def forward(self, list_of_inputs, dropout_keep_prob=1., make_ar_mask=True, layer_past=None,
+                source_mask=None, target_mask=None):
+        x = self.c_attn(list_of_inputs)
+        ones_mask = make_tensor(np.ones((1, x.size(0), x.size(0))).astype('uint8'), device=self.device, dtype=self.dtype)
+        partial_mask = ones_mask
+        if target_mask is not None:
+            # could make this more generic by having a target list and source list...)(
+            partial_mask = partial_mask * target_mask.transpose(1, 0).int()[..., None]
+        if source_mask is not None:
+            partial_mask = partial_mask * source_mask.transpose(1, 0).int()[:, None, :]
+        if make_ar_mask:
+            ar_mask_tensor = self._subsequent_mask(x.size(0))
+            mask_tensor = ar_mask_tensor * partial_mask
+        # mask tensor of batch, target_length, source_length
+        query, key, value = x.split(self.split_size, dim=-1)
+        query = self._split_heads(query)
+        key = self._split_heads(key, k=True)
+        value = self._split_heads(value)
+        if layer_past is not None:
+           ##past_key, past_value = layer_past[0].transpose(-2, -1), layer_past[1]
+           past_key, past_value = layer_past[0], layer_past[1]
+           print("past relative attention key")
+           from IPython import embed; embed(); raise ValueError()
+           key = torch.cat((past_key, key), dim=-1)
+           value = torch.cat((past_value, value), dim=-2)
+        # form current attention values to pass
+        present = (key, value)
+        #present = torch.stack((key.transpose(-2, -1), value))  # transpose to have same shapes for stacking
+        a, probs = self._attn(query, key, value, dropout_keep_prob=dropout_keep_prob, mask_tensor=mask_tensor)
+        a = self._merge_heads(a)
+        #  batch, seq_length, features -> seq_length, batch, features
+        a = a.permute(1, 0, 2)
+        a = self.c_proj([a])
+        return a, present
+
+
+class RelativeTransformerBlock(torch.nn.Module):
+    #https://github.com/graykode/gpt-2-Pytorch/blob/master/GPT2/model.py
+    #https://github.com/scpark20/Music-GPT-2/blob/master/Music-GPT-2.ipynb
+    #https://mlexplained.com/2019/07/04/building-the-transformer-xl-from-scratch/
+    def __init__(self,
+                 list_of_input_dims,
+                 context_length,
+                 n_attention_heads=8,
+                 name=None,
+                 strict=None,
+                 random_state=None,
+                 dtype="default",
+                 device="default"):
+        super(RelativeTransformerBlock, self).__init__()
+
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("must pass instance of np.random.RandomState!")
+
+        input_dim = sum(list_of_input_dims)
+        ln_1_name = name + "_relative_transformer_block_layer_norm_1"
+        self.ln_1 = LayerNorm(input_dim, name=ln_1_name,
+                              dtype=dtype, device=device)
+
+        attention_name = name + "_relative_transformer_block_self_attention"
+        self.attn = RelativeTransformerSelfAttention([input_dim],
+                                                     context_length=context_length,
+                                                     n_attention_heads=n_attention_heads,
+                                                     name=attention_name,
+                                                     dtype=dtype,
+                                                     device=device,
+                                                     random_state=random_state)
+
+        ln_2_name = name + "_relative_transformer_block_layer_norm_2"
+        self.ln_2 = LayerNorm(input_dim, name=ln_2_name,
+                              dtype=dtype, device=device)
+
+        mlp_name = name + "_relative_transformer_block_mlp"
         self.mlp = TransformerMLP([input_dim],
                                   4 * input_dim,
                                   name=mlp_name,

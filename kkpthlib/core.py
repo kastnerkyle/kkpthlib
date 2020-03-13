@@ -242,16 +242,14 @@ def get_resource_dir(name):
 
 
 def zip_dir(src, dst):
-    print("zip_dir not yet usable")
-    raise ValueError()
     zf = zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED)
     abs_src = os.path.abspath(src)
-    exclude_exts = [".js", ".pyc", ".html", ".txt", ".csv", ".gz"]
+    exclude_exts = [".js", ".pyc", ".html", ".txt", ".csv", ".gz", ".swp"]
     for root, dirs, files in os.walk(src):
         for fname in files:
             if all([e not in fname for e in exclude_exts]):
                 absname = os.path.abspath(os.path.join(root, fname))
-                arcname = "tfbldr" + os.sep + absname[len(abs_src) + 1:]
+                arcname = "kkpthlib" + os.sep + absname[len(abs_src) + 1:]
                 zf.write(absname, arcname)
     zf.close()
 
@@ -262,12 +260,29 @@ def archive_code():
     save_script_path = checkpoint_dir + os.path.sep + get_script() + ".py"
     script_name = get_script() + ".py"
     script_location = os.path.abspath(script_name)
+
+    code_snapshot_dir = checkpoint_dir + os.path.sep + "code_snapshot"
+    if not os.path.exists(code_snapshot_dir):
+        os.mkdir(code_snapshot_dir)
+
+    # find first occurence of "kkpthlib", should be the name of the library itself
+    lib_root_idx = [n for n, ch in enumerate(script_location.split(os.sep)) if ch == "kkpthlib"]
+
+    if len(lib_root_idx) < 1:
+        logger.info("WARNING: Saving code expects the github repo to be in a folder named 'kkpthlib' - if you changed the root folder name on cloning this will need fixing!!!")
+    lib_root_idx = lib_root_idx[0]
+    # kkpthlib/kkpthlib is the root of the true library itself
+    parts = script_location.split(os.sep)[:(lib_root_idx + 1)] + ['kkpthlib']
+    lib_dir = str(os.sep).join(parts)
+    save_lib_path = code_snapshot_dir + os.path.sep + "kkpthlib_archive.zip"
+
     existing_reports = glob.glob(os.path.join(checkpoint_dir, "*.html"))
     empty = len(existing_reports) == 0
 
     if not os.path.exists(save_script_path) or empty:
-        logger.info("Saving script file to {}".format(checkpoint_dir))
+        logger.info("Saving script file and library to {}".format(checkpoint_dir))
         shutil.copy2(script_location, save_script_path)
+        zip_dir(lib_dir, save_lib_path)
 
 
 def coroutine(func):

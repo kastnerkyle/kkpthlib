@@ -50,17 +50,18 @@ m_dict = torch.load("model_checkpoint.pth", map_location=hp.use_device)
 m.load_state_dict(m_dict)
 
 # just use it for the clocks for now, eventually will need to generate
-piano_roll, mask, clocks = next(fake_itr)
+_, mask, clocks = next(fake_itr)
 # set mask to all 1s
 mask = 0. * mask + 1.
 
 # 16 0s to represent 4 blank *start* bars
 true_piano_roll = np.zeros((16, hp.batch_size, 1))
 sampling_random_state = np.random.RandomState(13)
-steps = 1000
+steps = 984
 assert steps % 4 == 0
+assert steps - len(true_piano_roll) <= 1000
 for t in range(steps):
-    print("sampling_step {}".format(t))
+    print("sampling step {} / {}".format(t, steps))
     piano_roll = copy.deepcopy(true_piano_roll)
     for k in vocab_mapper.keys():
         piano_roll[piano_roll == k] = vocab_mapper[k]
@@ -114,9 +115,12 @@ def convert_voice_roll_to_pitch_duration(voice_roll, duration_step=.25):
                 note_held = token - 100
             elif token != 0:
                 if token != note_held:
-                    print("got non onset, non contiguous continuation token")
-                    from IPython import embed; embed(); raise ValueError()
-                ongoing_duration += duration_step
+                    # make it an onset?
+                    print("WARNING: got non-onset pitch change, forcing onset token at step {}, voice {}".format(t, v))
+                    note_held = token
+                    ongoing_duration = duration_step
+                else:
+                    ongoing_duration += duration_step
             else:
                 # just adding 16th note silences?
                 ongoing_duration = duration_step
@@ -142,4 +146,6 @@ if not os.path.exists(midi_sample_dir):
 for mb in range(true_piano_roll.shape[1]):
     reshaped_voice_roll = true_piano_roll[:, mb].ravel().reshape(true_piano_roll.shape[0] // 4, 4).transpose(1, 0)
     data = convert_voice_roll_to_pitch_duration(reshaped_voice_roll)
-    music_json_to_midi(data, midi_sample_dir + os.sep + "temp{}.midi".format(mb))
+    fpath = midi_sample_dir + os.sep + "temp{}.midi".format(mb)
+    music_json_to_midi(data, fpath)
+    print("wrote out {}".format(fpath))

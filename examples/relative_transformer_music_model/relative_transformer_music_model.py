@@ -20,7 +20,7 @@ from kkpthlib import run_loop
 from kkpthlib import HParams
 from kkpthlib import get_logger
 
-from kkpthlib import BasicTransformerBlock
+from kkpthlib import RelativeTransformerBlock
 
 jsb = fetch_jsb_chorales()
 
@@ -93,7 +93,7 @@ def build_model(hp):
                                              name="token_embed",
                                              device=hp.use_device)
             combined_dim = len(hp.clocks) * hp.clock_embed_dim + hp.token_embed_dim
-            self.blocks = nn.ModuleList([BasicTransformerBlock([combined_dim],
+            self.blocks = nn.ModuleList([RelativeTransformerBlock([combined_dim],
                                                hp.max_sequence_length,
                                                random_state=random_state,
                                                name="block_{}".format(i),
