@@ -1043,7 +1043,8 @@ class RelativeTransformerSelfAttention(torch.nn.Module):
         # k of batch, head, head_features, seq_length
         # v of batch, head, seq_length, head_features
         scores = torch.matmul(q, k) # w of batch, head, seq_length, seq_length
-        scores = scores + self._relative_attn(q)
+        r_a = self._relative_attn(q)
+        scores = scores + r_a
         if self.scale_attention:
             scores = scores / math.sqrt(v.size(-1))
         if mask_tensor is not None:
@@ -1093,12 +1094,12 @@ class RelativeTransformerSelfAttention(torch.nn.Module):
         key = self._split_heads(key, k=True)
         value = self._split_heads(value)
         if layer_past is not None:
+           raise ValueError("stateful sampling for relative attention not currently supported!")
            ##past_key, past_value = layer_past[0].transpose(-2, -1), layer_past[1]
-           past_key, past_value = layer_past[0], layer_past[1]
-           print("past relative attention key")
-           from IPython import embed; embed(); raise ValueError()
-           key = torch.cat((past_key, key), dim=-1)
-           value = torch.cat((past_value, value), dim=-2)
+        #   past_key, past_value = layer_past[0], layer_past[1]
+           ##print("past relative attention key")
+        #   key = torch.cat((past_key, key), dim=-1)
+        #   value = torch.cat((past_value, value), dim=-2)
         # form current attention values to pass
         present = (key, value)
         #present = torch.stack((key.transpose(-2, -1), value))  # transpose to have same shapes for stacking

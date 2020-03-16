@@ -117,7 +117,14 @@ def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
     return dataset_path
 
 
-def _populate_track_from_data(data):
+def _populate_track_from_data(data, instrument=None):
+    """
+    example program change
+    https://github.com/cuthbertLab/music21/blob/a78617291ed0aeb6595c71f82c5d398ebe604ef4/music21/midi/__init__.py
+    >>> me2 = midi.MidiEvent(mt)
+    >>> rem = me2.parseChannelVoiceMessage(to_bytes([0xC0, 71]))
+    # program change to instrument 71
+    """
     mt = MidiTrack(1)
     t = 0
     tLast = 0

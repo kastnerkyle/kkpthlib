@@ -125,7 +125,7 @@ def build_model(hp):
             presents = []
             assert len(self.blocks) == len(past)
             for block, layer_past in zip(self.blocks, past):
-                hidden_states, present = block([hidden_states], source_mask=x_mask, target_mask=x_mask)
+                hidden_states, present = block([hidden_states], source_mask=x_mask, target_mask=x_mask, layer_past=layer_past)
                 presents.append(present)
             hidden_states = self.ln(hidden_states)
             o = self.out_proj([hidden_states])
