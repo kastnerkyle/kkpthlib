@@ -5,6 +5,7 @@ from scipy.stats import truncnorm
 import math
 
 import torch.nn.functional as F
+from torch import nn
 
 from .hparams import HParams
 
@@ -702,6 +703,7 @@ class TransformerMLP(torch.nn.Module):
     def __init__(self,
                  list_of_input_dims,
                  output_dim,
+                 dropout_keep_prob=1.,
                  name=None,
                  strict=None,
                  random_state=None,
@@ -724,6 +726,10 @@ class TransformerMLP(torch.nn.Module):
         name_fc = name + "_transformer_mlp_fc"
         name_proj = name + "_transformer_mlp_proj"
 
+        dropout = 1. - dropout_keep_prob
+
+        self.dropout_1 = nn.Dropout(dropout)
+
         self.c_fc = TransformerConv1d([input_dim], output_dim,
                                        random_state=random_state,
                                        name=name_fc,
@@ -738,7 +744,7 @@ class TransformerMLP(torch.nn.Module):
         self.activation_function = activation_function
 
     def forward(self, list_of_inputs):
-        h = self.activation_function(self.c_fc(list_of_inputs))
+        h = self.dropout_1(self.activation_function(self.c_fc(list_of_inputs)))
         h2 = self.c_proj([h])
         return h2
 
@@ -782,6 +788,9 @@ class TransformerSelfAttention(torch.nn.Module):
         conv_attn_name = name + "_transformer_self_attention_conv_attn"
         conv_proj_name = name + "_transformer_self_attention_conv_proj"
 
+        dropout = 1. - dropout_keep_prob
+        self.dropout_1 = nn.Dropout(dropout)
+
         self.c_attn = TransformerConv1d([input_dim], input_dim * 3,
                                         random_state=random_state,
                                         name=conv_attn_name,
@@ -794,8 +803,8 @@ class TransformerSelfAttention(torch.nn.Module):
                                         device=device,
                                         dtype=dtype)
 
-    def _attn(self, q, k, v, dropout_keep_prob=1., mask_tensor=None, mask_fill=-1E-9):
-        dropout = 1. - dropout_keep_prob
+    def _attn(self, q, k, v, dropout=None, mask_tensor=None, mask_fill=-1E-9):
+        #dropout layer input
         # mask tensor of batch, target_length, source_length
         # q of torch.Size([10, 8, 1000, 24])
         # q of batch, head, seq_length, head_features
@@ -807,8 +816,9 @@ class TransformerSelfAttention(torch.nn.Module):
         if mask_tensor is not None:
             scores = scores.masked_fill(mask_tensor[:, None] == 0, mask_fill)
         p_attn = F.softmax(scores, dim=-1)
-        p_attn = F.dropout(p_attn, p=dropout)
-        return torch.matmul(scores, v), p_attn
+        if dropout is not None:
+            p_attn = dropout(p_attn)
+        return torch.matmul(p_attn, v), p_attn
 
     def _subsequent_mask(self, size):
         attn_shape = (1, size, size)
@@ -860,7 +870,7 @@ class TransformerSelfAttention(torch.nn.Module):
         # form current attention values to pass
         present = (key, value)
         #present = torch.stack((key.transpose(-2, -1), value))  # transpose to have same shapes for stacking
-        a, probs = self._attn(query, key, value, dropout_keep_prob=dropout_keep_prob, mask_tensor=mask_tensor)
+        a, probs = self._attn(query, key, value, dropout=self.dropout, mask_tensor=mask_tensor)
         a = self._merge_heads(a)
         #  batch, seq_length, features -> seq_length, batch, features
         a = a.permute(1, 0, 2)
@@ -876,6 +886,7 @@ class BasicTransformerBlock(torch.nn.Module):
                  list_of_input_dims,
                  context_length,
                  n_attention_heads=8,
+                 dropout_keep_prob=1.,
                  name=None,
                  strict=None,
                  random_state=None,
@@ -894,10 +905,16 @@ class BasicTransformerBlock(torch.nn.Module):
         self.ln_1 = LayerNorm(input_dim, name=ln_1_name,
                               dtype=dtype, device=device)
 
+        dropout = 1. - dropout_keep_prob
+
+        self.dropout_1 = nn.Dropout(dropout)
+        self.dropout_2 = nn.Dropout(dropout)
+
         attention_name = name + "_transformer_block_self_attention"
         self.attn = TransformerSelfAttention([input_dim],
                                              context_length=context_length,
                                              n_attention_heads=n_attention_heads,
+                                             dropout_keep_prob=dropout_keep_prob,
                                              name=attention_name,
                                              dtype=dtype,
                                              device=device,
@@ -910,6 +927,7 @@ class BasicTransformerBlock(torch.nn.Module):
         mlp_name = name + "_transformer_block_mlp"
         self.mlp = TransformerMLP([input_dim],
                                   4 * input_dim,
+                                  dropout_keep_prob=dropout_keep_prob,
                                   name=mlp_name,
                                   dtype=dtype,
                                   device=device,
@@ -918,9 +936,9 @@ class BasicTransformerBlock(torch.nn.Module):
     def forward(self, list_of_inputs, source_mask=None, target_mask=None, layer_past=None):
         inp = torch.cat(list_of_inputs)
         a, present = self.attn([self.ln_1(inp)], layer_past=layer_past, source_mask=source_mask, target_mask=target_mask)
-        inp = inp + a
+        inp = inp + self.dropout_1(a)
         m = self.mlp([self.ln_2(inp)])
-        inp = inp + m
+        inp = inp + self.dropout_2(m)
         return inp, present
 
 
@@ -931,6 +949,7 @@ class RelativeTransformerSelfAttention(torch.nn.Module):
                  context_length,
                  n_attention_heads,
                  scale_attention=True,
+                 dropout_keep_prob=1.,
                  name=None,
                  strict=None,
                  random_state=None,
@@ -995,6 +1014,9 @@ class RelativeTransformerSelfAttention(torch.nn.Module):
             weight = make_tensor(weight_values, dtype=dtype, device=device)
             _set_shared(embedding_w, weight)
 
+        dropout = 1. - dropout_keep_prob
+        self.dropout_1 = nn.Dropout(dropout)
+
         self.embedding = torch.nn.Parameter(weight)
         # [self.n_attention_heads, self.context_length, input_dim // self.n_attention_heads]
 
@@ -1035,8 +1057,8 @@ class RelativeTransformerSelfAttention(torch.nn.Module):
         rel = rel.permute((1, 0, 2, 3))
         return rel
 
-    def _attn(self, q, k, v, dropout_keep_prob=1., mask_tensor=None, mask_fill=-1E-9):
-        dropout = 1. - dropout_keep_prob
+    def _attn(self, q, k, v, dropout=None, mask_tensor=None, mask_fill=-1E-9):
+        # dropout LAYER passed in
         # mask tensor of batch, target_length, source_length
         # q of torch.Size([10, 8, 1000, 24])
         # q of batch, head, seq_length, head_features
@@ -1050,8 +1072,9 @@ class RelativeTransformerSelfAttention(torch.nn.Module):
         if mask_tensor is not None:
             scores = scores.masked_fill(mask_tensor[:, None] == 0, mask_fill)
         p_attn = F.softmax(scores, dim=-1)
-        p_attn = F.dropout(p_attn, p=dropout)
-        return torch.matmul(scores, v), p_attn
+        if dropout is not None:
+            p_attn = dropout(p_attn)
+        return torch.matmul(p_attn, v), p_attn
 
     def _subsequent_mask(self, size):
         attn_shape = (1, size, size)
@@ -1075,7 +1098,7 @@ class RelativeTransformerSelfAttention(torch.nn.Module):
         new_x_shape = x.size()[:-2] + (x.size(-2) * x.size(-1),)
         return x.view(*new_x_shape)  # (batch, seq_length, features)
 
-    def forward(self, list_of_inputs, dropout_keep_prob=1., make_ar_mask=True, layer_past=None,
+    def forward(self, list_of_inputs, make_ar_mask=True, layer_past=None,
                 source_mask=None, target_mask=None):
         x = self.c_attn(list_of_inputs)
         ones_mask = make_tensor(np.ones((1, x.size(0), x.size(0))).astype('uint8'), device=self.device, dtype=self.dtype)
@@ -1103,7 +1126,7 @@ class RelativeTransformerSelfAttention(torch.nn.Module):
         # form current attention values to pass
         present = (key, value)
         #present = torch.stack((key.transpose(-2, -1), value))  # transpose to have same shapes for stacking
-        a, probs = self._attn(query, key, value, dropout_keep_prob=dropout_keep_prob, mask_tensor=mask_tensor)
+        a, probs = self._attn(query, key, value, dropout=self.dropout_1, mask_tensor=mask_tensor)
         a = self._merge_heads(a)
         #  batch, seq_length, features -> seq_length, batch, features
         a = a.permute(1, 0, 2)
@@ -1119,6 +1142,7 @@ class RelativeTransformerBlock(torch.nn.Module):
                  list_of_input_dims,
                  context_length,
                  n_attention_heads=8,
+                 dropout_keep_prob=1.,
                  name=None,
                  strict=None,
                  random_state=None,
@@ -1133,18 +1157,25 @@ class RelativeTransformerBlock(torch.nn.Module):
             raise ValueError("must pass instance of np.random.RandomState!")
 
         input_dim = sum(list_of_input_dims)
+
         ln_1_name = name + "_relative_transformer_block_layer_norm_1"
         self.ln_1 = LayerNorm(input_dim, name=ln_1_name,
                               dtype=dtype, device=device)
+
+        dropout = 1. - dropout_keep_prob
+        self.dropout_1 = nn.Dropout(dropout)
+        self.dropout_2 = nn.Dropout(dropout)
 
         attention_name = name + "_relative_transformer_block_self_attention"
         self.attn = RelativeTransformerSelfAttention([input_dim],
                                                      context_length=context_length,
                                                      n_attention_heads=n_attention_heads,
+                                                     dropout_keep_prob=dropout_keep_prob,
                                                      name=attention_name,
                                                      dtype=dtype,
                                                      device=device,
                                                      random_state=random_state)
+
 
         ln_2_name = name + "_relative_transformer_block_layer_norm_2"
         self.ln_2 = LayerNorm(input_dim, name=ln_2_name,
@@ -1153,6 +1184,7 @@ class RelativeTransformerBlock(torch.nn.Module):
         mlp_name = name + "_relative_transformer_block_mlp"
         self.mlp = TransformerMLP([input_dim],
                                   4 * input_dim,
+                                  dropout_keep_prob=dropout_keep_prob,
                                   name=mlp_name,
                                   dtype=dtype,
                                   device=device,
@@ -1161,9 +1193,9 @@ class RelativeTransformerBlock(torch.nn.Module):
     def forward(self, list_of_inputs, source_mask=None, target_mask=None, layer_past=None):
         inp = torch.cat(list_of_inputs)
         a, present = self.attn([self.ln_1(inp)], layer_past=layer_past, source_mask=source_mask, target_mask=target_mask)
-        inp = inp + a
+        inp = inp + self.dropout_1(a)
         m = self.mlp([self.ln_2(inp)])
-        inp = inp + m
+        inp = inp + self.dropout_2(m)
         return inp, present
 
 

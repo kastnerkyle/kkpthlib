@@ -124,9 +124,9 @@ class MaxOrder(object):
         all_attr = []
         for n, i in enumerate(self.orders):
             if return_attributions:
-               res, attr = self.order_tries[n].order_search(i, list_of_items, return_attributions=return_attributions)
+                res, attr = self.order_tries[n].order_search(i, list_of_items, return_attributions=return_attributions)
             else:
-               res = self.order_tries[n].order_search(i, list_of_items, return_attributions=return_attributions)
+                res = self.order_tries[n].order_search(i, list_of_items, return_attributions=return_attributions)
             # need to even these out with padding
             if len(res) < longest:
                 res = [None] * (longest - len(res)) + res
@@ -413,7 +413,28 @@ def evaluate_midi_against_checkers(midi_path, checkers):
     pitched_functional_names_matrix, pitched_functional_names_attr = checkers["pitched_functional_checker"].included_at_index(pitched_functional_names, return_attributions=True)
     print("Pitched functional names checker status {}".format(pitched_functional_names_max_order_ok))
 
+    soprano_parts = dp["parts"][0]
+    alto_parts = dp["parts"][1]
+    tenor_parts = dp["parts"][2]
+    bass_parts = dp["parts"][3]
+
+    soprano_pitch_max_order_ok = checkers["soprano_pitch_checker"].satisfies_max_order(soprano_parts)
+    soprano_pitch_matrix, soprano_pitch_attr = checkers["soprano_pitch_checker"].included_at_index(soprano_parts, return_attributions=True)
+    print("Soprano pitch checker status {}".format(soprano_pitch_max_order_ok))
+
+    alto_pitch_max_order_ok = checkers["alto_pitch_checker"].satisfies_max_order(soprano_parts)
+    alto_pitch_matrix, alto_pitch_attr = checkers["alto_pitch_checker"].included_at_index(alto_parts, return_attributions=True)
+    print("Alto pitch checker status {}".format(alto_pitch_max_order_ok))
+
+    tenor_pitch_max_order_ok = checkers["tenor_pitch_checker"].satisfies_max_order(tenor_parts)
+    tenor_pitch_matrix, tenor_pitch_attr = checkers["tenor_pitch_checker"].included_at_index(tenor_parts, return_attributions=True)
+    print("Tenor pitch checker status {}".format(tenor_pitch_max_order_ok))
+
+    bass_pitch_max_order_ok = checkers["bass_pitch_checker"].satisfies_max_order(bass_parts)
+    bass_pitch_matrix, bass_pitch_attr = checkers["bass_pitch_checker"].included_at_index(bass_parts, return_attributions=True)
+    print("Bass pitch checker status {}".format(bass_pitch_max_order_ok))
     from IPython import embed; embed(); raise ValueError()
+
 
 if __name__ == "__main__":
     # these two samples are identical for a while, not a bad idea to use these to test

@@ -397,10 +397,3 @@ def fetch_jsb_chorales():
     jsb_dataset_path = check_fetch_jsb_chorales()
     json_files = [jsb_dataset_path + os.sep + fname for fname in sorted(os.listdir(jsb_dataset_path)) if ".json" in fname]
     return {"files": json_files}
-    # example writing out the midi version 
-    """
-    for ex_name in sorted(os.listdir(jsb_dataset_path)):
-        print("writing file {}".format(ex_name.replace(".json", "")))
-        ex = jsb_dataset_path + os.sep + ex_name
-        music_json_to_midi(ex, ex_name.replace(".json", "") + ".mid")
-    """

@@ -30,6 +30,8 @@ jsb = fetch_jsb_chorales()
 
 logger = get_logger()
 
+# change optimizer to SGD with cyclic learning rate?
+
 hp = HParams(input_dim=133, #hardcoded from knowledge of vocab size, can temporarily set to 0 if needed
              #balance token dim and clock dim
              token_embed_dim=96,
@@ -37,11 +39,12 @@ hp = HParams(input_dim=133, #hardcoded from knowledge of vocab size, can tempora
              # maybe change this?
              hidden_dim=512,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
-             learning_rate=0.0001,
-             clip=10.,
-             batch_size=24,
+             learning_rate=0.1,
+             clip=3.,
+             batch_size=10,
              clocks=[2, 4, 8, 16, 32, 64],
              n_layers=5,
+             dropout_keep_prob=.9,
              max_sequence_length=1000,
              random_seed=2122,
              vocab_storage="jsb_raster_music_transformer_stored_vocab.npz")
@@ -95,6 +98,7 @@ def build_model(hp):
             combined_dim = len(hp.clocks) * hp.clock_embed_dim + hp.token_embed_dim
             self.blocks = nn.ModuleList([RelativeTransformerBlock([combined_dim],
                                                hp.max_sequence_length,
+                                               dropout_keep_prob=hp.dropout_keep_prob,
                                                random_state=random_state,
                                                name="block_{}".format(i),
                                                device=hp.use_device) for i in range(hp.n_layers)])
@@ -148,12 +152,16 @@ if __name__ == "__main__":
                                         with_clocks=hp.clocks,
                                         random_seed=hp.random_seed)
 
-    m = build_model(hp)
+    model = build_model(hp)
     #m = build_model().to(hp.use_device)
     loss_fun = CategoricalCrossEntropy()
-    optimizer = torch.optim.Adam(m.parameters(), hp.learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), hp.learning_rate)
 
     def loop(itr, extras, stateful_args):
+        if extras["train"]:
+            model.train()
+        else:
+            model.eval()
         piano_roll, mask, clocks = next(itr)
 
         # bump up by 1000 so we can map them all without conflict
@@ -167,7 +175,7 @@ if __name__ == "__main__":
         # trim off one for AR prediction
         clocks = [torch.Tensor(c)[:-1].to(hp.use_device) for c in clocks]
 
-        linear_out, past = m(piano_roll[:-1], mask[:-1], clocks)
+        linear_out, past = model(piano_roll[:-1], mask[:-1], clocks)
         prob_out = softmax(linear_out)
 
         loss = loss_fun(prob_out, piano_roll[1:])
@@ -177,11 +185,11 @@ if __name__ == "__main__":
         optimizer.zero_grad()
         if extras["train"]:
             loss.backward()
-            clipping_grad_norm_(m.parameters(), hp.clip)
+            clipping_grad_norm_(model.parameters(), hp.clip)
             optimizer.step()
         return l, None
 
-    s = {"model": m,
+    s = {"model": model,
          "optimizer": optimizer,
          "hparams": hp}
 
