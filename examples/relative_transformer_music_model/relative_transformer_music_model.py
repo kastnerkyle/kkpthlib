@@ -40,11 +40,11 @@ hp = HParams(input_dim=133, #hardcoded from knowledge of vocab size, can tempora
              hidden_dim=512,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
              learning_rate=0.1,
-             clip=3.,
+             clip=100.,
              batch_size=10,
              clocks=[2, 4, 8, 16, 32, 64],
              n_layers=5,
-             dropout_keep_prob=.9,
+             dropout_keep_prob=1.,
              max_sequence_length=1000,
              random_seed=2122,
              vocab_storage="jsb_raster_music_transformer_stored_vocab.npz")
@@ -136,6 +136,45 @@ def build_model(hp):
             return o, presents
     return Model().to(hp.use_device)
 
+class NoamOpt(object):
+    "Optim wrapper that implements rate."
+    def __init__(self, model_size, factor, warmup, optimizer):
+        self.optimizer = optimizer
+        self._step = 0
+        self.warmup = warmup
+        self.factor = factor
+        self.model_size = model_size
+        self._rate = 0
+        
+    def step(self):
+        "Update parameters and rate"
+        self._step += 1
+        rate = self.rate()
+        for p in self.optimizer.param_groups:
+            p['lr'] = rate
+        self._rate = rate
+        self.optimizer.step()
+        
+    def rate(self, step=None):
+        "Implement `lrate` above"
+        if step is None:
+            step = self._step
+        return self.factor * \
+            (self.model_size ** (-0.5) *
+            min(step ** (-0.5), step * self.warmup ** (-1.5)))
+
+    def zero_grad(self):
+        self.optimizer.zero_grad()
+
+    def state_dict(self):
+        return self.optimizer.state_dict()
+
+
+def get_std_opt(model):
+    return NoamOpt(192, 1, 4000,
+            torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9))
+
+
 vocab_mapper = {k: v + 1000 for k, v in zip(vocab, range(len(vocab)))}
 inverse_vocab_mapper = {v - 1000:k for k, v in vocab_mapper.items()}
 
@@ -155,9 +194,11 @@ if __name__ == "__main__":
     model = build_model(hp)
     #m = build_model().to(hp.use_device)
     loss_fun = CategoricalCrossEntropy()
-    optimizer = torch.optim.Adam(model.parameters(), hp.learning_rate)
+    optimizer = get_std_opt(model)
+    #optimizer = torch.optim.Adam(model.parameters(), hp.learning_rate)
 
     def loop(itr, extras, stateful_args):
+        optimizer.zero_grad()
         if extras["train"]:
             model.train()
         else:
@@ -182,7 +223,6 @@ if __name__ == "__main__":
 
         loss = (mask[:-1] * loss).sum(dim=0).mean()
         l = loss.cpu().data.numpy()
-        optimizer.zero_grad()
         if extras["train"]:
             loss.backward()
             clipping_grad_norm_(model.parameters(), hp.clip)

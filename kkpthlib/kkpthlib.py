@@ -7,6 +7,8 @@ import math
 import torch.nn.functional as F
 from torch import nn
 
+import copy
+
 from .hparams import HParams
 
 def np_zeros(shape):
@@ -324,13 +326,14 @@ has_warned = {}
 def _shape(arr):
     return tuple(arr.shape)
 
-
 def _ndim(arr):
     return len(_shape(arr))
 
 def _get_name():
     return str(uuid.uuid4())
 
+def get_params_dict():
+    return _lib_shared_params
 
 def _get_shared(name):
     if name in _lib_shared_params.keys():
@@ -341,10 +344,8 @@ def _get_shared(name):
     else:
         raise NameError("Name not found in shared params!")
 
-
 def _check_shared(name):
     return name in _lib_shared_params.keys()
-
 
 def _set_shared(name, variable):
     if name in _lib_shared_params.keys():
@@ -574,7 +575,43 @@ class Embedding(torch.nn.Module):
         return lu, self.vectors
 
 
+class TransformerPositionalEncoding(nn.Module):
+    """
+    https://nlp.seas.harvard.edu/2018/04/03/attention.html
+    """
+    def __init__(self, output_dim, dropout_keep_prob=1., combiner="sum", max_len=5000, name=None, device="default", dtype="default"):
+        super(TransformerPositionalEncoding, self).__init__()
+        dropout = 1. - dropout_keep_prob
+        self.dropout = nn.Dropout(p=dropout)
+        self.combiner = combiner
+        self.device = device
+        self.dtype = dtype
+
+        # Compute the positional encodings once in log space.
+        pe = torch.zeros(max_len, output_dim)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, output_dim, 2) *
+                             -(math.log(10000.0) / output_dim))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        pe = pe.permute(1, 0, 2)
+        # get numpy data for constructor, lil bit of a hack job
+        self.pe = make_tensor(pe.cpu().data.numpy(), dtype=self.dtype, device=self.device)
+
+    def forward(self, embeds):
+        # assume l, b, f
+        if self.combiner == "sum":
+            embeds = embeds + self.pe[:embeds.shape[0], :].detach()
+        else:
+            raise ValueError("Combiner methods should be sum or concat (concat NYI)")
+        return self.dropout(embeds), self.pe
+
+
 class LayerNorm(torch.nn.Module):
+    """
+    https://nlp.seas.harvard.edu/2018/04/03/attention.html
+    """
     def __init__(self,
                  input_dim,
                  eps=1E-12,
@@ -616,12 +653,333 @@ class LayerNorm(torch.nn.Module):
         self.bias = torch.nn.Parameter(bias)
 
     def forward(self, x):
-        u = x.mean(-1, keepdim=True)
-        s = (x - u).pow(2).mean(-1, keepdim=True)
-        x = (x - u) / torch.sqrt(s + self.eps)
-        return self.weight * x + self.bias
+        mean = x.mean(-1, keepdim=True)
+        std = x.std(-1, keepdim=True)
+        return self.weight * (x - mean) / (std + self.eps) + self.bias
 
 
+class TransformerSublayerConnection(nn.Module):
+    """
+    https://nlp.seas.harvard.edu/2018/04/03/attention.html
+    """
+    def __init__(self, input_dim, dropout_keep_prob=1.,
+                 device="default",
+                 dtype="default",
+                 strict=None,
+                 name=None):
+        super(TransformerSublayerConnection, self).__init__()
+        if name is None:
+            name = _get_name()
+        self.norm = LayerNorm(input_dim)
+        self.dropout = nn.Dropout(1. - dropout_keep_prob)
+
+    def forward(self, x, sublayer):
+        return x + self.dropout(sublayer(self.norm(x)))
+
+
+class TransformerEncoderLayer(nn.Module):
+    """
+    https://nlp.seas.harvard.edu/2018/04/03/attention.html
+    """
+    def __init__(self, list_of_input_dims, source_attn, feed_forward, dropout_keep_prob=1.,
+                 device="default",
+                 dtype="default",
+                 strict=None,
+                 name=None):
+        super(TransformerEncoderLayer, self).__init__()
+        if name is None:
+            name = _get_name()
+        input_dim = sum(list_of_input_dims)
+        self.source_attn = source_attn
+        self.feed_forward = feed_forward
+        drop_p = 1. - dropout_keep_prob
+        # don't use clones due to name clash
+        self.sublayer = nn.ModuleList([TransformerSublayerConnection(input_dim, drop_p, name=name + "_{}".format(l)) for l in range(2)])
+        self.input_dim = input_dim
+
+    def forward(self, list_of_inputs, mask):
+        x = torch.cat(list_of_inputs, dim=-1)
+        x = self.sublayer[0](x, lambda x: self.source_attn([x], [x], [x], mask=mask))
+        return self.sublayer[1](x, lambda x: self.feed_forward([x]))
+
+
+class TransformerEncoderBlock(nn.Module):
+    """
+    https://nlp.seas.harvard.edu/2018/04/03/attention.html
+    """
+    def __init__(self, list_of_input_dims, n_layers=6, feedforward_dim=2048, n_heads=8, dropout_keep_prob=1.,
+                 random_state=None,
+                 init=None,
+                 strict="default",
+                 name=None, device="default", dtype="default"):
+        super(TransformerEncoderBlock, self).__init__()
+        input_dim = sum(list_of_input_dims)
+        hidden_dim = input_dim
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass random_state object to TransformerEncoderBlock!")
+
+        name_ff = name + "_positionwise_feedforward_{}"
+        name_attn = name + "_transformer_multihead_attention_{}"
+        layers = []
+        for i in range(n_layers):
+            ff = TransformerPositionwiseFeedforward([hidden_dim], feedforward_dim, dropout_keep_prob=dropout_keep_prob,
+                                                    random_state=random_state,
+                                                    device=device, dtype=dtype, name=name_ff.format(i))
+            attn = TransformerMultiHeadAttention([hidden_dim], n_heads=n_heads,
+                                                  random_state=random_state,
+                                                  device=device, dtype=dtype, name=name_attn.format(i))
+            layer = TransformerEncoderLayer([hidden_dim], attn, ff, dropout_keep_prob=dropout_keep_prob)
+            layers.append(layer)
+        self.layers = nn.ModuleList(layers)
+        self.norm = LayerNorm(input_dim)
+
+    def forward(self, list_of_inputs, mask):
+        x = torch.cat(list_of_inputs, dim=-1)
+        for layer in self.layers:
+            x = layer([x], mask)
+        return self.norm(x)
+
+
+def subsequent_mask(size, device="default", dtype="default"):
+    """"Mask out subsequent positions."""
+    attn_shape = (size, size)
+    subsequent_mask = np.triu(np.ones(attn_shape), k=1).astype('uint8')
+    return make_tensor(subsequent_mask == 0, device=device, dtype=dtype)
+
+
+class TransformerDecoderLayer(nn.Module):
+    """
+    https://nlp.seas.harvard.edu/2018/04/03/attention.html
+
+    target_attn is AR masked
+    """
+    def __init__(self, list_of_input_dims, source_attn, target_attn, feed_forward, dropout_keep_prob=1.,
+                 max_len=5000,
+                 device="default",
+                 dtype="default",
+                 strict=None,
+                 name=None):
+        super(TransformerDecoderLayer, self).__init__()
+        if name is None:
+            name = _get_name()
+        input_dim = sum(list_of_input_dims)
+        self.source_attn = source_attn
+        self.target_attn = target_attn
+        self.feed_forward = feed_forward
+        self.device = device
+        self.dtype = dtype
+        drop_p = 1. - dropout_keep_prob
+        # don't use clones due to name clash
+        self.sublayer = nn.ModuleList([TransformerSublayerConnection(input_dim, drop_p, name=name + "_{}".format(l)) for l in range(3)])
+        self.input_dim = input_dim
+        self.ar_mask = subsequent_mask(max_len, device=self.device, dtype=self.dtype)
+
+    def forward(self, list_of_targets, list_of_memories, target_mask, memory_mask, do_ar_mask=True):
+        x = torch.cat(list_of_targets, dim=-1)
+        memory = torch.cat(list_of_memories, dim=-1)
+        t = self.ar_mask[:target_mask.shape[0], :target_mask.shape[0]]
+        combined_mask = target_mask[:, None] * t[:, :, None]
+        # construct a 3D mask to feed to target_attn
+        # mask should match memory?
+        x = self.sublayer[0](x, lambda x: self.target_attn([x], [x], [x], mask=combined_mask))
+        x = self.sublayer[1](x, lambda x: self.source_attn([x], [memory], [memory], mask=memory_mask))
+        return self.sublayer[2](x, lambda x: self.feed_forward([x]))
+
+
+class TransformerDecoderBlock(nn.Module):
+    """
+    https://nlp.seas.harvard.edu/2018/04/03/attention.html
+    """
+    def __init__(self, list_of_input_dims, n_layers=6, feedforward_dim=2048, n_heads=8, dropout_keep_prob=1.,
+                 random_state=None,
+                 init=None,
+                 strict="default",
+                 name=None, device="default", dtype="default"):
+        super(TransformerDecoderBlock, self).__init__()
+        input_dim = sum(list_of_input_dims)
+        hidden_dim = input_dim
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass random_state object to TransformerDncoderBlock!")
+
+        name_ff = name + "_positionwise_feedforward_{}"
+        name_source_attn = name + "_transformer_multihead_attention_source_{}"
+        name_target_attn = name + "_transformer_multihead_attention_target_{}"
+        layers = []
+        for i in range(n_layers):
+            ff = TransformerPositionwiseFeedforward([hidden_dim], feedforward_dim, dropout_keep_prob=dropout_keep_prob,
+                                                    random_state=random_state,
+                                                    device=device, dtype=dtype, name=name_ff.format(i))
+            source_attn = TransformerMultiHeadAttention([hidden_dim], n_heads=n_heads,
+                                                        random_state=random_state,
+                                                        device=device, dtype=dtype, name=name_source_attn.format(i))
+            target_attn = TransformerMultiHeadAttention([hidden_dim], n_heads=n_heads,
+                                                        random_state=random_state,
+                                                        device=device, dtype=dtype, name=name_target_attn.format(i))
+
+            layer = TransformerDecoderLayer([hidden_dim], source_attn, target_attn, ff, dropout_keep_prob=dropout_keep_prob)
+            layers.append(layer)
+        self.layers = nn.ModuleList(layers)
+        self.norm = LayerNorm(input_dim)
+
+    def forward(self, list_of_targets, list_of_memory, target_mask, memory_mask):
+        x = torch.cat(list_of_targets, dim=-1)
+        memory = torch.cat(list_of_memory, dim=-1)
+        for layer in self.layers:
+            x = layer([x], [memory], target_mask, memory_mask)
+        return self.norm(x)
+
+
+def transformer_attention(query, key, value, mask=None, dropout_layer=None,
+                          mask_fill_value=-1E9):
+    """
+    all of key, query, value come in as: batch, heads, seq, head_features
+    returns batch, heads, seq, head_features
+    """
+    d_k = query.size(-1)
+    scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
+    if mask is not None:
+        if len(mask.shape) == 3:
+            # 3d mask assumed to be per-step
+            # as in subsequent_mask
+            # scores are batch, heads, seq, seq
+            # mask is batch, seq, seq
+            mask = mask.unsqueeze(1)
+        scores = scores.masked_fill(mask == 0, mask_fill_value)
+    p_attn = F.softmax(scores, dim=-1)
+    if dropout_layer is not None:
+        p_attn = dropout_layer(p_attn)
+    return torch.matmul(p_attn, value), p_attn
+
+
+class TransformerMultiHeadAttention(nn.Module):
+    """
+    https://nlp.seas.harvard.edu/2018/04/03/attention.html
+    """
+    def __init__(self, list_of_input_dims,
+                 n_heads=8,
+                 dropout_keep_prob=1.,
+                 random_state=None,
+                 init=None,
+                 strict="default",
+                 device="default", dtype="default", name=None):
+            super(TransformerMultiHeadAttention, self).__init__()
+            if name is None:
+                name = _get_name()
+
+            if random_state is None:
+                raise ValueError("Must pass random_state object to TransformerEncoderBlock!")
+
+            input_dim = sum(list_of_input_dims)
+            hidden_dim = input_dim
+            self.input_dim = input_dim
+            self.hidden_dim = hidden_dim
+            assert input_dim % n_heads == 0
+            # We assume d_v always equals d_k
+            self.d_k = input_dim // n_heads
+            self.n_heads = n_heads
+            name_l = name + "_transformer_multihead_attention_{}"
+            self.l_1 = Linear(list_of_input_dims,
+                              hidden_dim,
+                              random_state=random_state,
+                              name=name_l.format(1),
+                              init=init, strict=strict)
+            self.l_2 = Linear(list_of_input_dims,
+                              hidden_dim,
+                              random_state=random_state,
+                              name=name_l.format(2),
+                              init=init, strict=strict)
+            self.l_3 = Linear(list_of_input_dims,
+                              hidden_dim,
+                              random_state=random_state,
+                              name=name_l.format(3),
+                              init=init, strict=strict)
+            self.l_4 = Linear(list_of_input_dims,
+                              hidden_dim,
+                              random_state=random_state,
+                              name=name_l.format(4),
+                              init=init, strict=strict)
+            self.attn = None
+            self.dropout = nn.Dropout(p=1. - dropout_keep_prob)
+
+    def forward(self, list_of_query, list_of_key, list_of_value, mask=None):
+        if mask is not None:
+            # handle 2d vs 3d masks
+            if len(mask.shape) == 2:
+                # mask of seq, batch
+                # Same mask applied to all h heads.
+                mask = mask.unsqueeze(1).unsqueeze(2)
+                # permute to internal format of batch, heads, seq, head_feats
+                mask = mask.permute(3, 1, 2, 0)
+            elif len(mask.shape) == 3:
+                # mask of seq, seq, batch
+                # convert to batch, seq, seq then handle in attn
+                mask = mask.permute(2, 0, 1)
+            else:
+                raise ValueError("Got mask of shape {}, expect 2D or 3D".format(mask.shape))
+        # list of seq, batch, features in for each of: list_of_key, list_of_query, list_of_value
+        minibatch_size = list_of_query[0].shape[1]
+        # in original code batch, seq, heads, head_feats -> batch, heads, seq, head_feats
+        # for us, from seq, batch, features -> seq, batch, heads, head_features -> batch, heads, seq, head_features
+        query_p = self.l_1(list_of_query).view(-1, minibatch_size, self.n_heads, self.d_k).permute(1, 2, 0, 3)
+        key_p = self.l_2(list_of_key).view(-1, minibatch_size, self.n_heads, self.d_k).permute(1, 2, 0, 3)
+        value_p = self.l_3(list_of_value).view(-1, minibatch_size, self.n_heads, self.d_k).permute(1, 2, 0, 3)
+        x, self.attn = transformer_attention(query_p, key_p, value_p, mask=mask,
+                                             dropout_layer=self.dropout)
+
+        # in original code, x comes back batch, heads, seq, head_features
+        # ultimately want seq, batch, feature
+        x = x.transpose(1, 2).contiguous().view(minibatch_size, -1, self.n_heads * self.d_k).permute(1, 0, 2).contiguous()
+        x_proj = self.l_4([x])
+        return x_proj
+
+
+class TransformerPositionwiseFeedforward(nn.Module):
+    def __init__(self, list_of_input_dims, hidden_dim,
+                 dropout_keep_prob=1.,
+                 random_state=None,
+                 init=None,
+                 strict="default",
+                 device="default", dtype="default", name=None):
+        super(TransformerPositionwiseFeedforward, self).__init__()
+        if name is None:
+            name = _get_name()
+        self.name = name
+
+        if random_state is None:
+            raise ValueError("Must pass random_state object to TransformerPositionwiseFeedworward!")
+
+        input_dim = sum(list_of_input_dims)
+
+        name_w_1 = name + "_transformer_positionwise_feedforward_w_1"
+        name_w_2 = name + "_transformer_positionwise_feedforward_w_2"
+
+        self.w_1 = Linear(list_of_input_dims,
+                          hidden_dim,
+                          random_state=random_state,
+                          name=name_w_1,
+                          init=init, strict=strict)
+
+        self.w_2 = Linear([hidden_dim],
+                          input_dim,
+                          random_state=random_state,
+                          name=name_w_2,
+                          init=init, strict=strict)
+
+        self.dropout = nn.Dropout(1. - dropout_keep_prob)
+
+    def forward(self, list_of_inputs):
+        x = torch.cat(list_of_inputs, dim=-1)
+        # particular nesting because internal layers expect list input
+        return self.w_2([self.dropout(F.relu(self.w_1(list_of_inputs)))])
+
+
+'''
 class TransformerConv1d(torch.nn.Module):
     def __init__(self,
                  list_of_input_dims,
@@ -693,9 +1051,12 @@ class TransformerConv1d(torch.nn.Module):
 
     def forward(self, list_of_inputs):
         x = torch.cat(list_of_inputs, dim=-1)
+        # try to transpose and avoid reshape jumbling?
+        x = x.permute(1, 0, 2)
         size_out = x.size()[:-1] + (self.output_dim,)
-        x = torch.addmm(self.biases, x.view(-1, x.size(-1)), self.weight)
+        x = torch.addmm(self.biases, x.reshape(-1, x.size(-1)), self.weight)
         x = x.view(*size_out)
+        x = x.permute(1, 0, 2)
         return x
 
 
@@ -1071,6 +1432,7 @@ class RelativeTransformerSelfAttention(torch.nn.Module):
             scores = scores / math.sqrt(v.size(-1))
         if mask_tensor is not None:
             scores = scores.masked_fill(mask_tensor[:, None] == 0, mask_fill)
+
         p_attn = F.softmax(scores, dim=-1)
         if dropout is not None:
             p_attn = dropout(p_attn)
@@ -1197,6 +1559,7 @@ class RelativeTransformerBlock(torch.nn.Module):
         m = self.mlp([self.ln_2(inp)])
         inp = inp + self.dropout_2(m)
         return inp, present
+'''
 
 
 class Linear(torch.nn.Module):
@@ -2080,3 +2443,41 @@ class CategoricalCrossEntropy(torch.nn.Module):
             return per_step_batch_gathered
         else:
             raise ValueError("NYI CategoricalCrossEntropy 2D inputs!")
+
+
+class NoamOpt(object):
+    """
+    def get_std_opt(model):
+        return NoamOpt(192, 1, 4000,
+                torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9))
+    """
+    def __init__(self, model_size, factor, warmup, optimizer):
+        self.optimizer = optimizer
+        self._step = 0
+        self.warmup = warmup
+        self.factor = factor
+        self.model_size = model_size
+        self._rate = 0
+
+    def step(self):
+        "Update parameters and rate"
+        self._step += 1
+        rate = self.rate()
+        for p in self.optimizer.param_groups:
+            p['lr'] = rate
+        self._rate = rate
+        self.optimizer.step()
+
+    def rate(self, step=None):
+        "Implement `lrate` above"
+        if step is None:
+            step = self._step
+        return self.factor * \
+            (self.model_size ** (-0.5) *
+            min(step ** (-0.5), step * self.warmup ** (-1.5)))
+
+    def zero_grad(self):
+        self.optimizer.zero_grad()
+
+    def state_dict(self):
+        return self.optimizer.state_dict()

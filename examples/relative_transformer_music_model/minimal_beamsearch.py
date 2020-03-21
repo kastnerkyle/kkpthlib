@@ -39,6 +39,8 @@ def top_p_from_logits_np(logits, p=.9, fill_value=-np.inf):
     """
     temperature can be applied beforehand, simply by sending in logits / temperature rather than logits
     """
+    # copy.deepcopy so we don't modify them
+    logits = copy.deepcopy(logits)
     sorted_indices = np.argsort(softmax_np(logits), axis=-1)
     shp = logits.shape
     sorted_indices_sqr = sorted_indices.transpose(2, 0, 1).reshape(shp[2], shp[0] * shp[1]).transpose(1, 0)

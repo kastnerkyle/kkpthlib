@@ -297,7 +297,7 @@ class MusicJSONRasterIterator(object):
                 # let it go for now
 
             # start with 1 quarter note (4 16ths) worth of pure rest
-            roll_voices = [[0] * 4, [0] * 4, [0] * 4, [0] * 4]
+            roll_voices = [[], [], [], []]
             # use these for tracking if we cross a change event
             p_i = [0, 0, 0, 0]
             for c in clock:
@@ -357,10 +357,6 @@ class MusicJSONRasterIterator(object):
                 self.random_state.shuffle(proposed_cuts_i)
 
                 step_slicer = proposed_cuts_i[0]
-
-                # if we end up randomly drawing 0, 1, 2, 3 those are prepended 0s - just start at 0 (want to learn to start well)
-                if step_slicer < 4:
-                    step_slicer = 0
 
                 # turn it into a raster pointer instead of a "voice tuple" pointer
                 slicer = step_slicer * self.n_voices
