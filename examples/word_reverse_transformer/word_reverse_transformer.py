@@ -30,7 +30,7 @@ hp = HParams(word_length_limit=10,
              dim=512,
              n_layers=3,
              split=250000,
-             dropout_keep_prob=.9,
+             dropout_keep_prob=1.,
              use_device='cuda' if torch.cuda.is_available() else 'cpu')
 
 def get_hparams():
@@ -45,6 +45,7 @@ word_length_limit = hp.word_length_limit
 words = [words_i for words_i in words if len(words_i) <= word_length_limit]
 v2i = {v: k for k, v in enumerate(vocab)}
 i2v = {v: k for k, v in v2i.items()}
+
 word_inds = [np.array([v2i[wi] for wi in word_i] + [0] * (word_length_limit - len(word_i)))[..., None] for word_i in words]
 rev_word_inds = [np.array([v2i[wi] for wi in word_i][::-1] + [0] * (word_length_limit - len(word_i)))[..., None] for word_i in words]
 
@@ -148,8 +149,8 @@ if __name__ == "__main__":
         pred_logit = model(t_x, t_y[:-1], mask_t_x, mask_t_y[:-1])
         pred_prob = softmax(pred_logit)
         loss_batch = loss_fun(pred_prob, t_y[1:])
-        #loss = (mask_t_y[1:] * loss_batch).sum(dim=0).mean()
-        loss = loss_batch.sum(dim=0).mean()
+
+        loss = (mask_t_y[:-1] * loss_batch).sum(dim=0).mean()
         l = loss.cpu().data.numpy()
         if extras["train"]:
             loss.backward()

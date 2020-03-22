@@ -41,9 +41,9 @@ rev_word_inds = [np.array([v2i[wi] for wi in word_i][::-1] + [0] * (word_length_
 model = build_model(hp)
 m_dict = torch.load("model_checkpoint.pth", map_location=hp.use_device)
 model.load_state_dict(m_dict)
-model.eval()
+model = model.eval()
 
-test_word = "zzqjklanfm"
+test_word = "abcdefghij"
 test_inds = [v2i[c] for c in test_word]
 test_inds = np.array(test_inds)[:, None, None].astype("float32")
 bcast = np.ones((1, hp.batch_size, 1))
@@ -56,13 +56,12 @@ sampled_mask = sampled_mask[..., 0]
 
 for i in range(hp.word_length_limit):
     print("step {}".format(i))
-    if i > 0:
-        current_str = [i2v[c] for c in sampled[1:, 0].ravel()]
-        print("current string: {}".format(current_str))
     x = test_inds
     x_mask = test_mask
+
     y = sampled
     y_mask = sampled_mask
+
     t_x = torch.Tensor(x).to(hp.use_device)
     mask_t_x = torch.Tensor(x_mask).to(hp.use_device)
     t_y = torch.Tensor(y).to(hp.use_device)
@@ -72,4 +71,6 @@ for i in range(hp.word_length_limit):
     sampled = np.concatenate((sampled, new_sampled[None, :, None]))
     sampled_mask = 0. * sampled + 1.
     sampled_mask = sampled_mask[..., 0]
+    current_str = [i2v[c] for c in sampled[1:, 0].ravel()]
+    print("current string: {}".format(current_str))
 from IPython import embed; embed(); raise ValueError()

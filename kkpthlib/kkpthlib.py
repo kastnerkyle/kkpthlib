@@ -695,9 +695,8 @@ class TransformerEncoderLayer(nn.Module):
         input_dim = sum(list_of_input_dims)
         self.source_attn = source_attn
         self.feed_forward = feed_forward
-        drop_p = 1. - dropout_keep_prob
         # don't use clones due to name clash
-        self.sublayer = nn.ModuleList([TransformerSublayerConnection(input_dim, drop_p, name=name + "_{}".format(l)) for l in range(2)])
+        self.sublayer = nn.ModuleList([TransformerSublayerConnection(input_dim, dropout_keep_prob=dropout_keep_prob, name=name + "_{}".format(l)) for l in range(2)])
         self.input_dim = input_dim
 
     def forward(self, list_of_inputs, mask):
@@ -732,6 +731,7 @@ class TransformerEncoderBlock(nn.Module):
                                                     random_state=random_state,
                                                     device=device, dtype=dtype, name=name_ff.format(i))
             attn = TransformerMultiHeadAttention([hidden_dim], n_heads=n_heads,
+                                                  dropout_keep_prob=dropout_keep_prob,
                                                   random_state=random_state,
                                                   device=device, dtype=dtype, name=name_attn.format(i))
             layer = TransformerEncoderLayer([hidden_dim], attn, ff, dropout_keep_prob=dropout_keep_prob)
@@ -774,9 +774,8 @@ class TransformerDecoderLayer(nn.Module):
         self.feed_forward = feed_forward
         self.device = device
         self.dtype = dtype
-        drop_p = 1. - dropout_keep_prob
         # don't use clones due to name clash
-        self.sublayer = nn.ModuleList([TransformerSublayerConnection(input_dim, drop_p, name=name + "_{}".format(l)) for l in range(3)])
+        self.sublayer = nn.ModuleList([TransformerSublayerConnection(input_dim, dropout_keep_prob=dropout_keep_prob, name=name + "_{}".format(l)) for l in range(3)])
         self.input_dim = input_dim
         self.ar_mask = subsequent_mask(max_len, device=self.device, dtype=self.dtype)
 
@@ -822,9 +821,11 @@ class TransformerDecoderBlock(nn.Module):
                                                     random_state=random_state,
                                                     device=device, dtype=dtype, name=name_ff.format(i))
             source_attn = TransformerMultiHeadAttention([hidden_dim], n_heads=n_heads,
+                                                        dropout_keep_prob=dropout_keep_prob,
                                                         random_state=random_state,
                                                         device=device, dtype=dtype, name=name_source_attn.format(i))
             target_attn = TransformerMultiHeadAttention([hidden_dim], n_heads=n_heads,
+                                                        dropout_keep_prob=dropout_keep_prob,
                                                         random_state=random_state,
                                                         device=device, dtype=dtype, name=name_target_attn.format(i))
 
@@ -851,24 +852,9 @@ def transformer_attention(query, key, value, mask=None, dropout_layer=None,
     mask should be batch, heads, seq, seq
     """
     d_k = query.size(-1)
-    shp = query.shape
-    query_r = query.view(-1, shp[-2], shp[-1])
-    kshp = key.shape
-    key_r = key.view(-1, kshp[-2], kshp[-1])
-
-    # batch, output_len, head_feats * batch, query_len, head_feats
-    # to
-    # batch, output_len, query_len
-    # remember, 
-    # output_len == key_len/value len since we attent over every entry
-    # pretty much always, key and value come from the same source
-    scores = torch.bmm(query_r, key_r.transpose(-2, -1).contiguous()) / math.sqrt(d_k)
-    oshp = scores.shape
-    scores = scores.view(shp[0], shp[1], oshp[-2], oshp[-1])
-    scores = scores
+    scores = torch.matmul(query, key.transpose(-2, -1))
     if mask is not None:
         scores = scores.masked_fill(mask == 0, mask_fill_value)
-    scores = scores.view(oshp[0], oshp[1], oshp[2])
     p_attn = F.softmax(scores, dim=-1)
     # DO NOT WANT LEAKS OUTSIDE MASK - zero out softmax as well
     # this will cause issues where everything was zeros, would be
@@ -876,18 +862,13 @@ def transformer_attention(query, key, value, mask=None, dropout_layer=None,
     # now, will be 0 across every element
     # if you mask a whole entry NO INFORMATION WILL FLOW
     # this seems like a good idea to me
-    p_attn = p_attn.view(shp[0], shp[1], oshp[-2], oshp[-1])
+
     p_attn = p_attn * mask
-    p_attn = p_attn.view(oshp[0], oshp[1], oshp[2]).contiguous()
+
     if dropout_layer is not None:
         p_attn = dropout_layer(p_attn)
-    vshp = value.shape
-    value = value.view(-1, vshp[-2], vshp[-1]).contiguous()
-    # batch, output_len, query_len * batch, query_len, head_feats
-    # to
-    # batch, output_len, head_feats
-    mix = torch.bmm(p_attn, value)
-    p_attn = p_attn.view(shp[0], shp[1], oshp[-2], oshp[-1])
+
+    mix = torch.matmul(p_attn, value)
     return mix, p_attn
 
 
@@ -952,7 +933,7 @@ class TransformerMultiHeadAttention(nn.Module):
                 mask = mm.unsqueeze(1)
             elif len(mask.shape) == 3:
                 # mask of seq, seq, batch
-                # convert to batch, seq, seq then handle in attn
+                # convert to batch, seq, seq then add a broadcast dim for heads
                 mask = mask.permute(2, 0, 1).unsqueeze(1)
             else:
                 raise ValueError("Got mask of shape {}, expect 2D or 3D".format(mask.shape))
