@@ -614,7 +614,7 @@ class LayerNorm(torch.nn.Module):
     """
     def __init__(self,
                  input_dim,
-                 eps=1E-12,
+                 eps=1E-6,
                  name=None,
                  strict=None,
                  dtype="default",
@@ -654,8 +654,11 @@ class LayerNorm(torch.nn.Module):
 
     def forward(self, x):
         mean = x.mean(-1, keepdim=True)
-        std = x.std(-1, keepdim=True)
-        return self.weight * (x - mean) / (std + self.eps) + self.bias
+        # eps trick wont work here - std has issues if every element is 0 on that axis
+        # std = x.std(-1, keepdim=True)
+        # want to use sqrt of var + eps instead
+        var = x.var(-1, keepdim=True)
+        return self.weight * (x - mean) / torch.sqrt(var + self.eps) + self.bias
 
 
 class TransformerSublayerConnection(nn.Module):
@@ -781,11 +784,13 @@ class TransformerDecoderLayer(nn.Module):
         x = torch.cat(list_of_targets, dim=-1)
         memory = torch.cat(list_of_memories, dim=-1)
         t = self.ar_mask[:target_mask.shape[0], :target_mask.shape[0]]
-        combined_mask = target_mask[:, None] * t[:, :, None]
-        # construct a 3D mask to feed to target_attn
-        # mask should match memory?
-        x = self.sublayer[0](x, lambda x: self.target_attn([x], [x], [x], mask=combined_mask))
-        x = self.sublayer[1](x, lambda x: self.source_attn([x], [memory], [memory], mask=memory_mask))
+        combined_ar_mask = target_mask[:, None] * t[:, :, None]
+        # we combine to force autoregressive
+        x = self.sublayer[0](x, lambda x: self.target_attn([x], [x], [x], mask=combined_ar_mask))
+        # construct target x memory mask
+        combined_tm_mask = target_mask.transpose(1, 0)[..., None] * memory_mask.transpose(1, 0)[:, None]
+        combined_tm_mask = combined_tm_mask.permute(1, 2, 0)
+        x = self.sublayer[1](x, lambda x: self.source_attn([x], [memory], [memory], mask=combined_tm_mask))
         return self.sublayer[2](x, lambda x: self.feed_forward([x]))
 
 
@@ -810,6 +815,7 @@ class TransformerDecoderBlock(nn.Module):
         name_ff = name + "_positionwise_feedforward_{}"
         name_source_attn = name + "_transformer_multihead_attention_source_{}"
         name_target_attn = name + "_transformer_multihead_attention_target_{}"
+        name_decoder = name + "_transformer_decoder"
         layers = []
         for i in range(n_layers):
             ff = TransformerPositionwiseFeedforward([hidden_dim], feedforward_dim, dropout_keep_prob=dropout_keep_prob,
@@ -822,7 +828,8 @@ class TransformerDecoderBlock(nn.Module):
                                                         random_state=random_state,
                                                         device=device, dtype=dtype, name=name_target_attn.format(i))
 
-            layer = TransformerDecoderLayer([hidden_dim], source_attn, target_attn, ff, dropout_keep_prob=dropout_keep_prob)
+            layer = TransformerDecoderLayer([hidden_dim], source_attn, target_attn, ff, dropout_keep_prob=dropout_keep_prob,
+                                            device=device, dtype=dtype, name=name_decoder)
             layers.append(layer)
         self.layers = nn.ModuleList(layers)
         self.norm = LayerNorm(input_dim)
@@ -840,21 +847,48 @@ def transformer_attention(query, key, value, mask=None, dropout_layer=None,
     """
     all of key, query, value come in as: batch, heads, seq, head_features
     returns batch, heads, seq, head_features
+
+    mask should be batch, heads, seq, seq
     """
     d_k = query.size(-1)
-    scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
+    shp = query.shape
+    query_r = query.view(-1, shp[-2], shp[-1])
+    kshp = key.shape
+    key_r = key.view(-1, kshp[-2], kshp[-1])
+
+    # batch, output_len, head_feats * batch, query_len, head_feats
+    # to
+    # batch, output_len, query_len
+    # remember, 
+    # output_len == key_len/value len since we attent over every entry
+    # pretty much always, key and value come from the same source
+    scores = torch.bmm(query_r, key_r.transpose(-2, -1).contiguous()) / math.sqrt(d_k)
+    oshp = scores.shape
+    scores = scores.view(shp[0], shp[1], oshp[-2], oshp[-1])
+    scores = scores
     if mask is not None:
-        if len(mask.shape) == 3:
-            # 3d mask assumed to be per-step
-            # as in subsequent_mask
-            # scores are batch, heads, seq, seq
-            # mask is batch, seq, seq
-            mask = mask.unsqueeze(1)
         scores = scores.masked_fill(mask == 0, mask_fill_value)
+    scores = scores.view(oshp[0], oshp[1], oshp[2])
     p_attn = F.softmax(scores, dim=-1)
+    # DO NOT WANT LEAKS OUTSIDE MASK - zero out softmax as well
+    # this will cause issues where everything was zeros, would be
+    # uniform across every element
+    # now, will be 0 across every element
+    # if you mask a whole entry NO INFORMATION WILL FLOW
+    # this seems like a good idea to me
+    p_attn = p_attn.view(shp[0], shp[1], oshp[-2], oshp[-1])
+    p_attn = p_attn * mask
+    p_attn = p_attn.view(oshp[0], oshp[1], oshp[2]).contiguous()
     if dropout_layer is not None:
         p_attn = dropout_layer(p_attn)
-    return torch.matmul(p_attn, value), p_attn
+    vshp = value.shape
+    value = value.view(-1, vshp[-2], vshp[-1]).contiguous()
+    # batch, output_len, query_len * batch, query_len, head_feats
+    # to
+    # batch, output_len, head_feats
+    mix = torch.bmm(p_attn, value)
+    p_attn = p_attn.view(shp[0], shp[1], oshp[-2], oshp[-1])
+    return mix, p_attn
 
 
 class TransformerMultiHeadAttention(nn.Module):
@@ -912,14 +946,14 @@ class TransformerMultiHeadAttention(nn.Module):
             # handle 2d vs 3d masks
             if len(mask.shape) == 2:
                 # mask of seq, batch
-                # Same mask applied to all h heads.
-                mask = mask.unsqueeze(1).unsqueeze(2)
-                # permute to internal format of batch, heads, seq, head_feats
-                mask = mask.permute(3, 1, 2, 0)
+                # now becomes batch, seq, seq (same mask both directions)
+                mm = mask.transpose(1, 0)[..., None] * mask.transpose(1, 0)[:, None]
+                # permute to internal format of batch, heads, seq, seq
+                mask = mm.unsqueeze(1)
             elif len(mask.shape) == 3:
                 # mask of seq, seq, batch
                 # convert to batch, seq, seq then handle in attn
-                mask = mask.permute(2, 0, 1)
+                mask = mask.permute(2, 0, 1).unsqueeze(1)
             else:
                 raise ValueError("Got mask of shape {}, expect 2D or 3D".format(mask.shape))
         # list of seq, batch, features in for each of: list_of_key, list_of_query, list_of_value
@@ -2281,7 +2315,7 @@ class GaussianAttentionCell(torch.nn.Module):
 
         if name is None:
             name = _get_name()
-                
+
         name = name + "_gaussian_attention"
 
         #check = any([len(_shape(si)) != 2 for si in list_of_step_inputs])

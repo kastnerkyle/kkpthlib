@@ -25,11 +25,16 @@ hp = HParams(word_length_limit=10,
              valid_seed=12,
              random_seed=1999,
              batch_size=64,
+             clip=10.,
              n_syms=len(vocab),
              dim=512,
              n_layers=3,
              split=250000,
+             dropout_keep_prob=.9,
              use_device='cuda' if torch.cuda.is_available() else 'cpu')
+
+def get_hparams():
+    return hp
 
 norvig = fetch_norvig_words()
 words = norvig["data"]
@@ -64,7 +69,7 @@ valid_rev_word_inds = [rev_word_inds[i] for i in valid_inds]
 train_itr = ListIterator([train_word_inds, train_rev_word_inds], batch_size, random_state=train_itr_random_state)
 valid_itr = ListIterator([valid_word_inds, valid_rev_word_inds], batch_size, random_state=valid_itr_random_state)
 
-def create_model(hp):
+def build_model(hp):
     class Model(nn.Module):
         def __init__(self):
             super(Model, self).__init__()
@@ -78,8 +83,8 @@ def create_model(hp):
                                              random_state=random_state,
                                              name="target_embed",
                                              device=hp.use_device)
-            self.encode = TransformerEncoderBlock([hp.dim], n_layers=hp.n_layers, random_state=random_state, name="transformer_encoder", device=hp.use_device)
-            self.decode = TransformerDecoderBlock([hp.dim], n_layers=hp.n_layers, random_state=random_state, name="transformer_decoder", device=hp.use_device)
+            self.encode = TransformerEncoderBlock([hp.dim], n_layers=hp.n_layers, dropout_keep_prob=hp.dropout_keep_prob, random_state=random_state, name="transformer_encoder", device=hp.use_device)
+            self.decode = TransformerDecoderBlock([hp.dim], n_layers=hp.n_layers, dropout_keep_prob=hp.dropout_keep_prob, random_state=random_state, name="transformer_decoder", device=hp.use_device)
             self.linear = Linear([hp.dim],
                                   len(vocab),
                                   random_state=random_state,
@@ -92,66 +97,72 @@ def create_model(hp):
             target_embed, t_v = self.target_token_embedding(target)
             target_pe, pt_v = self.target_positional_encoding(target_embed)
 
+            input_pe = input_mask[..., None] * input_pe
+            target_pe = target_mask[..., None] * target_pe
+
             encoded = self.encode([input_pe], input_mask)
             decoded = self.decode([target_pe], [encoded], target_mask, input_mask)
             return self.linear([decoded])
     model = Model().to(hp.use_device)
     return model
 
-model = create_model(hp)
-loss_fun = CategoricalCrossEntropy()
+if __name__ == "__main__":
+    model = build_model(hp)
+    loss_fun = CategoricalCrossEntropy()
 
-def get_std_noam_opt(model):
-    return NoamOpt(hp.dim, 1, 4000,
-            torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1E-9))
-optimizer = get_std_noam_opt(model)
+    def get_std_noam_opt(model):
+        return NoamOpt(hp.dim, 1, 4000,
+                torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1E-9))
+    optimizer = get_std_noam_opt(model)
 
-def loop(itr, extras, stateful_args):
-    optimizer.zero_grad()
-    if extras["train"]:
-        model.train()
-    else:
-        model.eval()
+    def loop(itr, extras, stateful_args):
+        optimizer.zero_grad()
+        if extras["train"]:
+            model.train()
+        else:
+            model.eval()
 
-    x, y = next(itr)
+        x, y = next(itr)
 
-    x = x.transpose(1, 0, 2)
-    y = y.transpose(1, 0, 2)
-    new_y = np.zeros((y.shape[0] + 1, y.shape[1], y.shape[2]))
-    new_y[1:] = y
+        x = x.transpose(1, 0, 2)
+        y = y.transpose(1, 0, 2)
+        new_y = np.zeros((y.shape[0] + 1, y.shape[1], y.shape[2]))
+        new_y[1:] = y
 
-    x_mask = np.zeros((x.shape[0], x.shape[1], x.shape[2]))
-    x_mask[x > 0] = 1.
-    x_mask = x_mask[..., 0]
+        x_mask = np.zeros((x.shape[0], x.shape[1], x.shape[2]))
+        x_mask[x > 0] = 1.
+        x_mask = x_mask[..., 0]
 
-    y_mask = np.zeros((y.shape[0] + 1, y.shape[1], y.shape[2]))
-    y_mask[new_y > 0] = 1.
-    y_mask[0] = 1.
-    y_mask = y_mask[..., 0]
-    y = new_y
+        y_mask = np.zeros((y.shape[0] + 1, y.shape[1], y.shape[2]))
+        y_mask[new_y > 0] = 1.
+        y_mask[0] = 1.
+        y_mask = y_mask[..., 0]
+        y = new_y
 
-    t_x = torch.Tensor(x).to(hp.use_device)
-    mask_t_x = torch.Tensor(x_mask).to(hp.use_device)
-    t_y = torch.Tensor(y).to(hp.use_device)
-    mask_t_y = torch.Tensor(y_mask).to(hp.use_device)
+        t_x = torch.Tensor(x).to(hp.use_device).detach()
+        mask_t_x = torch.Tensor(x_mask).to(hp.use_device).detach()
+        # t_y is 0 padded at the front for AR prediction
+        t_y = torch.Tensor(y).to(hp.use_device).detach()
+        mask_t_y = torch.Tensor(y_mask).to(hp.use_device).detach()
 
-    pred_logit = model(t_x, t_y, mask_t_x, mask_t_y)
-    pred_prob = softmax(pred_logit)
-    loss = loss_fun(pred_prob, t_y)
-    loss = (mask_t_y * loss).sum(dim=0).mean()
-    l = loss.cpu().data.numpy()
-    if extras["train"]:
-        loss.backward()
-        #clipping_grad_norm_(model.parameters(), hp.clip)
-        optimizer.step()
-    return l, None
+        pred_logit = model(t_x, t_y[:-1], mask_t_x, mask_t_y[:-1])
+        pred_prob = softmax(pred_logit)
+        loss_batch = loss_fun(pred_prob, t_y[1:])
+        #loss = (mask_t_y[1:] * loss_batch).sum(dim=0).mean()
+        loss = loss_batch.sum(dim=0).mean()
+        l = loss.cpu().data.numpy()
+        if extras["train"]:
+            loss.backward()
+            #clipping_grad_norm_(model.parameters(), hp.clip)
+            optimizer.step()
+        return l, None
 
-s = {"model": model,
-     "optimizer": optimizer,
-     "hparams": hp}
+    s = {"model": model,
+         "optimizer": optimizer,
+         "hparams": hp}
 
-run_loop(loop, train_itr,
-         loop, valid_itr,
-         s,
-         n_train_steps_per=1000,
-         n_valid_steps_per=50)
+    run_loop(loop, train_itr,
+             loop, valid_itr,
+             s,
+             n_train_steps_per=1000,
+             n_valid_steps_per=50)

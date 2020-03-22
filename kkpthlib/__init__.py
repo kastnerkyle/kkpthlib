@@ -5,3 +5,4 @@ from .iterators import *
 from .datasets import fetch_jsb_chorales
 from .datasets import MusicJSONRasterIterator
 from .datasets import music_json_to_midi
+from .sample import *
