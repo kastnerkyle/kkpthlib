@@ -15,12 +15,13 @@ from kkpthlib import LayerNorm
 from kkpthlib import relu
 from kkpthlib import softmax
 from kkpthlib import clipping_grad_norm_
+from kkpthlib import clipping_grad_value_
 from kkpthlib import ListIterator
 from kkpthlib import run_loop
 from kkpthlib import HParams
 from kkpthlib import get_logger
-
-from kkpthlib import BasicTransformerBlock
+from kkpthlib import TransformerAutoregressiveBlock
+from kkpthlib import NoamOpt
 
 jsb = fetch_jsb_chorales()
 
@@ -36,13 +37,15 @@ hp = HParams(input_dim=133, #hardcoded from knowledge of vocab size, can tempora
              clock_embed_dim=16,
              # maybe change this?
              hidden_dim=512,
+             init="truncated_normal",
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
+             dropout_keep_prob=1.,
              learning_rate=0.0001,
-             clip=10.,
-             batch_size=24,
+             clip=3.,
+             batch_size=20,
              clocks=[2, 4, 8, 16, 32, 64],
              n_layers=5,
-             max_sequence_length=1000,
+             max_sequence_length=1024,
              random_seed=2122,
              vocab_storage="jsb_raster_music_transformer_stored_vocab.npz")
 
@@ -65,8 +68,10 @@ if not os.path.exists(hp.vocab_storage):
             roll, mask = next(itr)
             unique_vals = np.unique(roll)
             vocab = vocab | set(unique_vals.astype(int))
-    except:
-        # will raise an Error when it terminates
+    except Exception as e:
+        # will raise an error when it terminates
+        # debug here
+        # from IPython import embed; embed(); raise ValueError()
         pass
     vocab = np.array(sorted(list(vocab)))
     np.savez(hp.vocab_storage, vocab=vocab)
@@ -74,7 +79,6 @@ else:
     logger.info("Saved vocab {} found, loading...".format(hp.vocab_storage))
     d = np.load(hp.vocab_storage)
     vocab = d["vocab"]
-
 
 def build_model(hp):
     random_state = np.random.RandomState(hp.random_seed)
@@ -93,25 +97,20 @@ def build_model(hp):
                                              name="token_embed",
                                              device=hp.use_device)
             combined_dim = len(hp.clocks) * hp.clock_embed_dim + hp.token_embed_dim
-            self.blocks = nn.ModuleList([BasicTransformerBlock([combined_dim],
-                                               hp.max_sequence_length,
-                                               random_state=random_state,
-                                               name="block_{}".format(i),
-                                               device=hp.use_device) for i in range(hp.n_layers)])
+            self.comb_proj = Linear([combined_dim], hp.hidden_dim, init=hp.init,
+                                    random_state=random_state, device=hp.use_device, name="hidden_proj")
 
-            self.ln = LayerNorm(combined_dim, name="model_layer_norm",
-                                device=hp.use_device)
+            self.block = TransformerAutoregressiveBlock([hp.hidden_dim],
+                                                        n_layers=hp.n_layers,
+                                                        dropout_keep_prob=hp.dropout_keep_prob,
+                                                        random_state=random_state,
+                                                        init=hp.init,
+                                                        name="block",
+                                                        device=hp.use_device)
 
-            self.out_proj = Linear([combined_dim], len(vocab), random_state=random_state, device=hp.use_device, name="model_out")
+            self.out_proj = Linear([hp.hidden_dim], len(vocab), init=hp.init, random_state=random_state, device=hp.use_device, name="model_out")
 
-
-        def forward(self, x, x_mask, clocks, past=None):
-            if past is None:
-                past_length = 0
-                past = [None] * len(self.blocks)
-            else:
-                past_length = past[0][0].size(-2)
-
+        def forward(self, x, x_mask, clocks, list_of_memories=None, memory_mask=None):
             te, te_v = self.token_embedding(x)
             ce = []
             for i in range(len(self.clock_embeddings)):
@@ -120,17 +119,12 @@ def build_model(hp):
             comb = torch.cat([te] + ce, dim=-1)
             # 0 out the embedding for pad tokens
             comb = comb * x_mask[..., None]
-            hidden_states = comb
-
-            presents = []
-            assert len(self.blocks) == len(past)
-            for block, layer_past in zip(self.blocks, past):
-                hidden_states, present = block([hidden_states], source_mask=x_mask, target_mask=x_mask)
-                presents.append(present)
-            hidden_states = self.ln(hidden_states)
-            o = self.out_proj([hidden_states])
-            return o, presents
-    return Model().to(hp.use_device)
+            h_proj = self.comb_proj([comb])
+            hidden, mems = self.block([h_proj], x_mask, list_of_memories, memory_mask)
+            o = self.out_proj([hidden])
+            return o, mems
+    model = Model().to(hp.use_device)
+    return model
 
 vocab_mapper = {k: v + 1000 for k, v in zip(vocab, range(len(vocab)))}
 inverse_vocab_mapper = {v - 1000:k for k, v in vocab_mapper.items()}
@@ -148,10 +142,12 @@ if __name__ == "__main__":
                                         with_clocks=hp.clocks,
                                         random_seed=hp.random_seed)
 
-    m = build_model(hp)
-    #m = build_model().to(hp.use_device)
+    model = build_model(hp)
     loss_fun = CategoricalCrossEntropy()
-    optimizer = torch.optim.Adam(m.parameters(), hp.learning_rate)
+    def get_std_noam_opt(model):
+        return NoamOpt(hp.hidden_dim, 1, 4000,
+                torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1E-9))
+    optimizer = get_std_noam_opt(model)
 
     def loop(itr, extras, stateful_args):
         piano_roll, mask, clocks = next(itr)
@@ -164,24 +160,39 @@ if __name__ == "__main__":
 
         piano_roll = torch.Tensor(piano_roll).to(hp.use_device)
         mask = torch.Tensor(mask).to(hp.use_device)
-        # trim off one for AR prediction
-        clocks = [torch.Tensor(c)[:-1].to(hp.use_device) for c in clocks]
 
-        linear_out, past = m(piano_roll[:-1], mask[:-1], clocks)
-        prob_out = softmax(linear_out)
+        list_of_memories = None
+        memory_mask = None
+        div = 4
+        cut = len(piano_roll) // div
+        total_l = 0
+        for i in range(div):
+            piano_roll_cut = piano_roll[i * cut:(i + 1) * cut]
+            mask_cut = mask[i * cut:(i + 1) * cut]
 
-        loss = loss_fun(prob_out, piano_roll[1:])
+            clocks_cut = [torch.Tensor(c)[i * cut:(i + 1) * cut].to(hp.use_device) for c in clocks]
+            # trim off one for AR prediction
+            clocks_cut = [c[:-1] for c in clocks_cut]
 
-        loss = (mask[:-1] * loss).sum(dim=0).mean()
-        l = loss.cpu().data.numpy()
-        optimizer.zero_grad()
-        if extras["train"]:
-            loss.backward()
-            clipping_grad_norm_(m.parameters(), hp.clip)
-            optimizer.step()
+            linear_out, past = model(piano_roll_cut[:-1], mask_cut[:-1], clocks_cut, list_of_memories, memory_mask)
+            list_of_memories = past
+            memory_mask = mask_cut[:-1]
+
+            prob_out = softmax(linear_out)
+            loss = loss_fun(prob_out, piano_roll_cut[1:])
+            loss = (mask_cut[:-1] * loss).mean()
+            #loss = (mask_cut[:-1] * loss).sum(dim=0).mean()
+            l = loss.cpu().data.numpy()
+            total_l = total_l + l
+            optimizer.zero_grad()
+            if extras["train"]:
+                loss.backward()
+                #clipping_grad_norm_(model.parameters(), hp.clip)
+                clipping_grad_value_(model.parameters(), hp.clip)
+                optimizer.step()
         return l, None
 
-    s = {"model": m,
+    s = {"model": model,
          "optimizer": optimizer,
          "hparams": hp}
 

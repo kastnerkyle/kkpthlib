@@ -44,6 +44,7 @@ model.load_state_dict(m_dict)
 model = model.eval()
 
 test_word = "abcdefghij"
+test_word = "gelato____"
 test_inds = [v2i[c] for c in test_word]
 test_inds = np.array(test_inds)[:, None, None].astype("float32")
 bcast = np.ones((1, hp.batch_size, 1))

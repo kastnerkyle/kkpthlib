@@ -506,6 +506,17 @@ def clipping_grad_norm_(parameters, rescale, named_parameters=False):
         p.grad.data.mul_(scaling)
 
 
+def clipping_grad_value_(parameters, clip_value, named_parameters=False):
+    # is a generator... get a static reference so the second iteration isn't empty
+    if not named_parameters:
+        _params = [p for p in parameters]
+    else:
+        _params = [p[1] for p in parameters]
+    clip_value = float(clip_value)
+    for p in _params:
+        p.grad.data.clamp_(min=-clip_value, max=clip_value)
+
+
 class Embedding(torch.nn.Module):
     def __init__(self,
                  n_symbols,
@@ -723,8 +734,9 @@ class TransformerEncoderBlock(nn.Module):
         if random_state is None:
             raise ValueError("Must pass random_state object to TransformerEncoderBlock!")
 
-        name_ff = name + "_positionwise_feedforward_{}"
-        name_attn = name + "_transformer_multihead_attention_{}"
+        name_ff = name + "_encoder_positionwise_feedforward_{}"
+        name_attn = name + "_encoder_multihead_attention_{}"
+        name_encoder = name + "_encoder_layer_{}"
         layers = []
         for i in range(n_layers):
             ff = TransformerPositionwiseFeedforward([hidden_dim], feedforward_dim, dropout_keep_prob=dropout_keep_prob,
@@ -734,7 +746,7 @@ class TransformerEncoderBlock(nn.Module):
                                                   dropout_keep_prob=dropout_keep_prob,
                                                   random_state=random_state,
                                                   device=device, dtype=dtype, name=name_attn.format(i))
-            layer = TransformerEncoderLayer([hidden_dim], attn, ff, dropout_keep_prob=dropout_keep_prob)
+            layer = TransformerEncoderLayer([hidden_dim], attn, ff, dropout_keep_prob=dropout_keep_prob, name=name_encoder.format(i))
             layers.append(layer)
         self.layers = nn.ModuleList(layers)
         self.norm = LayerNorm(input_dim)
@@ -809,28 +821,34 @@ class TransformerDecoderBlock(nn.Module):
             name = _get_name()
 
         if random_state is None:
-            raise ValueError("Must pass random_state object to TransformerDncoderBlock!")
+            raise ValueError("Must pass random_state object to TransformerDecoderBlock!")
 
-        name_ff = name + "_positionwise_feedforward_{}"
-        name_source_attn = name + "_transformer_multihead_attention_source_{}"
-        name_target_attn = name + "_transformer_multihead_attention_target_{}"
-        name_decoder = name + "_transformer_decoder"
+        name_ff = name + "_decoder_positionwise_feedforward_{}"
+        name_source_attn = name + "_decoder_multihead_attention_source_{}"
+        name_target_attn = name + "_decoder_multihead_attention_target_{}"
+        name_decoder = name + "_decoder_layer_{}"
         layers = []
         for i in range(n_layers):
             ff = TransformerPositionwiseFeedforward([hidden_dim], feedforward_dim, dropout_keep_prob=dropout_keep_prob,
                                                     random_state=random_state,
+                                                    init=init,
+                                                    strict=strict,
                                                     device=device, dtype=dtype, name=name_ff.format(i))
             source_attn = TransformerMultiHeadAttention([hidden_dim], n_heads=n_heads,
                                                         dropout_keep_prob=dropout_keep_prob,
                                                         random_state=random_state,
+                                                        init=init,
+                                                        strict=strict,
                                                         device=device, dtype=dtype, name=name_source_attn.format(i))
             target_attn = TransformerMultiHeadAttention([hidden_dim], n_heads=n_heads,
                                                         dropout_keep_prob=dropout_keep_prob,
                                                         random_state=random_state,
+                                                        init=init,
+                                                        strict=strict,
                                                         device=device, dtype=dtype, name=name_target_attn.format(i))
 
             layer = TransformerDecoderLayer([hidden_dim], source_attn, target_attn, ff, dropout_keep_prob=dropout_keep_prob,
-                                            device=device, dtype=dtype, name=name_decoder)
+                                            device=device, dtype=dtype, name=name_decoder.format(i))
             layers.append(layer)
         self.layers = nn.ModuleList(layers)
         self.norm = LayerNorm(input_dim)
@@ -841,6 +859,75 @@ class TransformerDecoderBlock(nn.Module):
         for layer in self.layers:
             x = layer([x], [memory], target_mask, memory_mask)
         return self.norm(x)
+
+
+class TransformerAutoregressiveBlock(nn.Module):
+    """
+    Largely a TransformerDecoderBlock , but with optional context
+    returns output, list_of_memories_length_of_n_layers
+    """
+    def __init__(self, list_of_input_dims, n_layers=6, feedforward_dim=2048, n_heads=8, dropout_keep_prob=1.,
+                 random_state=None,
+                 init=None,
+                 strict="default",
+                 name=None, device="default", dtype="default"):
+        super(TransformerAutoregressiveBlock, self).__init__()
+        input_dim = sum(list_of_input_dims)
+        hidden_dim = input_dim
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass random_state object to TransformerAutoregressiveBlock!")
+
+        name_ff = name + "_autoregressive_positionwise_feedforward_{}"
+        name_source_attn = name + "_autoregressive_multihead_attention_source_{}"
+        name_target_attn = name + "_autoregressive_multihead_attention_target_{}"
+        name_decoder = name + "_autoregressive_layer_{}"
+        self.n_layers = n_layers
+        layers = []
+        for i in range(n_layers):
+            ff = TransformerPositionwiseFeedforward([hidden_dim], feedforward_dim, dropout_keep_prob=dropout_keep_prob,
+                                                    random_state=random_state,
+                                                    init=init,
+                                                    strict=strict,
+                                                    device=device, dtype=dtype, name=name_ff.format(i))
+            source_attn = TransformerMultiHeadAttention([hidden_dim], n_heads=n_heads,
+                                                        dropout_keep_prob=dropout_keep_prob,
+                                                        random_state=random_state,
+                                                        init=init,
+                                                        strict=strict,
+                                                        device=device, dtype=dtype, name=name_source_attn.format(i))
+            target_attn = TransformerMultiHeadAttention([hidden_dim], n_heads=n_heads,
+                                                        dropout_keep_prob=dropout_keep_prob,
+                                                        random_state=random_state,
+                                                        init=init,
+                                                        strict=strict,
+                                                        device=device, dtype=dtype, name=name_target_attn.format(i))
+
+            layer = TransformerDecoderLayer([hidden_dim], source_attn, target_attn, ff, dropout_keep_prob=dropout_keep_prob,
+                                            device=device, dtype=dtype, name=name_decoder.format(i))
+            layers.append(layer)
+        self.layers = nn.ModuleList(layers)
+        self.norm = LayerNorm(input_dim)
+
+    def forward(self, list_of_targets, target_mask, list_of_contexts=None, memory_mask=None, detach_return_memory=True):
+        x = torch.cat(list_of_targets, dim=-1)
+
+        if list_of_contexts is None:
+            memories = [0. * x.detach() for i in range(self.n_layers)]
+            memory_mask = 0. * target_mask + 1.
+        else:
+            memories = list_of_contexts
+
+        new_mems = []
+        for i, layer in enumerate(self.layers):
+            x = layer([x], [memories[i]], target_mask, memory_mask)
+            if detach_return_memory:
+                new_mems.append(x.detach())
+            else:
+                new_mems.append(x)
+        return self.norm(x), new_mems
 
 
 def transformer_attention(query, key, value, mask=None, dropout_layer=None,
@@ -959,6 +1046,7 @@ class TransformerPositionwiseFeedforward(nn.Module):
                  dropout_keep_prob=1.,
                  random_state=None,
                  init=None,
+                 activation_function=F.relu,
                  strict="default",
                  device="default", dtype="default", name=None):
         super(TransformerPositionwiseFeedforward, self).__init__()
@@ -987,594 +1075,12 @@ class TransformerPositionwiseFeedforward(nn.Module):
                           init=init, strict=strict)
 
         self.dropout = nn.Dropout(1. - dropout_keep_prob)
+        self.act = activation_function
 
     def forward(self, list_of_inputs):
         x = torch.cat(list_of_inputs, dim=-1)
         # particular nesting because internal layers expect list input
-        return self.w_2([self.dropout(F.relu(self.w_1(list_of_inputs)))])
-
-
-'''
-class TransformerConv1d(torch.nn.Module):
-    def __init__(self,
-                 list_of_input_dims,
-                 output_dim,
-                 name=None,
-                 init="normal",
-                 scale=0.02,
-                 biases=True,
-                 strict=None,
-                 dtype="default",
-                 device="default",
-                 random_state=None):
-        super(TransformerConv1d, self).__init__()
-
-        if name is None:
-            name = _get_name()
-
-        if random_state is None:
-            raise ValueError("must pass instance of np.random.RandomState!")
-
-        input_dim = sum(list_of_input_dims)
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-
-        name_w = name + "_transformer_conv1d_w"
-        name_b = name + "_transformer_conv1d_b"
-
-        if strict is None:
-            strict = get_strict_mode_default()
-
-        if strict:
-            cur_defs = get_params_dict()
-            if name_w in cur_defs:
-                raise ValueError("Name {} already created in params dict!".format(name_w))
-
-            if name_b in cur_defs:
-                raise ValueError("Name {} already created in params dict!".format(name_b))
-
-        if init is None or type(init) is str:
-            weight_values, = make_numpy_weights(input_dim, [output_dim],
-                                                random_state=random_state,
-                                                init=init, scale=scale, name=name_w)
-        else:
-            # rely on announcement from parent class
-            weight_values=init[0]
-
-        try:
-            weight = _get_shared(name_w)
-        except NameError:
-            weight = make_tensor(weight_values, dtype=dtype, device=device)
-            _set_shared(name_w, weight)
-
-        self.weight = torch.nn.Parameter(weight)
-        self.biases = None
-
-        if biases:
-            if (init is None) or (type(init) is str):
-                b, = make_numpy_biases([output_dim], name=name_b)
-            else:
-                b = init[1]
-            b = b
-            try:
-                biases = _get_shared(name_b)
-            except NameError:
-                biases = make_tensor(b, dtype=dtype, device=device)
-                _set_shared(name_b, biases)
-            self.biases = torch.nn.Parameter(biases)
-
-
-    def forward(self, list_of_inputs):
-        x = torch.cat(list_of_inputs, dim=-1)
-        # try to transpose and avoid reshape jumbling?
-        x = x.permute(1, 0, 2)
-        size_out = x.size()[:-1] + (self.output_dim,)
-        x = torch.addmm(self.biases, x.reshape(-1, x.size(-1)), self.weight)
-        x = x.view(*size_out)
-        x = x.permute(1, 0, 2)
-        return x
-
-
-class TransformerMLP(torch.nn.Module):
-    def __init__(self,
-                 list_of_input_dims,
-                 output_dim,
-                 dropout_keep_prob=1.,
-                 name=None,
-                 strict=None,
-                 random_state=None,
-                 activation_function=gelu,
-                 device="default",
-                 dtype="default"):
-        super(TransformerMLP, self).__init__()
-
-        if name is None:
-            name = _get_name()
-
-        if random_state is None:
-            raise ValueError("must pass instance of np.random.RandomState!")
-
-        input_dim = sum(list_of_input_dims)
-
-        if strict is None:
-            strict = get_strict_mode_default()
-
-        name_fc = name + "_transformer_mlp_fc"
-        name_proj = name + "_transformer_mlp_proj"
-
-        dropout = 1. - dropout_keep_prob
-
-        self.dropout_1 = nn.Dropout(dropout)
-
-        self.c_fc = TransformerConv1d([input_dim], output_dim,
-                                       random_state=random_state,
-                                       name=name_fc,
-                                       device=device,
-                                       dtype=dtype)
-
-        self.c_proj = TransformerConv1d([output_dim], input_dim,
-                                        random_state=random_state,
-                                        name=name_proj,
-                                        device=device,
-                                        dtype=dtype)
-        self.activation_function = activation_function
-
-    def forward(self, list_of_inputs):
-        h = self.dropout_1(self.activation_function(self.c_fc(list_of_inputs)))
-        h2 = self.c_proj([h])
-        return h2
-
-
-class TransformerSelfAttention(torch.nn.Module):
-    def __init__(self,
-                 list_of_input_dims,
-                 context_length,
-                 n_attention_heads,
-                 scale_attention=True,
-                 name=None,
-                 strict=None,
-                 random_state=None,
-                 dtype="default",
-                 device="default"):
-        super(TransformerSelfAttention, self).__init__()
-
-        if name is None:
-            name = _get_name()
-
-        if random_state is None:
-            raise ValueError("must pass instance of np.random.RandomState!")
-
-        input_dim = sum(list_of_input_dims)
-
-        if input_dim % n_attention_heads != 0:
-            raise ValueError("input_dim % n_attention heads must be 0!")
-
-        if strict is None:
-            strict = get_strict_mode_default()
-
-        self.input_dim = input_dim
-        self.context_length = context_length
-        self.n_attention_heads = n_attention_heads
-        self.scale_attention = scale_attention
-        self.split_size = input_dim
-        self.random_state = random_state
-        self.device = device
-        self.dtype = dtype
-
-        conv_attn_name = name + "_transformer_self_attention_conv_attn"
-        conv_proj_name = name + "_transformer_self_attention_conv_proj"
-
-        dropout = 1. - dropout_keep_prob
-        self.dropout_1 = nn.Dropout(dropout)
-
-        self.c_attn = TransformerConv1d([input_dim], input_dim * 3,
-                                        random_state=random_state,
-                                        name=conv_attn_name,
-                                        device=device,
-                                        dtype=dtype)
-
-        self.c_proj = TransformerConv1d([input_dim], input_dim,
-                                        random_state=random_state,
-                                        name=conv_proj_name,
-                                        device=device,
-                                        dtype=dtype)
-
-    def _attn(self, q, k, v, dropout=None, mask_tensor=None, mask_fill=-1E-9):
-        #dropout layer input
-        # mask tensor of batch, target_length, source_length
-        # q of torch.Size([10, 8, 1000, 24])
-        # q of batch, head, seq_length, head_features
-        # k of batch, head, head_features, seq_length
-        # v of batch, head, seq_length, head_features
-        scores = torch.matmul(q, k) # w of batch, head, seq_length, seq_length
-        if self.scale_attention:
-            scores = scores / math.sqrt(v.size(-1))
-        if mask_tensor is not None:
-            scores = scores.masked_fill(mask_tensor[:, None] == 0, mask_fill)
-        p_attn = F.softmax(scores, dim=-1)
-        if dropout is not None:
-            p_attn = dropout(p_attn)
-        return torch.matmul(p_attn, v), p_attn
-
-    def _subsequent_mask(self, size):
-        attn_shape = (1, size, size)
-        subsequent_mask = np.triu(np.ones(attn_shape), k=1).astype('uint8')
-        base_mask = make_tensor(subsequent_mask, device=self.device, dtype=self.dtype) == 0
-        return base_mask
-
-    def _split_heads(self, x, k=False):
-        # in - seq_length, batch, features
-        new_x_shape = x.size()[:-1] + (self.n_attention_heads, x.size(-1) // self.n_attention_heads)
-        x = x.view(*new_x_shape)  # (seq_length, batch, head, head_features
-        if k:
-            return x.permute(1, 2, 3, 0) # (batch, head, head_features, seq_length)
-        else:
-            return x.permute(1, 2, 0, 3) # (batch, head, seq_length, head_features)
-
-    def _merge_heads(self, x):
-        # in x, (batch, head, seq_length, head_features)
-        x = x.permute(0, 2, 1, 3).contiguous()
-        # now, (batch, seq_length, head, head_features)
-        new_x_shape = x.size()[:-2] + (x.size(-2) * x.size(-1),)
-        return x.view(*new_x_shape)  # (batch, seq_length, features)
-
-    def forward(self, list_of_inputs, dropout_keep_prob=1., make_ar_mask=True, layer_past=None,
-                source_mask=None, target_mask=None):
-        x = self.c_attn(list_of_inputs)
-        ones_mask = make_tensor(np.ones((1, x.size(0), x.size(0))).astype('uint8'), device=self.device, dtype=self.dtype)
-        partial_mask = ones_mask
-        if target_mask is not None:
-            # could make this more generic by having a target list and source list...)(
-            partial_mask = partial_mask * target_mask.transpose(1, 0).int()[..., None]
-        if source_mask is not None:
-            partial_mask = partial_mask * source_mask.transpose(1, 0).int()[:, None, :]
-        if make_ar_mask:
-            ar_mask_tensor = self._subsequent_mask(x.size(0))
-            mask_tensor = ar_mask_tensor * partial_mask
-        # mask tensor of batch, target_length, source_length
-        query, key, value = x.split(self.split_size, dim=-1)
-        query = self._split_heads(query)
-        key = self._split_heads(key, k=True)
-        value = self._split_heads(value)
-        if layer_past is not None:
-           ##past_key, past_value = layer_past[0].transpose(-2, -1), layer_past[1]
-           past_key, past_value = layer_past[0], layer_past[1]
-           print("past basica attention key")
-           from IPython import embed; embed(); raise ValueError()
-           key = torch.cat((past_key, key), dim=-1)
-           value = torch.cat((past_value, value), dim=-2)
-        # form current attention values to pass
-        present = (key, value)
-        #present = torch.stack((key.transpose(-2, -1), value))  # transpose to have same shapes for stacking
-        a, probs = self._attn(query, key, value, dropout=self.dropout, mask_tensor=mask_tensor)
-        a = self._merge_heads(a)
-        #  batch, seq_length, features -> seq_length, batch, features
-        a = a.permute(1, 0, 2)
-        a = self.c_proj([a])
-        return a, present
-
-
-class BasicTransformerBlock(torch.nn.Module):
-    #https://github.com/graykode/gpt-2-Pytorch/blob/master/GPT2/model.py
-    #https://github.com/scpark20/Music-GPT-2/blob/master/Music-GPT-2.ipynb
-    #https://mlexplained.com/2019/07/04/building-the-transformer-xl-from-scratch/
-    def __init__(self,
-                 list_of_input_dims,
-                 context_length,
-                 n_attention_heads=8,
-                 dropout_keep_prob=1.,
-                 name=None,
-                 strict=None,
-                 random_state=None,
-                 dtype="default",
-                 device="default"):
-        super(BasicTransformerBlock, self).__init__()
-
-        if name is None:
-            name = _get_name()
-
-        if random_state is None:
-            raise ValueError("must pass instance of np.random.RandomState!")
-
-        input_dim = sum(list_of_input_dims)
-        ln_1_name = name + "_transformer_block_layer_norm_1"
-        self.ln_1 = LayerNorm(input_dim, name=ln_1_name,
-                              dtype=dtype, device=device)
-
-        dropout = 1. - dropout_keep_prob
-
-        self.dropout_1 = nn.Dropout(dropout)
-        self.dropout_2 = nn.Dropout(dropout)
-
-        attention_name = name + "_transformer_block_self_attention"
-        self.attn = TransformerSelfAttention([input_dim],
-                                             context_length=context_length,
-                                             n_attention_heads=n_attention_heads,
-                                             dropout_keep_prob=dropout_keep_prob,
-                                             name=attention_name,
-                                             dtype=dtype,
-                                             device=device,
-                                             random_state=random_state)
-
-        ln_2_name = name + "_transformer_block_layer_norm_2"
-        self.ln_2 = LayerNorm(input_dim, name=ln_2_name,
-                              dtype=dtype, device=device)
-
-        mlp_name = name + "_transformer_block_mlp"
-        self.mlp = TransformerMLP([input_dim],
-                                  4 * input_dim,
-                                  dropout_keep_prob=dropout_keep_prob,
-                                  name=mlp_name,
-                                  dtype=dtype,
-                                  device=device,
-                                  random_state=random_state)
-
-    def forward(self, list_of_inputs, source_mask=None, target_mask=None, layer_past=None):
-        inp = torch.cat(list_of_inputs)
-        a, present = self.attn([self.ln_1(inp)], layer_past=layer_past, source_mask=source_mask, target_mask=target_mask)
-        inp = inp + self.dropout_1(a)
-        m = self.mlp([self.ln_2(inp)])
-        inp = inp + self.dropout_2(m)
-        return inp, present
-
-
-class RelativeTransformerSelfAttention(torch.nn.Module):
-    # https://github.com/scpark20/Music-GPT-2/blob/master/Music-GPT-2.ipynb
-    def __init__(self,
-                 list_of_input_dims,
-                 context_length,
-                 n_attention_heads,
-                 scale_attention=True,
-                 dropout_keep_prob=1.,
-                 name=None,
-                 strict=None,
-                 random_state=None,
-                 init=None,
-                 scale="default",
-                 dtype="default",
-                 device="default"):
-        super(RelativeTransformerSelfAttention, self).__init__()
-
-        if name is None:
-            name = _get_name()
-
-        if random_state is None:
-            raise ValueError("must pass instance of np.random.RandomState!")
-
-        input_dim = sum(list_of_input_dims)
-
-        if input_dim % n_attention_heads != 0:
-            raise ValueError("input_dim % n_attention heads must be 0!")
-
-        if strict is None:
-            strict = get_strict_mode_default()
-
-        self.input_dim = input_dim
-        self.context_length = context_length
-        self.n_attention_heads = n_attention_heads
-        self.scale_attention = scale_attention
-        self.split_size = input_dim
-        self.random_state = random_state
-        self.device = device
-        self.dtype = dtype
-
-        conv_attn_name = name + "_relative_transformer_self_attention_conv_attn"
-        conv_proj_name = name + "_relative_transformer_self_attention_conv_proj"
-        embedding_w = name + "_relative_transformer_self_attention_relative_embedding"
-
-        embedding_shp = (self.n_attention_heads, self.context_length, input_dim // self.n_attention_heads)
-        if init is None or type(init) is str:
-            weight_values, = make_numpy_weights((embedding_shp[1], 1, 1),
-                                                [(embedding_shp[0], 1, embedding_shp[2])],
-                                                random_state=random_state,
-                                                init=init,
-                                                scale=scale,
-                                                name=embedding_w)
-            # trim it up since we used "convolutional" initializers
-            weight_values = weight_values[0].transpose(2, 1, 0)
-        else:
-            # rely on announcement from parent class
-            weight_values=init[0]
-
-        if strict is None:
-            strict = get_strict_mode_default()
-
-        if strict:
-            cur_defs = get_params_dict()
-            if embedding_w in cur_defs:
-                raise ValueError("Name {} already created in params dict!".format(name_w))
-
-        try:
-            weight = _get_shared(embedding_w)
-        except NameError:
-            weight = make_tensor(weight_values, dtype=dtype, device=device)
-            _set_shared(embedding_w, weight)
-
-        dropout = 1. - dropout_keep_prob
-        self.dropout_1 = nn.Dropout(dropout)
-
-        self.embedding = torch.nn.Parameter(weight)
-        # [self.n_attention_heads, self.context_length, input_dim // self.n_attention_heads]
-
-        self.c_attn = TransformerConv1d([input_dim], input_dim * 3,
-                                        random_state=random_state,
-                                        name=conv_attn_name,
-                                        device=device,
-                                        dtype=dtype)
-
-        self.c_proj = TransformerConv1d([input_dim], input_dim,
-                                        random_state=random_state,
-                                        name=conv_proj_name,
-                                        device=device,
-                                        dtype=dtype)
-
-    def _relative_attn(self, q):
-        # q [batch, heads, sequence, features]
-        batch, heads, sequence, features = q.shape
-        # e [heads, sequence, features]
-        # slice the embedding to match CURRENT sequence size
-        # not sure if should be backwards slice, or forward - or if it even matters
-        E = self.embedding[:, -sequence:]
-        # [heads, batch, sequence, features]
-        q_ = q.permute(1, 0, 2, 3)
-        # [heads, batch * sequence, features]
-        q_ = q_.reshape((heads, batch * sequence, features))
-        # [heads, batch * sequence, sequence]
-        rel = torch.matmul(q_, E.transpose(2, 1))
-        # [heads, batch, sequence, sequence]
-        rel = rel.reshape((heads, batch, sequence, sequence))
-        # [heads, batch, sequence, 1+sequence]
-        rel = F.pad(rel, (1, 0))
-        # [heads, batch, sequence+1, sequence]
-        rel = rel.reshape((heads, batch, sequence + 1, sequence))
-        # [heads, batch, sequence, sequence]
-        rel = rel[:, :, 1:]
-        # [batch, heads, sequence, sequence]
-        rel = rel.permute((1, 0, 2, 3))
-        return rel
-
-    def _attn(self, q, k, v, dropout=None, mask_tensor=None, mask_fill=-1E-9):
-        # dropout LAYER passed in
-        # mask tensor of batch, target_length, source_length
-        # q of torch.Size([10, 8, 1000, 24])
-        # q of batch, head, seq_length, head_features
-        # k of batch, head, head_features, seq_length
-        # v of batch, head, seq_length, head_features
-        scores = torch.matmul(q, k) # w of batch, head, seq_length, seq_length
-        r_a = self._relative_attn(q)
-        scores = scores + r_a
-        if self.scale_attention:
-            scores = scores / math.sqrt(v.size(-1))
-        if mask_tensor is not None:
-            scores = scores.masked_fill(mask_tensor[:, None] == 0, mask_fill)
-
-        p_attn = F.softmax(scores, dim=-1)
-        if dropout is not None:
-            p_attn = dropout(p_attn)
-        return torch.matmul(p_attn, v), p_attn
-
-    def _subsequent_mask(self, size):
-        attn_shape = (1, size, size)
-        subsequent_mask = np.triu(np.ones(attn_shape), k=1).astype('uint8')
-        base_mask = make_tensor(subsequent_mask, device=self.device, dtype=self.dtype) == 0
-        return base_mask
-
-    def _split_heads(self, x, k=False):
-        # in - seq_length, batch, features
-        new_x_shape = x.size()[:-1] + (self.n_attention_heads, x.size(-1) // self.n_attention_heads)
-        x = x.view(*new_x_shape)  # (seq_length, batch, head, head_features
-        if k:
-            return x.permute(1, 2, 3, 0) # (batch, head, head_features, seq_length)
-        else:
-            return x.permute(1, 2, 0, 3) # (batch, head, seq_length, head_features)
-
-    def _merge_heads(self, x):
-        # in x, (batch, head, seq_length, head_features)
-        x = x.permute(0, 2, 1, 3).contiguous()
-        # now, (batch, seq_length, head, head_features)
-        new_x_shape = x.size()[:-2] + (x.size(-2) * x.size(-1),)
-        return x.view(*new_x_shape)  # (batch, seq_length, features)
-
-    def forward(self, list_of_inputs, make_ar_mask=True, layer_past=None,
-                source_mask=None, target_mask=None):
-        x = self.c_attn(list_of_inputs)
-        ones_mask = make_tensor(np.ones((1, x.size(0), x.size(0))).astype('uint8'), device=self.device, dtype=self.dtype)
-        partial_mask = ones_mask
-        if target_mask is not None:
-            # could make this more generic by having a target list and source list...)(
-            partial_mask = partial_mask * target_mask.transpose(1, 0).int()[..., None]
-        if source_mask is not None:
-            partial_mask = partial_mask * source_mask.transpose(1, 0).int()[:, None, :]
-        if make_ar_mask:
-            ar_mask_tensor = self._subsequent_mask(x.size(0))
-            mask_tensor = ar_mask_tensor * partial_mask
-        # mask tensor of batch, target_length, source_length
-        query, key, value = x.split(self.split_size, dim=-1)
-        query = self._split_heads(query)
-        key = self._split_heads(key, k=True)
-        value = self._split_heads(value)
-        if layer_past is not None:
-           raise ValueError("stateful sampling for relative attention not currently supported!")
-           ##past_key, past_value = layer_past[0].transpose(-2, -1), layer_past[1]
-        #   past_key, past_value = layer_past[0], layer_past[1]
-           ##print("past relative attention key")
-        #   key = torch.cat((past_key, key), dim=-1)
-        #   value = torch.cat((past_value, value), dim=-2)
-        # form current attention values to pass
-        present = (key, value)
-        #present = torch.stack((key.transpose(-2, -1), value))  # transpose to have same shapes for stacking
-        a, probs = self._attn(query, key, value, dropout=self.dropout_1, mask_tensor=mask_tensor)
-        a = self._merge_heads(a)
-        #  batch, seq_length, features -> seq_length, batch, features
-        a = a.permute(1, 0, 2)
-        a = self.c_proj([a])
-        return a, present
-
-
-class RelativeTransformerBlock(torch.nn.Module):
-    #https://github.com/graykode/gpt-2-Pytorch/blob/master/GPT2/model.py
-    #https://github.com/scpark20/Music-GPT-2/blob/master/Music-GPT-2.ipynb
-    #https://mlexplained.com/2019/07/04/building-the-transformer-xl-from-scratch/
-    def __init__(self,
-                 list_of_input_dims,
-                 context_length,
-                 n_attention_heads=8,
-                 dropout_keep_prob=1.,
-                 name=None,
-                 strict=None,
-                 random_state=None,
-                 dtype="default",
-                 device="default"):
-        super(RelativeTransformerBlock, self).__init__()
-
-        if name is None:
-            name = _get_name()
-
-        if random_state is None:
-            raise ValueError("must pass instance of np.random.RandomState!")
-
-        input_dim = sum(list_of_input_dims)
-
-        ln_1_name = name + "_relative_transformer_block_layer_norm_1"
-        self.ln_1 = LayerNorm(input_dim, name=ln_1_name,
-                              dtype=dtype, device=device)
-
-        dropout = 1. - dropout_keep_prob
-        self.dropout_1 = nn.Dropout(dropout)
-        self.dropout_2 = nn.Dropout(dropout)
-
-        attention_name = name + "_relative_transformer_block_self_attention"
-        self.attn = RelativeTransformerSelfAttention([input_dim],
-                                                     context_length=context_length,
-                                                     n_attention_heads=n_attention_heads,
-                                                     dropout_keep_prob=dropout_keep_prob,
-                                                     name=attention_name,
-                                                     dtype=dtype,
-                                                     device=device,
-                                                     random_state=random_state)
-
-
-        ln_2_name = name + "_relative_transformer_block_layer_norm_2"
-        self.ln_2 = LayerNorm(input_dim, name=ln_2_name,
-                              dtype=dtype, device=device)
-
-        mlp_name = name + "_relative_transformer_block_mlp"
-        self.mlp = TransformerMLP([input_dim],
-                                  4 * input_dim,
-                                  dropout_keep_prob=dropout_keep_prob,
-                                  name=mlp_name,
-                                  dtype=dtype,
-                                  device=device,
-                                  random_state=random_state)
-
-    def forward(self, list_of_inputs, source_mask=None, target_mask=None, layer_past=None):
-        inp = torch.cat(list_of_inputs)
-        a, present = self.attn([self.ln_1(inp)], layer_past=layer_past, source_mask=source_mask, target_mask=target_mask)
-        inp = inp + self.dropout_1(a)
-        m = self.mlp([self.ln_2(inp)])
-        inp = inp + self.dropout_2(m)
-        return inp, present
-'''
+        return self.w_2([self.dropout(self.act(self.w_1(list_of_inputs)))])
 
 
 class Linear(torch.nn.Module):

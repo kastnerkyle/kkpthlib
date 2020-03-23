@@ -524,9 +524,9 @@ def run_loop(train_loop_function, train_itr,
              valid_stateful_args=None,
              status_every_s=5,
              models_to_keep=5,
-             permanent_models_to_keep=100,
-             permanent_step_upper_lim=50000,
-             permanent_step_lower_lim=1000):
+             permanent_models_to_keep=50,
+             save_every_n_steps="default",
+             skip_first_n_steps_when_saving=0):
     """
     loop function signature
 
@@ -579,6 +579,8 @@ def run_loop(train_loop_function, train_itr,
     assert "model" in serialization_dict
     assert "hparams" in serialization_dict
     assert "optimizer" in serialization_dict
+    if save_every_n_steps != "default":
+        assert save_every_n_steps > 0
     # This could be configurable, but I prefer a hard required file and name for serialization
     script = get_script()
     full_script_path = os.path.abspath(script + ".py")
@@ -642,6 +644,7 @@ def run_loop(train_loop_function, train_itr,
         print_n_valid_steps_per = n_valid_steps_per
 
     total_epochs = 0
+    last_perma_save = 0
     while True:
         if total_epochs + 1 >= n_epochs:
             break
@@ -818,13 +821,29 @@ def run_loop(train_loop_function, train_itr,
         model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "checkpoint_"),
                          train_itr_steps_taken)
 
+        if save_every_n_steps == "default":
+            # both must be inf, we checked this at the top of the function
+            assert np.isinf(n_steps)
+            assert np.isinf(n_epochs)
+            # use the time of training to set a guess
+            # save every 30 mins roughly
+            # so 30 * 60 = desired num seconds
+            # sec / sec per step = step
+            tmp_save_every_n_steps = 30 * 60 / np.mean(minibatch_train_time)
+            logger.info("Using save_every_n_steps='default', permanent saver with training speed {} seconds per training minibatch, desired 30 min average save, saving every {} steps".format(np.mean(minibatch_train_time), tmp_save_every_n_steps))
+
         if np.isinf(n_steps):
             # just set it to a very large number
             tmp_n_steps = 10E6
         else:
             tmp_n_steps = n_steps
-        if train_itr_steps_taken % min(permanent_step_upper_lim, max(permanent_step_lower_lim, int(tmp_n_steps // permanent_models_to_keep))) == 0:
-            perma_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "permanent_"), train_itr_steps_taken)
+
+        # want to do a first save immediately, rather than wait
+        if train_itr_steps_taken >= (last_perma_save + tmp_save_every_n_steps) or last_perma_save == 0:
+            # if skip specified, override the "save immediately" option set by last_perma_save == 0
+            if train_itr_steps_taken >= skip_first_n_steps_when_saving:
+                perma_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "permanent_"), train_itr_steps_taken)
+                last_perma_save = train_itr_steps_taken
 
         if was_best_valid_loss:
             logger.info("valid saver had best valid, step {}".format(train_itr_steps_taken))

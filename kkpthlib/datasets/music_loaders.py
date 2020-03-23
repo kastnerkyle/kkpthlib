@@ -297,7 +297,7 @@ class MusicJSONRasterIterator(object):
                 # let it go for now
 
             # start with 1 quarter note (4 16ths) worth of pure rest
-            roll_voices = [[], [], [], []]
+            roll_voices = [[0] * 4, [0] * 4, [0] * 4, [0] * 4]
             # use these for tracking if we cross a change event
             p_i = [0, 0, 0, 0]
             for c in clock:
@@ -363,8 +363,9 @@ class MusicJSONRasterIterator(object):
             subslice = raster_i_rv[slicer:slicer + self.max_sequence_length]
             raster_roll_voices[:len(subslice), n, 0] = subslice
             # we broadcast it to self.batch_size soon
-            for _i, ac in enumerate(lcl_clocks):
-                all_clocks[_i][:len(subslice), n, 0] = ac[slicer:slicer + self.max_sequence_length]
+            if self.with_clocks is not None:
+                for _i, ac in enumerate(lcl_clocks):
+                    all_clocks[_i][:len(subslice), n, 0] = ac[slicer:slicer + self.max_sequence_length]
         # take off trailing 1 from shape
         mask = np.array(raster_roll_voices >= 0.).astype(np.float32)[..., 0]
         # np.abs to get rid of -0. , is annoying to me
