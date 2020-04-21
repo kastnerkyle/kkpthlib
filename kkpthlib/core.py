@@ -15,6 +15,7 @@ import copy
 import sys
 import time
 import logging
+import select
 from collections import OrderedDict
 import hashlib
 import json
@@ -212,7 +213,7 @@ def write_lookup_file(script_path=None):
         json.dump(info_dict, f)
 
 
-def get_checkpoint_dir(checkpoint_dir=None, folder=None, create_dir=True):
+def get_checkpoint_dir(checkpoint_dir=None, folder=None, create_dir=True, tag=None):
     """ Get checkpoint directory path """
     if checkpoint_dir is None:
         checkpoint_dir = get_models_dir()
@@ -221,7 +222,11 @@ def get_checkpoint_dir(checkpoint_dir=None, folder=None, create_dir=True):
         checkpoint_name = get_script()
         checkpoint_import_time = get_checkpoint_import_time()
         checkpoint_uuid = get_checkpoint_uuid()
-        tmp = checkpoint_dir + os.path.sep + checkpoint_name + "_" + checkpoint_import_time  + "_" + checkpoint_uuid
+
+        if tag is None:
+            tmp = checkpoint_dir + os.path.sep + checkpoint_name + "_" + checkpoint_import_time  + "_" + checkpoint_uuid
+        else:
+            tmp = checkpoint_dir + os.path.sep + checkpoint_name + "_" + checkpoint_import_time  + "_" + checkpoint_uuid + "_" + tag
         checkpoint_dir = tmp
     else:
         checkpoint_dir = os.path.join(checkpoint_dir, folder)
@@ -254,8 +259,8 @@ def zip_dir(src, dst):
     zf.close()
 
 
-def archive_code():
-    checkpoint_dir = get_checkpoint_dir()
+def archive_code(tag=None):
+    checkpoint_dir = get_checkpoint_dir(tag=tag)
 
     save_script_path = checkpoint_dir + os.path.sep + get_script() + ".py"
     script_name = get_script() + ".py"
@@ -405,18 +410,18 @@ def filled_js_template_from_results_dict(results_dict, default_show="all"):
 
 
 def save_results_as_html(save_path, results_dict, use_checkpoint_dir=True,
-                         default_no_show="_auto", latest_tag=None):
+                         default_no_show="_auto", tag=None, latest_tag=None):
     show_keys = [k for k in results_dict.keys()
                  if default_no_show not in k]
     as_html = filled_js_template_from_results_dict(
         results_dict, default_show=show_keys)
     if use_checkpoint_dir:
-        save_path = os.path.join(get_checkpoint_dir(), save_path)
+        save_path = os.path.join(get_checkpoint_dir(tag=tag), save_path)
     logger.info("Saving HTML results %s" % save_path)
     with open(save_path, "w") as f:
         f.writelines(as_html)
     if latest_tag is not None:
-        latest_path = os.path.join(get_checkpoint_dir(), latest_tag + "_latest.html")
+        latest_path = os.path.join(get_checkpoint_dir(tag=tag), latest_tag + "_latest.html")
         if os.path.exists(latest_path):
             os.remove(latest_path)
         os.symlink(save_path, latest_path)
@@ -424,7 +429,7 @@ def save_results_as_html(save_path, results_dict, use_checkpoint_dir=True,
 
 
 @coroutine
-def threaded_html_writer(interp=True, maxsize=25):
+def threaded_html_writer(interp=True, tag=None, maxsize=25):
     """
     Expects to be sent a tuple of (save_path, results_dict)
     """
@@ -436,7 +441,7 @@ def threaded_html_writer(interp=True, maxsize=25):
                 return
             else:
                 save_path, results_dict = item
-                save_results_as_html(save_path, results_dict)
+                save_results_as_html(save_path, results_dict, tag=tag)
     threading.Thread(target=run_thread).start()
     try:
         n = 0
@@ -586,11 +591,39 @@ def run_loop(train_loop_function, train_itr,
     full_script_path = os.path.abspath(script + ".py")
     folder = str(os.sep).join(full_script_path.split(os.sep)[:-1])
 
+    break_outer = False
+    while True:
+        if break_outer:
+            if tag is not None:
+                logger.info("Confirmed tag input: {}".format(tag))
+            break
+
+        print("Type an arbitrary tag to add to the save file path (will continue without input after 30s)")
+        i, o, e = select.select([sys.stdin], [], [], 30)
+        if (i):
+            tag = sys.stdin.readline().strip().replace(" ", "_")
+            while True:
+                print("Tag input: '{}', OK? ([y]/n , will auto-accept in 15s)".format(tag))
+                i, o, e = select.select([sys.stdin], [], [], 15)
+                if (i):
+                    s = sys.stdin.readline().strip()
+                    if s == "y" or s == "":
+                        break_outer = True
+                        break
+                    else:
+                        break
+                else:
+                    #print("silent inner")
+                    break_outer = True
+                    break
+        else:
+            #print("no tag case")
+            tag = None
+            break_outer = True
     write_lookup_file()
-    archive_code()
+    archive_code(tag=tag)
 
     hostname = socket.gethostname()
-    logger.info("Host %s, script %s" % (hostname, script + ".py"))
     train_itr_steps_taken = 0
     valid_itr_steps_taken = 0
     overall_train_loss = []
@@ -616,8 +649,8 @@ def run_loop(train_loop_function, train_itr,
     valid_best_model_saver = Saver(max_to_keep=models_to_keep)
     perma_saver = Saver(max_to_keep=permanent_models_to_keep)
 
-    checkpoint_dir = get_checkpoint_dir()
-    thw = threaded_html_writer()
+    checkpoint_dir = get_checkpoint_dir(tag=tag)
+    thw = threaded_html_writer(tag=tag)
 
     cumulative_train_time = []
     minibatch_train_time = []
@@ -646,6 +679,10 @@ def run_loop(train_loop_function, train_itr,
     total_epochs = 0
     last_perma_save = 0
     while True:
+        logger.info("Host %s, script %s" % (hostname, script + ".py"))
+        logger.info("")
+        logger.info("{}".format(serialization_dict["hparams"]))
+        logger.info("")
         if total_epochs + 1 >= n_epochs:
             break
         total_epochs += 1
@@ -702,7 +739,7 @@ def run_loop(train_loop_function, train_itr,
             train_itr_steps_taken += 1
             minibatch_train_count.append(train_itr_steps_taken)
             if (i + 1) == n_train_steps_per or (time.time() - last_status) > status_every_s:
-                logger.info("[{}, script {}] train step {}/{}, overall train step {}".format(hostname, script, tsi + 1, print_n_train_steps_per, train_itr_steps_taken))
+                logger.info("[{}, script {}] train step {}/{}, overall train step {}".format(hostname, checkpoint_dir + os.sep + script, tsi + 1, print_n_train_steps_per, train_itr_steps_taken))
                 for n, tl in enumerate(all_train_loss):
                     logger.info("train loss {} {}, overall train average {}".format(n + 1, tl, np.mean(overall_train_loss[n] + this_train_loss[n])))
                 logger.info(" ")
@@ -774,7 +811,7 @@ def run_loop(train_loop_function, train_itr,
                 valid_itr_steps_taken += 1
                 minibatch_valid_count.append(valid_itr_steps_taken)
                 if (i + 1) == n_valid_steps_per or (time.time() - last_status) > status_every_s:
-                    logger.info("[{}, script {}] valid step {}/{}, overall valid step {}".format(hostname, script, vsi + 1, print_n_valid_steps_per, valid_itr_steps_taken))
+                    logger.info("[{}, script {}] valid step {}/{}, overall valid step {}".format(hostname, checkpoint_dir + os.sep + script, vsi + 1, print_n_valid_steps_per, valid_itr_steps_taken))
                     for n, vl in enumerate(all_valid_loss):
                         logger.info("valid loss {} {}, overall valid average {}".format(n, vl, np.mean(overall_valid_loss[n] + this_valid_loss[n])))
                     logger.info(" ")
@@ -829,7 +866,7 @@ def run_loop(train_loop_function, train_itr,
             # save every 30 mins roughly
             # so 30 * 60 = desired num seconds
             # sec / sec per step = step
-            tmp_save_every_n_steps = 30 * 60 / np.mean(minibatch_train_time)
+            tmp_save_every_n_steps = 30 * 60 * np.mean(minibatch_train_time)
             logger.info("Using save_every_n_steps='default', permanent saver with training speed {} seconds per training minibatch, desired 30 min average save, saving every {} steps".format(np.mean(minibatch_train_time), tmp_save_every_n_steps))
 
         if np.isinf(n_steps):

@@ -233,6 +233,7 @@ class MusicJSONRasterIterator(object):
                  n_voices=4,
                  iterate_once=False,
                  with_clocks=[2, 4, 8, 16, 32, 64],
+                 separate_onsets=False,
                  #with_clocks=None,
                  resolution="sixteenth"):
         super(MusicJSONRasterIterator, self).__init__()
@@ -243,6 +244,7 @@ class MusicJSONRasterIterator(object):
         self.iterate_once = iterate_once
         self.iterate_at_ = 0
         self.batch_size = batch_size
+        self.separate_onsets = separate_onsets
         if self.iterate_once:
             pass
         else:
@@ -314,7 +316,10 @@ class MusicJSONRasterIterator(object):
                         new_onset = True
                     if c == 0. or new_onset:
                         if current_note != 0:
-                            roll_voices[v].append(current_note + 100)
+                            if self.separate_onsets:
+                                roll_voices[v].append(current_note + 100)
+                            else:
+                                roll_voices[v].append(current_note)
                         else:
                             # rests have no "onset"
                             roll_voices[v].append(current_note)
@@ -388,6 +393,206 @@ class MusicJSONRasterIterator(object):
             return raster_roll_voices, mask
         else:
             return raster_roll_voices, mask, [ac.astype(np.float32) * mask[..., None] for ac in all_clocks]
+
+
+class MusicJSONVoiceIterator(object):
+    """
+            return pitch_batch, time_batch, voice_batch, cumulative_time_batch, mask
+        else:
+            return pitch_batch, time_batch, voice_batch, cumulative_time_batch, mask, clock_batches
+    """
+    def __init__(self, list_of_music_json_files,
+                 batch_size,
+                 max_sequence_length,
+                 random_seed,
+                 n_voices=4,
+                 rest_marked_durations=True,
+                 iterate_once=False,
+                 with_clocks=[2, 4, 8, 16, 32, 64],
+                 resolution="sixteenth"):
+        super(MusicJSONVoiceIterator, self).__init__()
+        self.list_of_music_json_files = list_of_music_json_files
+        self.random_seed = random_seed
+        self.random_state = np.random.RandomState(random_seed)
+        self.file_list_indices_ = list(range(len(self.list_of_music_json_files)))
+        self.iterate_once = iterate_once
+        self.iterate_at_ = 0
+        self.batch_size = batch_size
+        self.rest_marked_durations = rest_marked_durations
+        if self.iterate_once:
+            pass
+        else:
+            self.random_state.shuffle(self.file_list_indices_)
+        self.file_list_indices_ = self.file_list_indices_[self.iterate_at_:self.iterate_at_ + self.batch_size]
+        self.resolution = resolution
+        self.max_sequence_length = max_sequence_length
+        self.n_voices = n_voices
+        if self.resolution != "sixteenth":
+            raise ValueError("Currently only support 16th note resolution")
+        if self.n_voices != 4:
+            raise ValueError("Currently only support 4 voices")
+        self.with_clocks = with_clocks
+        # build vocabularies now?
+
+    def next(self):
+        return self.__next__()
+
+    def __iter__(self):
+        while True:
+            yield next(self)
+
+    def __next__(self):
+        # -1 value for padding - will convert to 0s but mask in the end
+        all_roll_voice_times = []
+        all_roll_voice_pitches = []
+        for fli in self.file_list_indices_:
+            json_file = self.list_of_music_json_files[fli]
+            with open(json_file) as f:
+                data = json.load(f)
+            ppq = data["pulses_per_quarter"]
+            qbpm = data["quarter_beats_per_minute"]
+            spq = data["seconds_per_quarter"]
+
+            parts = data["parts"]
+            parts_times = data["parts_times"]
+            parts_cumulative_times = data["parts_cumulative_times"]
+            # https://github.com/cuthbertLab/music21/blob/c6fc39204c16c47d1c540b545d0c9869a9cafa8f/music21/midi/__init__.py#L1471
+            if "parts_velocities" not in data:
+                default_velocity = 120
+                parts_velocities = [[default_velocity] * len(p) for p in parts]
+            else:
+                parts_velocities = data["parts_velocities"]
+
+            all_roll_voice_times.append(parts_times)
+            all_roll_voice_pitches.append(parts)
+
+        all_flat_pitch = []
+        all_flat_voice = []
+        all_flat_time = []
+        all_flat_cumulative_step = []
+        all_flat_cumulative_time = []
+        for n in range(len(all_roll_voice_times)):
+            flat_pitch = []
+            flat_voice = []
+            flat_time = []
+            flat_cumulative_step = []
+            flat_cumulative_time = []
+            # multi-voice, should be 4
+            this_time = all_roll_voice_times[n]
+            this_pitch = all_roll_voice_pitches[n]
+            this_cumulative_time_start = [[0] + [int(el) for el in np.cumsum(vv)] for vv in all_roll_voice_times[n]]
+            finished = False
+            # track which step 
+            n_voices = len(this_pitch)
+            voice_time_counter = [0] * n_voices
+            voice_step_counter = [0] * n_voices
+            last_event_time = -1
+            next_event_time = -1
+            keep_voices = [0, 1, 2, 3]
+            # semi-dynamic program to make a flat sequence out of a stacked event sequence
+            while True:
+                if len(keep_voices) == 0:
+                    #print("terminal")
+                    # we need to be sure we got to the end! but how...
+                    break
+
+                if last_event_time < 0:
+                    # frist
+                    for v in range(n_voices):
+                        flat_pitch.append(this_pitch[v][0])
+                        flat_voice.append(v)
+                        flat_time.append(this_time[v][0])
+                        flat_cumulative_step.append(voice_step_counter[v])
+                        flat_cumulative_time.append(voice_time_counter[v])
+                        voice_time_counter[v] += this_time[v][0]
+                        voice_step_counter[v] += 1
+                    last_event_time = 0
+                    next_event_time = min([min(cts[1:]) for cts in this_cumulative_time_start])
+                    # need to do something about if it was a rest or not?
+                else:
+                    # now
+                    for v in range(n_voices):
+                        if v not in keep_voices:
+                            continue
+
+                        if this_cumulative_time_start[v][voice_step_counter[v]] == next_event_time:
+                            flat_pitch.append(this_pitch[v][voice_step_counter[v]])
+                            flat_voice.append(v)
+                            flat_time.append(this_time[v][voice_step_counter[v]])
+                            flat_cumulative_step.append(voice_step_counter[v])
+                            flat_cumulative_time.append(voice_time_counter[v])
+                            voice_time_counter[v] += this_time[v][voice_step_counter[v]]
+                            voice_step_counter[v] += 1
+                    last_event_time = next_event_time
+                    next_event_time = min([min(cts[voice_step_counter[vi]:]) for vi, cts in enumerate(this_cumulative_time_start) if vi in keep_voices])
+                # check if we hit the end of 1 voice
+                keep_voices = []
+                for v in range(n_voices):
+                    if voice_step_counter[v] >= len(this_time[v]):
+                        pass
+                        #print("dawhkj")
+                        #from IPython import embed; embed(); raise ValueError()
+                    else:
+                        keep_voices.append(v)
+                #print(keep_voices)
+            all_flat_pitch.append(flat_pitch)
+            all_flat_voice.append(flat_voice)
+            all_flat_time.append(flat_time)
+            all_flat_cumulative_step.append(flat_cumulative_step)
+            all_flat_cumulative_time.append(flat_cumulative_time)
+
+        maxlen = max([len(tv) for tv in all_flat_voice])
+        pitch_batch = np.zeros((maxlen, self.batch_size, 1))
+        voice_batch = np.zeros((maxlen, self.batch_size, 1))
+        time_batch = np.zeros((maxlen, self.batch_size, 1))
+        # make this one but it seems poitnless to return it
+        cumulative_step_batch = np.zeros((maxlen, self.batch_size, 1))
+        cumulative_time_batch = np.zeros((maxlen, self.batch_size, 1))
+        mask = np.zeros((maxlen, self.batch_size, 1))
+
+        for i in range(self.batch_size):
+            l = len(all_flat_pitch[i])
+            pitch_batch[:l, i, 0] = all_flat_pitch[i]
+            voice_batch[:l, i, 0] = all_flat_voice[i]
+            if self.rest_marked_durations:
+                # we give special duration marks to rest durations, adding 500 is a quick hack for that
+                tft = all_flat_time[i]
+                tfp = all_flat_pitch[i]
+                tft = [tft[jj] if tfp[jj] != 0 else tft[jj] + 500 for jj in range(len(tft))]
+                time_batch[:l, i, 0] = tft
+            else:
+                time_batch[:l, i, 0] = all_flat_time[i]
+            cumulative_step_batch[:l, i, 0] = all_flat_cumulative_step[i]
+            cumulative_time_batch[:l, i, 0] = all_flat_cumulative_time[i]
+            mask[:l, i, 0] = 1.
+
+        if self.with_clocks is not None:
+            # create clock signals, by taking time index modulo each value
+            clock_batches = [np.zeros((maxlen, self.batch_size, 1)) for c in self.with_clocks]
+            for ii, c in enumerate(self.with_clocks):
+                clock_batches[ii] = cumulative_time_batch % c
+
+
+        # take off trailing 1 from shape
+        mask = mask.astype(np.float32)[..., 0]
+
+        # setup new file_list_indices - use a new song for each batch element
+        self.file_list_indices_ = list(range(len(self.list_of_music_json_files)))
+        if self.iterate_once:
+            self.iterate_at_ += self.batch_size
+        else:
+            self.random_state.shuffle(self.file_list_indices_)
+        self.file_list_indices_ = self.file_list_indices_[self.iterate_at_:self.iterate_at_ + self.batch_size]
+        if len(self.file_list_indices_) != self.batch_size:
+            if self.iterate_once and len(self.file_list_indices_) > 0:
+                # let the last batch through for iterate_once / vocabulary and statistics checks, etc
+                pass
+            else:
+                raise ValueError("Unknown error, not enough file list indices to iterate! Current indices {}".format(self.file_list_indices_))
+        if self.with_clocks is None:
+            return pitch_batch, time_batch, voice_batch, cumulative_time_batch, mask
+        else:
+            return pitch_batch, time_batch, voice_batch, cumulative_time_batch, mask, clock_batches
 
 
 def fetch_jsb_chorales():

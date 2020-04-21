@@ -10,7 +10,7 @@ from kkpthlib.datasets import fetch_jsb_chorales
 from kkpthlib.datasets import MusicJSONRasterIterator
 from kkpthlib import Linear
 from kkpthlib import Embedding
-from kkpthlib import CategoricalCrossEntropy
+from kkpthlib import CategoricalCrossEntropyFromLogits
 from kkpthlib import LayerNorm
 from kkpthlib import relu
 from kkpthlib import softmax
@@ -20,8 +20,10 @@ from kkpthlib import ListIterator
 from kkpthlib import run_loop
 from kkpthlib import HParams
 from kkpthlib import get_logger
+from kkpthlib import TransformerPositionalEncoding
 from kkpthlib import TransformerAutoregressiveBlock
 from kkpthlib import NoamOpt
+from kkpthlib import RampOpt
 
 jsb = fetch_jsb_chorales()
 
@@ -31,18 +33,18 @@ jsb = fetch_jsb_chorales()
 
 logger = get_logger()
 
-hp = HParams(input_dim=133, #hardcoded from knowledge of vocab size, can temporarily set to 0 if needed
-             #balance token dim and clock dim
-             token_embed_dim=96,
-             clock_embed_dim=16,
+hp = HParams(#balance token dim and clock dim
+             token_embed_dim=64,
+             clock_embed_dim=12,
              # maybe change this?
              hidden_dim=512,
+             separate_onsets=True,
              init="truncated_normal",
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
-             dropout_keep_prob=1.,
-             learning_rate=0.0001,
-             clip=3.,
-             batch_size=20,
+             dropout_keep_prob=.9,
+             learning_rate=0.000125,
+             clip=.25,
+             batch_size=10,
              clocks=[2, 4, 8, 16, 32, 64],
              n_layers=5,
              max_sequence_length=1024,
@@ -59,6 +61,7 @@ if not os.path.exists(hp.vocab_storage):
                                   max_sequence_length=hp.max_sequence_length,
                                   with_clocks=None,
                                   random_seed=hp.random_seed,
+                                  separate_onsets=hp.separate_onsets,
                                   iterate_once=True)
     # set iterate_once=True and find vocabulary size
     # 
@@ -96,7 +99,10 @@ def build_model(hp):
                                              random_state=random_state,
                                              name="token_embed",
                                              device=hp.use_device)
+            self.positional_encoding = TransformerPositionalEncoding(hp.token_embed_dim, device=hp.use_device, name="position_embed")
             combined_dim = len(hp.clocks) * hp.clock_embed_dim + hp.token_embed_dim
+
+            self.input_dropout = torch.nn.Dropout(p=1. - hp.dropout_keep_prob)
             self.comb_proj = Linear([combined_dim], hp.hidden_dim, init=hp.init,
                                     random_state=random_state, device=hp.use_device, name="hidden_proj")
 
@@ -110,22 +116,26 @@ def build_model(hp):
 
             self.out_proj = Linear([hp.hidden_dim], len(vocab), init=hp.init, random_state=random_state, device=hp.use_device, name="model_out")
 
-        def forward(self, x, x_mask, clocks, list_of_memories=None, memory_mask=None):
+        def forward(self, x, x_mask, clocks):
             te, te_v = self.token_embedding(x)
+            pe, pe_v = self.positional_encoding(te)
             ce = []
             for i in range(len(self.clock_embeddings)):
                 t_ce, t_ce_v = self.clock_embeddings[i](clocks[i])
                 ce.append(t_ce)
-            comb = torch.cat([te] + ce, dim=-1)
+            comb = torch.cat([pe] + ce, dim=-1)
             # 0 out the embedding for pad tokens
             comb = comb * x_mask[..., None]
+            comb = self.input_dropout(comb)
+            # dropout!
             h_proj = self.comb_proj([comb])
-            hidden, mems = self.block([h_proj], x_mask, list_of_memories, memory_mask)
+            hidden = self.block([h_proj], x_mask)
             o = self.out_proj([hidden])
-            return o, mems
+            return o
     model = Model().to(hp.use_device)
     return model
 
+# hardcoded 1k moves everything "out of the way" for easier vocab mapping
 vocab_mapper = {k: v + 1000 for k, v in zip(vocab, range(len(vocab)))}
 inverse_vocab_mapper = {v - 1000:k for k, v in vocab_mapper.items()}
 
@@ -134,20 +144,28 @@ if __name__ == "__main__":
                                         batch_size=hp.batch_size,
                                         max_sequence_length=hp.max_sequence_length,
                                         with_clocks=hp.clocks,
+                                        separate_onsets=hp.separate_onsets,
                                         random_seed=hp.random_seed)
 
     valid_itr = MusicJSONRasterIterator(jsb["files"][-50:],
                                         batch_size=hp.batch_size,
                                         max_sequence_length=hp.max_sequence_length,
                                         with_clocks=hp.clocks,
+                                        separate_onsets=hp.separate_onsets,
                                         random_seed=hp.random_seed)
 
     model = build_model(hp)
-    loss_fun = CategoricalCrossEntropy()
+    loss_fun = CategoricalCrossEntropyFromLogits()
     def get_std_noam_opt(model):
-        return NoamOpt(hp.hidden_dim, 1, 4000,
+        return NoamOpt(hp.hidden_dim, 1, 10000,
                 torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1E-9))
-    optimizer = get_std_noam_opt(model)
+
+    def get_std_ramp_opt(model):
+        return RampOpt(hp.learning_rate, 1, 10000, 10000 * 200,
+                torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1E-9))
+
+    #optimizer = get_std_noam_opt(model)
+    optimizer = get_std_ramp_opt(model)
 
     def loop(itr, extras, stateful_args):
         piano_roll, mask, clocks = next(itr)
@@ -160,35 +178,41 @@ if __name__ == "__main__":
 
         piano_roll = torch.Tensor(piano_roll).to(hp.use_device)
         mask = torch.Tensor(mask).to(hp.use_device)
+        clocks = [torch.Tensor(c).to(hp.use_device) for c in clocks]
 
-        list_of_memories = None
-        memory_mask = None
         div = 4
+        # do half overlapping windows for training
         cut = len(piano_roll) // div
+        step = len(piano_roll) // int((div / 2))
         total_l = 0
+        offset = 0
         for i in range(div):
-            piano_roll_cut = piano_roll[i * cut:(i + 1) * cut]
-            mask_cut = mask[i * cut:(i + 1) * cut]
+            start_cut = i * cut
+            stop_cut = i * cut + step
+            piano_roll_cut = piano_roll[start_cut:stop_cut]
+            mask_cut = mask[start_cut:stop_cut]
+            clocks_cut = [c[start_cut:stop_cut].to(hp.use_device) for c in clocks]
 
-            clocks_cut = [torch.Tensor(c)[i * cut:(i + 1) * cut].to(hp.use_device) for c in clocks]
-            # trim off one for AR prediction
-            clocks_cut = [c[:-1] for c in clocks_cut]
+            # trim off one for AR prediction?
+            clocks_cut = [c for c in clocks_cut]
+            linear_out = model(piano_roll_cut, mask_cut, clocks_cut)
 
-            linear_out, past = model(piano_roll_cut[:-1], mask_cut[:-1], clocks_cut, list_of_memories, memory_mask)
-            list_of_memories = past
-            memory_mask = mask_cut[:-1]
+            #prob_out = softmax(linear_out)
+            # only use :-1 preds
+            loss = loss_fun(linear_out[:-1], piano_roll_cut[1:])
+            #loss = (mask_cut[:-1] * loss).mean()
+            loss = ((mask_cut[:-1] * loss) / mask_cut[:-1].sum()).sum()
 
-            prob_out = softmax(linear_out)
-            loss = loss_fun(prob_out, piano_roll_cut[1:])
-            loss = (mask_cut[:-1] * loss).mean()
             #loss = (mask_cut[:-1] * loss).sum(dim=0).mean()
             l = loss.cpu().data.numpy()
             total_l = total_l + l
             optimizer.zero_grad()
             if extras["train"]:
                 loss.backward()
-                #clipping_grad_norm_(model.parameters(), hp.clip)
-                clipping_grad_value_(model.parameters(), hp.clip)
+                clipping_grad_norm_(model.parameters(), hp.clip)
+                #clipping_grad_norm_(model.named_parameters(), hp.clip, named_check=True)
+                #clipping_grad_value_(model.parameters(), hp.clip)
+                #clipping_grad_value_(model.named_parameters(), hp.clip, named_check=True)
                 optimizer.step()
         return l, None
 
@@ -200,4 +224,4 @@ if __name__ == "__main__":
              loop, valid_itr,
              s,
              n_train_steps_per=1000,
-             n_valid_steps_per=50)
+             n_valid_steps_per=100)

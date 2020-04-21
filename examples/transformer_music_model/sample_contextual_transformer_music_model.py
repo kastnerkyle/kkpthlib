@@ -11,9 +11,9 @@ import sys
 import json
 import os
 
-help_str = "\nUsage:\n{} model_training_or_definition_file.py path_to_checkpoint_file.pth\n".format(sys.argv[0])
+help_str = "\nUsage:\n{} path_to_checkpoint_file.pth\n".format(sys.argv[0])
 
-if len(sys.argv) < 3:
+if len(sys.argv) < 2:
     print(help_str)
     sys.exit()
 
@@ -24,9 +24,6 @@ if sys.argv[1] == "-h" or sys.argv[1] == "--help":
 if not os.path.exists(sys.argv[1]):
     raise ValueError("Unable to find argument {} for file load! Check your paths".format(sys.argv[1]))
 
-model_file_path = sys.argv[1]
-checkpoint_path = sys.argv[2]
-
 
 from kkpthlib import fetch_jsb_chorales
 from kkpthlib import MusicJSONRasterIterator
@@ -34,20 +31,8 @@ from kkpthlib import softmax_np
 from kkpthlib import get_logger
 from kkpthlib import CategoricalCrossEntropy
 
-# longer term, make this a dedicated function in the library?
-# loads get_hparams and build_model from the training file
-# if that's really a requirement, better check em too
-from importlib import import_module
-model_import_path, fname = model_file_path.rsplit(os.sep, 1)
-sys.path.insert(0, model_import_path)
-p, _ = fname.split(".", 1)
-mod = import_module(p)
-get_hparams = getattr(mod, "get_hparams")
-build_model = getattr(mod, "build_model")
-sys.path.pop(0)
-
-#from transformer_music_model import get_hparams
-#from transformer_music_model import build_model
+from transformer_music_model import get_hparams
+from transformer_music_model import build_model
 
 from minimal_beamsearch import top_k_from_logits_np
 from minimal_beamsearch import top_p_from_logits_np
@@ -66,7 +51,7 @@ vocab = d["vocab"]
 vocab_mapper = {k: v + 1000 for k, v in zip(vocab, range(len(vocab)))}
 inverse_vocab_mapper = {v - 1000:k for k, v in vocab_mapper.items()}
 
-model = build_model(hp)
+m = build_model(hp)
 loss_fun = CategoricalCrossEntropy()
 
 # "sampling" code
@@ -77,11 +62,10 @@ fake_itr = MusicJSONRasterIterator(jsb["files"][-50:],
                                    random_seed=hp.random_seed)
 
 
-m_dict = torch.load(checkpoint_path, map_location=hp.use_device)
-model.load_state_dict(m_dict)
-model.eval()
+m_dict = torch.load(sys.argv[1], map_location=hp.use_device)
+m.load_state_dict(m_dict)
 
-# just use it for the clocks for now, eventually will need to generate clocks from scratch
+# just use it for the clocks for now, eventually will need to generate
 _, mask, clocks = next(fake_itr)
 # set mask to all 1s
 mask = 0. * mask + 1.
@@ -94,29 +78,34 @@ sampling_random_state = np.random.RandomState(13)
 list_of_memories = None
 memory_mask = None
 steps = hp.max_sequence_length - len(true_piano_roll)
-for t in range(steps):
-    print("sampling step {} / {}".format(t, steps))
-    piano_roll = copy.deepcopy(true_piano_roll)
-    for k in vocab_mapper.keys():
-        piano_roll[piano_roll == k] = vocab_mapper[k]
-    # move it down to proper range
-    piano_roll = piano_roll - 1000.
+assert steps % 4 == 0
+# 4 context cuts
+for j in range(4):
+    for t in range(steps // 4):
+        print("sampling step {} / {}".format(t, steps))
+        piano_roll = copy.deepcopy(true_piano_roll)
+        for k in vocab_mapper.keys():
+            piano_roll[piano_roll == k] = vocab_mapper[k]
+        # move it down to proper range
+        piano_roll = piano_roll - 1000.
 
-    this_piano_roll = torch.Tensor(piano_roll).to(hp.use_device)
-    this_mask = torch.Tensor(mask[:len(piano_roll)]).to(hp.use_device)
-    # trim off one for AR prediction
-    this_clocks = [torch.Tensor(c[:len(piano_roll)]).to(hp.use_device) for c in clocks]
+        this_piano_roll = torch.Tensor(piano_roll).to(hp.use_device)
+        this_mask = torch.Tensor(mask[:len(piano_roll)]).to(hp.use_device)
+        # trim off one for AR prediction
+        this_clocks = [torch.Tensor(c[:len(piano_roll)]).to(hp.use_device) for c in clocks]
 
-    linear_out = model(this_piano_roll, this_mask, this_clocks)
-    temp = .1
-    reduced = top_p_from_logits_np(linear_out.cpu().data.numpy() / temp, .95)
-    reduced_probs = softmax_np(reduced)
+        linear_out, past = m(this_piano_roll, this_mask, this_clocks, list_of_memories, memory_mask)
+        reduced = top_p_from_logits_np(linear_out.cpu().data.numpy(), .9)
+        reduced_probs = softmax_np(reduced)
 
-    sample_last = [sampling_random_state.choice(np.arange(reduced_probs.shape[-1]), p=reduced_probs[-1, j]) for j in range(reduced_probs.shape[1])]
-    true_sample_last = [inverse_vocab_mapper[s] for s in sample_last]
-    sampled_arr = np.array(true_sample_last)[None, :, None]
-    true_piano_roll = np.concatenate((true_piano_roll, sampled_arr), axis=0)
-
+        sample_last = [sampling_random_state.choice(np.arange(reduced_probs.shape[-1]), p=reduced_probs[-1, j]) for j in range(reduced_probs.shape[1])]
+        true_sample_last = [inverse_vocab_mapper[s] for s in sample_last]
+        sampled_arr = np.array(true_sample_last)[None, :, None]
+        true_piano_roll = np.concatenate((true_piano_roll, sampled_arr), axis=0)
+    list_of_memories = past
+    memory_mask = this_mask
+    partial_piano_roll = true_piano_roll[-1:]
+    break
 
 def convert_voice_roll_to_pitch_duration(voice_roll, duration_step=.25):
     """

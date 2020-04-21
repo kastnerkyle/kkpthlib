@@ -6,23 +6,53 @@ import torch
 from torch import nn
 import torch.functional as F
 import copy
+import sys
+import shutil
+
+import json
+import os
+
+help_str = "\nUsage:\n{} model_training_or_definition_file.py path_to_checkpoint_file.pth\n".format(sys.argv[0])
+
+if len(sys.argv) < 3:
+    print(help_str)
+    sys.exit()
+
+if sys.argv[1] == "-h" or sys.argv[1] == "--help":
+    print(help_str)
+    sys.exit()
+
+if not os.path.exists(sys.argv[1]):
+    raise ValueError("Unable to find argument {} for file load! Check your paths".format(sys.argv[1]))
+
+model_file_path = sys.argv[1]
+checkpoint_path = sys.argv[2]
+
 
 from kkpthlib import fetch_jsb_chorales
 from kkpthlib import MusicJSONRasterIterator
 from kkpthlib import softmax_np
 from kkpthlib import get_logger
-from kkpthlib import CategoricalCrossEntropy
 
-from transformer_music_model import get_hparams
-from transformer_music_model import build_model
+# longer term, make this a dedicated function in the library?
+# loads get_hparams and build_model from the training file
+# if that's really a requirement, better check em too
+from importlib import import_module
+model_import_path, fname = model_file_path.rsplit(os.sep, 1)
+sys.path.insert(0, model_import_path)
+p, _ = fname.split(".", 1)
+mod = import_module(p)
+get_hparams = getattr(mod, "get_hparams")
+build_model = getattr(mod, "build_model")
+sys.path.pop(0)
+
+#from transformer_music_model import get_hparams
+#from transformer_music_model import build_model
 
 from minimal_beamsearch import top_k_from_logits_np
 from minimal_beamsearch import top_p_from_logits_np
 
 from kkpthlib import music_json_to_midi
-
-import json
-import os
 
 jsb = fetch_jsb_chorales()
 logger = get_logger()
@@ -36,30 +66,40 @@ vocab = d["vocab"]
 vocab_mapper = {k: v + 1000 for k, v in zip(vocab, range(len(vocab)))}
 inverse_vocab_mapper = {v - 1000:k for k, v in vocab_mapper.items()}
 
-m = build_model(hp)
-loss_fun = CategoricalCrossEntropy()
+model = build_model(hp)
 
 # "sampling" code
 fake_itr = MusicJSONRasterIterator(jsb["files"][-50:],
-                                    batch_size=hp.batch_size,
-                                    max_sequence_length=hp.max_sequence_length,
-                                    with_clocks=hp.clocks,
-                                    random_seed=hp.random_seed)
+                                   batch_size=hp.batch_size,
+                                   max_sequence_length=hp.max_sequence_length,
+                                   with_clocks=hp.clocks,
+                                   random_seed=hp.random_seed)
 
-m_dict = torch.load("model_checkpoint.pth", map_location=hp.use_device)
-m.load_state_dict(m_dict)
 
-# just use it for the clocks for now, eventually will need to generate
-_, mask, clocks = next(fake_itr)
+m_dict = torch.load(checkpoint_path, map_location=hp.use_device)
+model.load_state_dict(m_dict)
+model.eval()
+
+# just use it for the clocks for now, eventually will need to generate clocks from scratch
+seed_data, mask, clocks = next(fake_itr)
 # set mask to all 1s
 mask = 0. * mask + 1.
 
+# seed_len of 16 means only use 0s
+seed_len = 16
+temperature = .5
 # 16 0s to represent 4 blank *start* bars
-true_piano_roll = np.zeros((16, hp.batch_size, 1))
+true_piano_roll = np.zeros((seed_len, hp.batch_size, 1))
+
+if seed_len > 16:
+    true_piano_roll[:] = seed_data[:len(true_piano_roll)]
+
+partial_piano_roll = copy.deepcopy(true_piano_roll)
+
 sampling_random_state = np.random.RandomState(13)
-steps = 984
-assert steps % 4 == 0
-assert steps - len(true_piano_roll) <= 1000
+list_of_memories = None
+memory_mask = None
+steps = hp.max_sequence_length - len(true_piano_roll)
 for t in range(steps):
     print("sampling step {} / {}".format(t, steps))
     piano_roll = copy.deepcopy(true_piano_roll)
@@ -73,8 +113,8 @@ for t in range(steps):
     # trim off one for AR prediction
     this_clocks = [torch.Tensor(c[:len(piano_roll)]).to(hp.use_device) for c in clocks]
 
-    linear_out, past = m(this_piano_roll, this_mask, this_clocks)
-    reduced = top_p_from_logits_np(linear_out.cpu().data.numpy(), .9)
+    linear_out = model(this_piano_roll, this_mask, this_clocks)
+    reduced = top_p_from_logits_np(linear_out.cpu().data.numpy() / temperature, .9)
     reduced_probs = softmax_np(reduced)
 
     sample_last = [sampling_random_state.choice(np.arange(reduced_probs.shape[-1]), p=reduced_probs[-1, j]) for j in range(reduced_probs.shape[1])]
@@ -143,9 +183,17 @@ midi_sample_dir = "midi_samples"
 if not os.path.exists(midi_sample_dir):
     os.mkdir(midi_sample_dir)
 
+shutil.copy2(model_file_path, midi_sample_dir + os.sep + "_".join(model_file_path.split(os.sep)) + ".train.py")
+stub, _ = checkpoint_path.split(os.sep)[-1].rsplit(".", 1)
+#main_dir_with_hash_at_end/saved_models/file.pth
+hsh = checkpoint_path.split(os.sep)[-3].split("_")[-1]
+sample_script_path = os.path.abspath( __file__ )
+shutil.copy2(sample_script_path, midi_sample_dir + os.sep + "_".join(model_file_path.split(os.sep)) + ".sample.py")
+
 for mb in range(true_piano_roll.shape[1]):
     reshaped_voice_roll = true_piano_roll[:, mb].ravel().reshape(true_piano_roll.shape[0] // 4, 4).transpose(1, 0)
     data = convert_voice_roll_to_pitch_duration(reshaped_voice_roll)
-    fpath = midi_sample_dir + os.sep + "temp{}.midi".format(mb)
+
+    fpath = midi_sample_dir + os.sep + "{}_{}_sample_{}_temperature_{}.midi".format(hsh, stub, mb, temperature)
     music_json_to_midi(data, fpath)
     print("wrote out {}".format(fpath))
