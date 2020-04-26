@@ -601,6 +601,95 @@ class Embedding(torch.nn.Module):
         return lu, self.vectors
 
 
+class EmbeddingDropout(Embedding):
+    """
+    From ENAS
+    https://github.com/carpedm20/ENAS-pytorch/blob/master/models/shared_rnn.py
+
+    Class for dropping out embeddings by zero'ing out parameters in the
+    embedding matrix.
+    This is equivalent to dropping out particular words, e.g., in the sentence
+    'the quick brown fox jumps over the lazy dog', dropping out 'the' would
+    lead to the sentence '### quick brown fox jumps over ### lazy dog' (in the
+    embedding vector space).
+    See 'A Theoretically Grounded Application of Dropout in Recurrent Neural
+    Networks', (Gal and Ghahramani, 2016).
+    """
+    def __init__(self,
+                 n_symbols,
+                 output_dim,
+                 dropout_keep_prob=1.,
+                 dropout_scale="default",
+                 random_state=None,
+                 init="embedding_normal",
+                 scale=1.,
+                 strict=None,
+                 name=None,
+                 dtype="default",
+                 device="default"):
+        """Embedding constructor.
+        Args:
+            dropout_keep_prob: Dropout probability.
+            dropout_scale: Used to scale parameters of embedding weight matrix that are
+                not dropped out. Note that this is _in addition_ to the
+                `1/dropout_keep_prob scaling.
+        See `Embedding` for remaining arguments.
+        """
+        Embedding.__init__(self,
+                           n_symbols=n_symbols,
+                           output_dim=output_dim,
+                           random_state=random_state,
+                           init=init,
+                           scale=scale,
+                           strict=strict,
+                           name=name,
+                           dtype=dtype,
+                           device=device)
+        self.g = torch.Generator(device=device)
+        self.g.manual_seed(random_state.randint(100000))
+
+        self.dropout_keep_prob = dropout_keep_prob
+        if dropout_scale == "default":
+            dropout_scale = output_dim ** 0.5
+        self.dropout_scale = dropout_scale
+
+    def forward(self, indices):
+        """Embeds `indices` with the dropped out embedding weight matrix."""
+
+        if self.training:
+            dropout_keep_prob = self.dropout_keep_prob
+        else:
+            dropout_keep_prob = 1.
+
+        if dropout_keep_prob != 1.:
+            mask = self.th_embed.weight.data.new(self.th_embed.weight.size(0), 1)
+            mask.bernoulli_(dropout_keep_prob, generator=self.g)
+            mask = mask.expand_as(self.th_embed.weight)
+            mask = mask / (dropout_keep_prob)
+            masked_weight = self.th_embed.weight * Variable(mask)
+        else:
+            masked_weight = self.th_embed.weight
+
+        if self.dropout_scale and self.dropout_scale != 1.:
+            masked_weight = masked_weight * self.dropout_scale
+
+        ii = indices.long()
+        shp = _shape(ii)
+        nd = _ndim(ii)
+        if shp[-1] != 1:
+            if nd < 3:
+                logger.info("Embedding input should have last dimension 1, inferring dimension to 1, from shape {} to {}".format(shp, tuple(list(shp) + [1])))
+                ii = ii[..., None]
+            else:
+                raise ValueError("Embedding layer input must have last dimension 1 for input size > 3D, got {}".format(shp))
+
+        shp = _shape(ii)
+        nd = len(shp)
+        # force 3d for consistency, then slice
+        lu = F.embedding(ii[..., 0], masked_weight)
+        return lu, masked_weight
+
+
 class Linear(torch.nn.Module):
     def __init__(self,
                  list_of_input_dims,
@@ -1495,15 +1584,14 @@ class CategoricalCrossEntropyFromLogits(torch.nn.Module):
     Multinomial negative log likelihood of logits compared to one hot
     true_values
 
-    Arguments to forward 
+    Arguments to forward
     prediction : tensor, shape 2D or 3D
         The predicted class probabilities out of some layer,
         normally the output of softmax_layer
 
-    targets : tensor, shape 2D or 3D
-        One hot ground truth values. Must be the same shape as
-        predicted_values. One hot representations can be achieved using
-        dagbldr.utils.convert_to_one_hot
+    targets : tensor, shape 1D or 2D
+        One hot ground truth values. Must be same dimension as predicted values, but last axis should be size 1
+        predicted_values.
     eps : float, default 0
         Epsilon to be added during log calculation to avoid NaN values.
 
@@ -1612,13 +1700,14 @@ class RampOpt(object):
 
     can set decay_to_zero_at_steps to -1 to disable decay
     """
-    def __init__(self, target_learning_rate, factor, warmup, decay_to_zero_at_steps, optimizer):
+    def __init__(self, target_learning_rate, factor, warmup, decay_to_zero_at_steps, optimizer, min_decay_learning_rate=None):
         self.optimizer = optimizer
         self._step = 0
         self.warmup = warmup
         self.factor = factor
         self.target_learning_rate = target_learning_rate
         self.decay_to_zero_at_steps = decay_to_zero_at_steps
+        self.min_decay_learning_rate = min_decay_learning_rate
         self._rate = 0
 
     def step(self):
@@ -1642,9 +1731,14 @@ class RampOpt(object):
 
         new_rate = self.target_learning_rate * np.cos((float(step - self.warmup) / (self.decay_to_zero_at_steps - self.warmup)) * (np.pi / 2.))
 
+        if self.min_decay_learning_rate is not None:
+            if new_rate < self.min_decay_learning_rate:
+                new_rate = self.min_decay_learning_rate
+
         if step > self.decay_to_zero_at_steps:
-            logger.info("WARNING: RampOpt optimizer has decayed to LR 0! Current step {}, so no more learning happening!".format(step))
-            new_rate = 0.
+            if self.min_decay_learning_rate is None:
+                logger.info("WARNING: RampOpt optimizer has decayed to LR 0! Current step {}, so no more learning happening!".format(step))
+                new_rate = 0.
         # warmup is 0 on cos curve
         # infinity is pi/2?
         return new_rate
@@ -1663,19 +1757,19 @@ class LockedDropout(nn.Module):
                  strict=None,
                  dtype="default",
                  device="default"):
-        super().__init__()
-        self.dropout = 1. - droput_keep_prob
+        super(LockedDropout, self).__init__()
+        self.dropout = 1. - dropout_keep_prob
         if random_state is None:
             raise ValueError("Must pass random_state to LockedDropout")
         if device == "default":
             device = get_device_default()
         self.g = torch.Generator(device=device)
-        self.g.manual_seed(random_state.randint())
+        self.g.manual_seed(random_state.randint(100000))
 
     def forward(self, x):
         if not self.training or self.dropout == 0.:
             return x
-        m = x.data.new(1, *x.size()[1:]).bernoulli_(1 - self.dropout)
+        m = x.data.new(1, *x.size()[1:]).bernoulli_(1 - self.dropout, generator=self.g)
         mask = Variable(m, requires_grad=False) / (1 - self.dropout)
         mask = mask.expand_as(x)
         return mask * x
@@ -1766,6 +1860,7 @@ class PositionwiseFeedforward(nn.Module):
                  name=None,
                  random_state=None,
                  strict=None, init=None,
+                 scale="default",
                  device="default",
                  dtype="default"):
         super(PositionwiseFeedforward, self).__init__()
@@ -1776,8 +1871,6 @@ class PositionwiseFeedforward(nn.Module):
         if random_state is None:
             raise ValueError("Must pass random_state to PositionwiseFeedforward")
 
-        print("TODO ADD LOCKED DROPOUT IN POSITIONWISE FEEDFORWARD")
-
         name_i = name + "_positionwise_input_projection"
         name_o = name + "_positionwise_ouput_projection"
         o_dim = sum(list_of_input_dims)
@@ -1787,6 +1880,7 @@ class PositionwiseFeedforward(nn.Module):
                         name=name_i,
                         strict=strict,
                         init=init,
+                        scale=scale,
                         device=device,
                         dtype=dtype)
 
@@ -1797,6 +1891,7 @@ class PositionwiseFeedforward(nn.Module):
                          name=name_o,
                          strict=strict,
                          init=init,
+                         scale=scale,
                          device=device,
                          dtype=dtype)
 
@@ -1804,13 +1899,20 @@ class PositionwiseFeedforward(nn.Module):
                             device=device,
                             dtype=dtype)
 
-        print("COME BACK AND ADD DROPOUT")
+        self.ld1 = LockedDropout(dropout_keep_prob=dropout_keep_prob,
+                                 device=device,
+                                 random_state=random_state)
+        self.ld2 = LockedDropout(dropout_keep_prob=dropout_keep_prob,
+                                 device=device,
+                                 random_state=random_state)
 
     def forward(self, list_of_inputs):
         inp = torch.cat(list_of_inputs, dim=-1)
         s1 = relu(self.i([inp]))
+        ds1 = self.ld1(s1)
         s2 = self.o([s1])
-        return self.ln(s2 + inp)
+        ds2 = self.ld2(s2)
+        return self.ln(ds2 + inp)
 
 
 def _rel_shift(x):#, zero_triu=False):
@@ -1829,6 +1931,7 @@ class RelativeMultiHeadAttention(nn.Module):
                   name=None,
                   random_state=None,
                   strict=None, init=None,
+                  scale="default",
                   device="default",
                   dtype="default"):
          super(RelativeMultiHeadAttention, self).__init__()
@@ -1847,8 +1950,8 @@ class RelativeMultiHeadAttention(nn.Module):
          qkv_name = name + "_qkv"
          o_name = name + "_out"
 
-         # need to add dropout
-         print("TODO COME BACK AND ADD DROPOUT IN MH ATTN")
+         self.drop = nn.Dropout(1. - attention_dropout_keep_prob)
+         self.locked_drop = LockedDropout(1. - attention_dropout_keep_prob, random_state=random_state, device=device)
 
          # no biases in transformer XL code
          self.qkv_net = Linear(list_of_input_dims,
@@ -1858,6 +1961,7 @@ class RelativeMultiHeadAttention(nn.Module):
                                name=qkv_name,
                                strict=strict,
                                init=init,
+                               scale=scale,
                                device=device,
                                dtype=dtype)
 
@@ -1868,6 +1972,7 @@ class RelativeMultiHeadAttention(nn.Module):
                              name=o_name,
                              strict=strict,
                              init=init,
+                             scale=scale,
                              device=device,
                              dtype=dtype)
 
@@ -1927,7 +2032,17 @@ class RelativeMultiHeadAttention(nn.Module):
              elif attention_mask.dim() == 3:
                  attention_score.masked_fill_(attention_mask[:, :, :, None], -float('inf'))
 
+         faker = 0. * attention_score + 1.
+         faker_mask = self.drop(faker)
+         # can't fill with neginf since could all be 0 - hence all neginf, leading to nan in softmax
+         attention_score.masked_fill_(faker_mask == 0, -1E9)
          attention_prob = F.softmax(attention_score, dim=1)
+         # this is how it is done in the PTB code but... not normalized anymore!
+         # question is, will other method freak out at test time? whereas this is more "normal" - basically same as dropping pieces of i_head_v
+         #attention_prob = self.drop(attention_prob)
+         # isn't this just dropout on the thing you are attending, in disguise?
+         # https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/layers/common_attention.py#L1822
+
          attention_weighted_values = torch.einsum('ijbn,jbnd->ibnd', (attention_prob, i_head_v))
 
          # [qlen x bsz x n_head x d_head]
@@ -1937,16 +2052,24 @@ class RelativeMultiHeadAttention(nn.Module):
                 self.n_heads * self.head_dim)
 
          o = self.o_net([attention_weighted_values])
+         o = self.locked_drop(o)
+
          output = self.ln(i + o)
          return output
 
 
 class RelativeDecoderLayer(nn.Module):
-    def __init__(self, list_of_input_dims, n_heads=10, head_dim=38, model_dim=380, inner_dim=900,
-                 attention_dropout_keep_prob=0.8, inner_dropout_keep_prob=0.8,
+    def __init__(self, list_of_input_dims,
+                 n_heads=10,
+                 head_dim=38,
+                 model_dim=380,
+                 inner_dim=900,
+                 attention_dropout_keep_prob=0.8,
+                 inner_dropout_keep_prob=0.8,
                  name=None,
                  random_state=None,
                  strict=None, init=None,
+                 scale="default",
                  device="default",
                  dtype="default"):
         super(RelativeDecoderLayer, self).__init__()
@@ -1968,6 +2091,7 @@ class RelativeDecoderLayer(nn.Module):
                                                     random_state=random_state,
                                                     strict=strict,
                                                     init=init,
+                                                    scale=scale,
                                                     device=device,
                                                     dtype=dtype)
 
@@ -1978,6 +2102,7 @@ class RelativeDecoderLayer(nn.Module):
                                                    random_state=random_state,
                                                    strict=strict,
                                                    init=init,
+                                                   scale=scale,
                                                    device=device,
                                                    dtype=dtype)
 
@@ -1992,12 +2117,18 @@ class AWDTransformerXLDecoderBlock(nn.Module):
     def __init__(self,
                  list_of_input_dims,
                  n_layers=16, n_heads=10, head_dim=38, model_dim=380, inner_dim=900,
-                 locked_drop_keep_prob=1.0, attention_dropout_keep_prob=0.8, inner_dropout_keep_prob=0.8,
+                 input_dropout_keep_prob=0.4,
+                 attention_dropout_keep_prob=0.8,
+                 inner_dropout_keep_prob=0.8,
+                 hidden_dropout_keep_prob=1.0,
+                 output_dropout_keep_prob=0.5,
                  name=None,
                  random_state=None,
-                 mem_len=0,
+                 memory_len=0,
                  context_len=0,
-                 strict=None, init=None,
+                 strict=None,
+                 init=None,
+                 scale="default",
                  device="default",
                  dtype="default"):
         super(AWDTransformerXLDecoderBlock, self).__init__()
@@ -2030,13 +2161,28 @@ class AWDTransformerXLDecoderBlock(nn.Module):
                                      random_state=random_state,
                                      strict=strict,
                                      init=init,
+                                     scale=scale,
                                      device=device,
                                      dtype=dtype)
             self.layers.append(l)
 
-        self.mem_len = mem_len
+        self.memory_len = memory_len
         self.context_len = context_len
-        self.pos_emb = PositionalEmbedding(model_dim)
+        self.pos_emb = PositionalEmbedding(model_dim,
+                                           device=device,
+                                           dtype=dtype)
+        self.locked_drop_i = LockedDropout(input_dropout_keep_prob,
+                                           random_state=random_state,
+                                           device=device,
+                                           dtype=dtype)
+        self.locked_drop_h = LockedDropout(hidden_dropout_keep_prob,
+                                           random_state=random_state,
+                                           device=device,
+                                           dtype=dtype)
+        self.locked_drop_o = LockedDropout(output_dropout_keep_prob,
+                                           random_state=random_state,
+                                           device=device,
+                                           dtype=dtype)
 
     def init_list_of_mems(self):
         if self.device == "default":
@@ -2052,7 +2198,7 @@ class AWDTransformerXLDecoderBlock(nn.Module):
             dtype = torch.float64
 
         # returns None if mem_len is 0 else
-        if self.mem_len > 0:
+        if self.memory_len > 0:
             mems = []
 
             for i in range(self.n_layers):
@@ -2073,7 +2219,7 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         if list_of_mems is None:
             return None
 
-        if self.mem_len == 0:
+        if self.memory_len == 0:
             return None
 
         qlen = query_len
@@ -2090,7 +2236,7 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         with torch.no_grad():
             new_mems = []
             end_idx = mlen + max(0, qlen - 0 - self.context_len)
-            beg_idx = max(0, end_idx - self.mem_len)
+            beg_idx = max(0, end_idx - self.memory_len)
             for i in range(len(hiddens)):
                 cat = torch.cat([list_of_mems[i], hiddens[i]], dim=0)
                 new_mems.append(cat[beg_idx:end_idx].detach())
@@ -2116,12 +2262,14 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         # and because _rel_shift reduces size by 1
 
         hids = []
-        print("TODO ADD LOCKED DROPOUT")
-        core_out = input_tensor
+        core_out = self.locked_drop_i(input_tensor)
+        pe = self.locked_drop_i(pe)
         for i, this_layer in enumerate(self.layers):
             hids.append(core_out)
             mems_i = list_of_mems[i] if list_of_mems is not None else None
             core_out = this_layer(core_out, pe, decoder_attention_mask=attn_mask, memory=mems_i)
+            if i < len(self.layers) - 1:
+                core_out = self.locked_drop_h(core_out)
 
         # update memory
         # mlen = 0
@@ -2133,4 +2281,5 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         # slice according to context_len, normally set to 0
         # in original code they do this via target size, but we don't have that information
         core_out = core_out[self.context_len:]
+        core_out = self.locked_drop_o(core_out)
         return core_out, new_mems
