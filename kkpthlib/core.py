@@ -530,6 +530,7 @@ def run_loop(train_loop_function, train_itr,
              status_every_s=5,
              models_to_keep=5,
              permanent_models_to_keep=50,
+             fill_fn=np.median,
              save_every_n_steps="default",
              skip_first_n_steps_when_saving=0):
     """
@@ -817,14 +818,16 @@ def run_loop(train_loop_function, train_itr,
                     logger.info(" ")
                     last_status = time.time()
             for i in range(len(this_valid_loss)):
-                valid_interpd = [vi for vi in np.interp(np.arange(len(this_train_loss[i])), np.arange(len(this_valid_loss[i])), this_valid_loss[i])]
+                _fill = fill_fn(this_valid_loss)
+                valid_interpd = [vi for vi in this_valid_loss[i]] + [_fill for _ in range(len(this_train_loss[i]) - len(this_valid_loss[i]))]
                 overall_valid_loss[i] += valid_interpd
 
             if len(this_valid_summaries) > 0:
                 for k in this_valid_summaries:
                     if k not in overall_valid_summaries:
                         overall_valid_summaries[k] = []
-                    valid_interpd = [vi for vi in np.interp(np.arange(len(this_train_summaries[k])), np.arange(len(this_valid_summaries[k])), this_valid_summaries[k])]
+                    _fill = fill_fn(this_valid_summaries[k])
+                    valid_interpd = [vi for vi in this_valid_summaries[k]] + [_fill for _ in range(len(this_train_loss[i]) - len(this_valid_loss[i]))]
                     overall_valid_summaries[k] += valid_interpd
 
         if train_itr_steps_taken > 1E9:

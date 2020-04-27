@@ -137,5 +137,5 @@ s = {"model": model,
 run_loop(loop, train_itr,
          loop, valid_itr,
          s,
-         n_train_steps_per=500,
-         n_valid_steps_per=25)
+         n_train_steps_per=2000,
+         n_valid_steps_per=250)
