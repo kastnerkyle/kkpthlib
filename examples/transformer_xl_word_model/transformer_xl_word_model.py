@@ -35,27 +35,6 @@ hp = HParams(memory_len=0,
              random_seed=2122,
              data_storage_dir="kjv")
 
-train_data_file_path = hp.data_storage_dir + os.sep + "train.txt"
-valid_data_file_path = hp.data_storage_dir + os.sep + "valid.txt"
-test_data_file_path = hp.data_storage_dir + os.sep + "test.txt"
-corpus = WordCorpus(train_data_file_path=train_data_file_path,
-                    valid_data_file_path=valid_data_file_path,
-                    test_data_file_path=test_data_file_path,
-                    cleaner_fn="lower_ascii_keep_standard_punctuation",
-                    max_vocabulary_size=hp.max_vocabulary_size,
-                    use_eos=False)
-train_batches = make_batches_from_list(corpus.train, batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len)
-valid_batches = make_batches_from_list(corpus.valid, batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len)
-test_batches = make_batches_from_list(corpus.test, batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len)
-
-train_random_state = np.random.RandomState(hp.random_seed)
-valid_random_state = np.random.RandomState(hp.random_seed + 1)
-test_random_state = np.random.RandomState(hp.random_seed + 2)
-
-train_itr = StepIterator([train_batches], circular_rotation=True, random_state=train_random_state)
-valid_itr = StepIterator([valid_batches], random_state=valid_random_state)
-test_itr = StepIterator([test_batches], random_state=test_random_state)
-
 def get_hparams():
     return hp
 
@@ -93,49 +72,71 @@ def build_model(hp):
             return p, l_o_m
     return Model().to(hp.use_device)
 
-model = build_model(hp)
-loss_fun = CategoricalCrossEntropyFromLogits()
+if __name__ == "__main__":
+    train_data_file_path = hp.data_storage_dir + os.sep + "train.txt"
+    valid_data_file_path = hp.data_storage_dir + os.sep + "valid.txt"
+    test_data_file_path = hp.data_storage_dir + os.sep + "test.txt"
+    corpus = WordCorpus(train_data_file_path=train_data_file_path,
+                        valid_data_file_path=valid_data_file_path,
+                        test_data_file_path=test_data_file_path,
+                        cleaner_fn="lower_ascii_keep_standard_punctuation",
+                        max_vocabulary_size=hp.max_vocabulary_size,
+                        use_eos=False)
+    train_batches = make_batches_from_list(corpus.train, batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len)
+    valid_batches = make_batches_from_list(corpus.valid, batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len)
+    test_batches = make_batches_from_list(corpus.test, batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len)
 
-def get_std_ramp_opt(model):
-    return RampOpt(hp.learning_rate, 1, 3000, 3000 + 125 * 450,
-                   torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1E-9),
-                   min_decay_learning_rate=hp.min_learning_rate)
+    train_random_state = np.random.RandomState(hp.random_seed)
+    valid_random_state = np.random.RandomState(hp.random_seed + 1)
+    test_random_state = np.random.RandomState(hp.random_seed + 2)
 
-optimizer = get_std_ramp_opt(model)
+    train_itr = StepIterator([train_batches], circular_rotation=True, random_state=train_random_state)
+    valid_itr = StepIterator([valid_batches], random_state=valid_random_state)
+    test_itr = StepIterator([test_batches], random_state=test_random_state)
 
-def loop(itr, extras, stateful_args):
-    np_data = next(itr)
-    input_data = torch.tensor(np_data).to(hp.use_device)
-    target = torch.tensor(np_data).long().to(hp.use_device)
-    input_data = input_data[:-1]
-    input_data = input_data[..., None]
-    # need to embed it?
-    target = target[1:]
-    target = target[..., None]
+    model = build_model(hp)
+    loss_fun = CategoricalCrossEntropyFromLogits()
 
-    in_mems = stateful_args
-    out, out_mems = model(input_data, list_of_mems=in_mems)
-    loss = loss_fun(out, target[hp.context_len:])
-    #loss = loss.sum(axis=0).mean()
-    loss = loss.mean()
-    l = loss.cpu().data.numpy()
-    optimizer.zero_grad()
-    if extras["train"]:
-        loss.backward()
-        clipping_grad_norm_(model.parameters(), hp.clip)
-        optimizer.step()
-    return l, None, out_mems
+    def get_std_ramp_opt(model):
+        return RampOpt(hp.learning_rate, 1, 3000, 3000 + 125 * 450,
+                       torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1E-9),
+                       min_decay_learning_rate=hp.min_learning_rate)
 
-# the out-of-loop-check
-#r = loop(train_itr, {"train": True}, None)
-#r2 = loop(train_itr, {"train": True}, r[-1])
+    optimizer = get_std_ramp_opt(model)
 
-s = {"model": model,
-     "optimizer": optimizer,
-     "hparams": hp}
+    def loop(itr, extras, stateful_args):
+        np_data = next(itr)
+        input_data = torch.tensor(np_data).to(hp.use_device)
+        target = torch.tensor(np_data).long().to(hp.use_device)
+        input_data = input_data[:-1]
+        input_data = input_data[..., None]
+        # need to embed it?
+        target = target[1:]
+        target = target[..., None]
 
-run_loop(loop, train_itr,
-         loop, valid_itr,
-         s,
-         n_train_steps_per=2000,
-         n_valid_steps_per=250)
+        in_mems = stateful_args
+        out, out_mems = model(input_data, list_of_mems=in_mems)
+        loss = loss_fun(out, target[hp.context_len:])
+        #loss = loss.sum(axis=0).mean()
+        loss = loss.mean()
+        l = loss.cpu().data.numpy()
+        optimizer.zero_grad()
+        if extras["train"]:
+            loss.backward()
+            clipping_grad_norm_(model.parameters(), hp.clip)
+            optimizer.step()
+        return l, None, out_mems
+
+    # the out-of-loop-check
+    #r = loop(train_itr, {"train": True}, None)
+    #r2 = loop(train_itr, {"train": True}, r[-1])
+
+    s = {"model": model,
+         "optimizer": optimizer,
+         "hparams": hp}
+
+    run_loop(loop, train_itr,
+             loop, valid_itr,
+             s,
+             n_train_steps_per=2000,
+             n_valid_steps_per=250)

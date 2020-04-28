@@ -592,6 +592,51 @@ def run_loop(train_loop_function, train_itr,
     full_script_path = os.path.abspath(script + ".py")
     folder = str(os.sep).join(full_script_path.split(os.sep)[:-1])
 
+    # hand checking for some important features
+    # function def for build_model and get_hparams
+    # partial blocking of run loop via __name__ == "__main__"
+    # for now we dirty hardcode possible variations, later need to fix this
+
+    passes_check = True
+    why_failed = ""
+    # (string_to_check_for, error message) tuples
+    and_checks = [("def build_model", "def build_model function def not found"),
+                  ("def get_hparams", "def get_hparams function def not found"),
+                 ]
+    or_checks1 = [("__name__ == '__main__'", "{} not found in file, needed for sampling and model reload!"),
+                  ("__name__=='__main__'", "{} not found in file, needed for sampling and model reload!"),
+                  ("__name__== '__main__'", "{} not found in file, needed for sampling and model reload!"),
+                  ("__name__ =='__main__'", "{} not found in file, needed for sampling and model reload!"),
+                  ('__name__ == "__main__"', "{} not found in file, needed for sampling and model reload!"),
+                  ('__name__=="__main__"', "{} not found in file, needed for sampling and model reload!"),
+                  ('__name__== "__main__"', "{} not found in file, needed for sampling and model reload!"),
+                  ('__name__ =="__main__"', "{} not found in file, needed for sampling and model reload!"),
+                 ]
+
+    passes_check = True
+    reasons_failed = []
+    with open(full_script_path) as f:
+        t = f.read()
+        for a_ch in and_checks:
+            if a_ch[0] not in t:
+                passes_check = False
+                reasons_failed.append(ch[1])
+
+        all_or_passed = False
+        or_failed_reason = ""
+        for o_ch in or_checks1:
+            if o_ch[0] in t:
+                all_or_passed = True
+            else:
+                or_failed_reason = o_ch[1].format(o_ch[0])
+
+        if all_or_passed == False:
+            passes_check = False
+            reasons_failed.append(or_failed_reason)
+
+    if not passes_check:
+        raise ValueError("Script file {} failed the following format checks".format(full_script_file, reasons_failed))
+
     break_outer = False
     while True:
         if break_outer:
