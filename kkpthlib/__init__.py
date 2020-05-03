@@ -5,5 +5,7 @@ from .hparams import HParams
 from .iterators import *
 from .datasets import fetch_jsb_chorales
 from .datasets import MusicJSONRasterIterator
+from .datasets import MusicJSONCorpus
 from .datasets import music_json_to_midi
+from .datasets import piano_roll_from_music_json_file
 from .sample import *

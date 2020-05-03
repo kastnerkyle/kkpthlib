@@ -120,14 +120,22 @@ class WordCorpus(object):
             self.cleaner_fn = cleaner_fn
         self.max_vocabulary_size = max_vocabulary_size
 
-        self.build_vocabulary([train_data_file_path, valid_data_file_path, test_data_file_path])
+        base = [train_data_file_path]
+        if valid_data_file_path is not None:
+            base = base + [valid_data_file_path]
+        if test_data_file_path is not None:
+            base = base + [test_data_file_path]
+
+        self.build_vocabulary(base)
 
         if self.max_vocabulary_size > -1:
             self.dictionary._prune_to_top_k_counts(self.max_vocabulary_size)
 
         self.train = self.tokenize(train_data_file_path)
-        self.valid = self.tokenize(valid_data_file_path)
-        self.test = self.tokenize(test_data_file_path)
+        if valid_data_file_path is not None:
+            self.valid = self.tokenize(valid_data_file_path)
+        if test_data_file_path is not None:
+            self.test = self.tokenize(test_data_file_path)
 
     def build_vocabulary(self, file_paths):
         """Tokenizes a text file."""

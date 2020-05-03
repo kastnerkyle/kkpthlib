@@ -123,7 +123,7 @@ for i in range(210):
     in_mems = out_mems
     linear_out, out_mems = model(input_data, list_of_mems=in_mems)
 
-    temp = .5
+    temp = .9
     reduced = top_p_from_logits_np(linear_out.cpu().data.numpy() / temp, .95)
     reduced_probs = softmax_np(reduced)
     sample_last = [sampling_random_state.choice(np.arange(reduced_probs.shape[-1]), p=reduced_probs[-1, j]) for j in range(reduced_probs.shape[1])]

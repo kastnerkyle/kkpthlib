@@ -6,6 +6,7 @@ import json
 import time
 import numpy as np
 from ..core import get_logger
+from ..data import LookupDictionary
 from .loaders import get_kkpthlib_dataset_dir
 import collections
 
@@ -87,8 +88,13 @@ def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
                 if verbose:
                     logger.info("File exists {}, skipping...".format(base_fpath))
             else:
-                _music21_parse_and_save_json(p, base_fpath + ".json")
-                logger.info("Writing {}".format(base_fpath))
+                if 'major' in k.name:
+                    kt = "major"
+                elif 'minor' in k.name:
+                    kt = "minor"
+                core_name = base_fpath + ".{}-{}-original.json".format(k.name.split(" ")[0], kt)
+                _music21_parse_and_save_json(p, core_name)
+                logger.info("Writing {}".format(core_name))
             for t in ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]:
                 if 'major' in k.name:
                     kt = "major"
@@ -223,6 +229,150 @@ def music_json_to_midi(json_file, out_name, tempo_factor=.5):
     mf.open(out_name, 'wb')
     mf.write()
     mf.close()
+
+
+def piano_roll_from_music_json_file(json_file, default_velocity=120, quantization_rate=.25, n_voices=4,
+                                    separate_onsets=True, onsets_boundary=100, as_numpy=True):
+    """
+    return list of list [[each_voice] n_voices] or numpy array of shape (time_len, n_voices)
+    """
+    with open(json_file) as f:
+        data = json.load(f)
+    ppq = data["pulses_per_quarter"]
+    qbpm = data["quarter_beats_per_minute"]
+    spq = data["seconds_per_quarter"]
+
+    parts = data["parts"]
+    parts_times = data["parts_times"]
+    parts_cumulative_times = data["parts_cumulative_times"]
+    # https://github.com/cuthbertLab/music21/blob/c6fc39204c16c47d1c540b545d0c9869a9cafa8f/music21/midi/__init__.py#L1471
+    if "parts_velocities" not in data:
+        default_velocity = default_velocity
+        parts_velocities = [[default_velocity] * len(p) for p in parts]
+    else:
+        parts_velocities = data["parts_velocities"]
+    end_in_quarters = max([max(p) for p in parts_cumulative_times])
+    # clock is set currently by the fact that "sixteenth" is the only option
+    # .25 due to "sixteenth"
+    clock = np.arange(0, max(max(parts_cumulative_times)), quantization_rate)
+    # 4 * for 4 voices
+    raster_end_in_steps = n_voices * len(clock)
+
+    roll_voices = [[] for _ in range(n_voices)]
+    # use these for tracking if we cross a change event
+    p_i = [0] * n_voices
+    for c in clock:
+        # voice
+        for v in range(len(parts)):
+            current_note = parts[v][p_i[v]]
+            next_change_time = parts_cumulative_times[v][p_i[v]]
+            new_onset = False
+            if c >= next_change_time:
+                # we hit a boundary, swap notes
+                p_i[v] += 1
+                current_note = parts[v][p_i[v]]
+                next_change_time = parts_cumulative_times[v][p_i[v]]
+                new_onset = True
+            if c == 0. or new_onset:
+                if current_note != 0:
+                    if separate_onsets:
+                        roll_voices[v].append(current_note + onsets_boundary)
+                    else:
+                        roll_voices[v].append(current_note)
+                else:
+                    # rests have no "onset"
+                    roll_voices[v].append(current_note)
+            else:
+               roll_voices[v].append(current_note)
+    if as_numpy:
+        roll_voices = np.array(roll_voices).T
+    return roll_voices
+
+
+class MusicJSONCorpus(object):
+    def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
+                 max_vocabulary_size=-1,
+                 add_eos=True,
+                 tokenization_fn="flatten",
+                 default_velocity=120, quantization_rate=.25, n_voices=4,
+                 separate_onsets=True, onsets_boundary=100):
+        """
+        """
+        self.dictionary = LookupDictionary()
+
+        self.max_vocabulary_size = max_vocabulary_size
+        self.default_velocity = default_velocity
+        self.quantization_rate = quantization_rate
+        self.n_voices = n_voices
+        self.separate_onsets = separate_onsets
+        self.onsets_boundary = onsets_boundary
+        self.add_eos = add_eos
+
+        if tokenization_fn == "flatten":
+            def tk(arr):
+                t = [el for el in arr.ravel()]
+                if add_eos:
+                   return t + [0] * 32
+                else:
+                    return t
+            self.tokenization_fn = tk
+        else:
+            raise ValueError("Unknown tokenization_fn {}".format(tokenization_fn))
+
+        base = [fp for fp in train_data_file_paths]
+        if valid_data_file_paths is not None:
+            base = base + [fp for fp in valid_data_file_paths]
+        if test_data_file_paths is not None:
+            base = base + [fp for fp in test_data_file_paths]
+
+        self.build_vocabulary(base)
+
+        if self.max_vocabulary_size > -1:
+            self.dictionary._prune_to_top_k_counts(self.max_vocabulary_size)
+
+        self.train = self.tokenize(train_data_file_paths)
+        if valid_data_file_paths is not None:
+            self.valid = self.tokenize(valid_data_file_paths)
+        if test_data_file_paths is not None:
+            self.test = self.tokenize(test_data_file_paths)
+
+    def build_vocabulary(self, json_file_paths):
+        """Tokenizes a text file."""
+        for path in json_file_paths:
+            assert os.path.exists(path)
+            roll = piano_roll_from_music_json_file(path,
+                                                   default_velocity=self.default_velocity,
+                                                   quantization_rate=self.quantization_rate,
+                                                   n_voices=self.n_voices,
+                                                   separate_onsets=self.separate_onsets,
+                                                   onsets_boundary=self.onsets_boundary,
+                                                   as_numpy=True)
+            words = self.tokenization_fn(roll)
+
+            for word in words:
+                self.dictionary.add_word(word)
+
+    def tokenize(self, paths):
+        """Tokenizes a text file."""
+        ids = []
+        for path in paths:
+            assert os.path.exists(path)
+            # Add words to the dictionary
+            roll = piano_roll_from_music_json_file(path,
+                                                   default_velocity=self.default_velocity,
+                                                   quantization_rate=self.quantization_rate,
+                                                   n_voices=self.n_voices,
+                                                   separate_onsets=self.separate_onsets,
+                                                   onsets_boundary=self.onsets_boundary,
+                                                   as_numpy=True)
+            words = self.tokenization_fn(roll)
+            for word in words:
+                if word in self.dictionary.word2idx:
+                    token = self.dictionary.word2idx[word]
+                else:
+                    token = self.dictionary.word2idx["<unk>"]
+                ids.append(token)
+        return ids
 
 
 class MusicJSONRasterIterator(object):

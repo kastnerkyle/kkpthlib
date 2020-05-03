@@ -473,9 +473,23 @@ def save_model_skeleton(serialization_dict, filename):
 
 
 class Saver(object):
-    def __init__(self, max_to_keep=5):
+    """
+    no_duplicates will look in current save directory, and symlink if the step tag is already used rather than saving a copy
+
+    model_keep_type="recent" will delete the oldest files
+
+    model_keep_type="quantile" will break the list of models into 10 quantile buckets, and delete files from each bucket to stay balanced
+    """
+    def __init__(self, max_to_keep=5, no_duplicates=False, model_keep_type="recent"):
         self.max_to_keep = max_to_keep
         self.counter = 0
+        # no duplicates avoids saving multiple copies of model at same point
+        self.no_duplicates = no_duplicates
+        self.model_keep_type = model_keep_type
+        # stateful deleter kept around for quantile deletion
+        self.deleted_from = []
+        if self.model_keep_type not in ["recent", "quantile"]:
+            raise ValueError("Invalid arguement value for model_keep_type to class Saver! Got {}".format(self.model_keep_type))
 
     def save(self, serialization_dict, path_stub, global_step=None):
         assert "model" in serialization_dict
@@ -487,9 +501,12 @@ class Saver(object):
         if global_step is not None:
             full_model_path = path_stub + "model-{}.pth".format(global_step)
             full_optimizer_path = path_stub + "optimizer-{}.pth".format(global_step)
+            gmatch = global_step
+            self.counter += 1
         else:
             full_model_path = path_stub + "model-{}.pth".format(self.counter)
             full_optimizer_path = path_stub + "optimizer-{}.pth".format(self.counter)
+            gmatch = self.counter
             self.counter += 1
 
         folder = "/".join(path_stub.split("/")[:-1])
@@ -497,15 +514,118 @@ class Saver(object):
             logger.info("Folder {} not found, creating".format(folder))
             os.makedirs(folder)
         all_files = os.listdir(folder)
-        all_files = [folder + "/" + a for a in all_files]
+        # only look at save files, not .py .txt etc
+        all_files = [folder + "/" + a for a in all_files if ".pth" in a]
         match_files = [a for a in all_files if path_stub in a]
-        match_files = sorted(match_files, key=lambda x:int(x.split("-")[-1].split(".")[0]))
-        if len(match_files) > self.max_to_keep:
-            # delete oldest file, assumed sort in descending order so [0] is the oldest model
-            os.remove(match_files[0])
+        def get_int_id(x):
+            return int(x.split(os.sep)[-1].split(".")[0].split("-")[-1])
+
+        match_files = sorted(match_files, key=lambda x:get_int_id(x))
+
+        # match by iteration step key
+        match_nums = sorted(list(set([get_int_id(x) for x in match_files])))
+        if len(match_nums) > self.max_to_keep:
+            # need to rematch and group files based on number
+            file_match_groups = [[mf for mf in match_files if get_int_id(mf) == mn] for mn in match_nums]
+
+            if self.model_keep_type == "recent":
+                # delete oldest files, sorted in descending order so [0] is the oldest number and thus oldest serialized model data
+                num_to_del = max(0, len(match_nums) - self.max_to_keep)
+                delete_groups = file_match_groups[:num_to_del]
+            elif self.model_keep_type == "quantile":
+                # don't delete most recent file, need to figure out how many files fall in each "bucket"
+                # we need a random seed here, gonna do something dirty but consistent using the 
+                # self.counter as the seed
+                # will reproduce deletion pattern at least
+                trng = np.random.RandomState(self.counter)
+
+                # classic "chunker" 
+                # https://stackoverflow.com/questions/312443/how-do-you-split-a-list-into-evenly-sized-chunks
+                #[lst[i:i + n] for i in range(0, len(lst), n)]
+
+                # hardcode 5 subsets?
+                n_splits = 5
+
+                # if self.max_to_keep is smaller than n_splits, we cap min at 1
+                split = max(1, self.max_to_keep // n_splits)
+                file_match_chunks = [file_match_groups[i:i + split] for i in range(0, len(file_match_groups), split)]
+                delete_groups = []
+
+                n_to_delete = max(0, len(file_match_groups) - self.max_to_keep)
+                attempts = 0
+                while len(delete_groups) < n_to_delete and attempts < 20:
+                    # select a quartile at random
+                    # BUT
+                    # if the "most recent" quartile has 1 element, don't delete from it 
+                    # AND
+                    # try to delete from each bucket before doing 2 from the same bucket
+                    chunk_range = len(file_match_chunks)
+                    if len(file_match_chunks[-1]) == 1:
+                        chunk_range = len(file_match_chunks) - 1
+
+                    if all([c in self.deleted_from for c in range(chunk_range)]):
+                        # if we've already deleted from all buckets, reset it
+                        self.deleted_from = []
+
+                    buckets = list(range(chunk_range))
+                    # remove the buckets we already deleted from from bucket candidates
+                    buckets = [b for b in buckets if b not in self.deleted_from]
+                    trng.shuffle(buckets)
+                    del_bucket = buckets[0]
+
+                    # select an element at random from within the bucket
+                    fmc = file_match_chunks[del_bucket]
+                    elems = list(range(len(fmc)))
+                    trng.shuffle(elems)
+                    del_this = elems[0]
+
+                    delete_groups.append(fmc[del_this])
+                    self.deleted_from.append(del_bucket)
+                    attempts += 1
+
+            for delete_group in delete_groups:
+                for delete_file in delete_group:
+                    # if any symlink points to this file, need to copy it over the symlink spot
+                    if os.path.islink(delete_file):
+                        os.remove(delete_file)
+                    else:
+                        all_pth_files = [a for a in all_files if ".pth" in a]
+                        for apf in all_pth_files:
+                            if os.path.islink(apf):
+                                links_to = os.readlink(apf)
+                                if links_to == delete_file:
+                                   # if it links to the file we are deleting, make a full copy
+                                   os.remove(apf)
+                                   shutil.copy2(delete_file, apf)
+                                else:
+                                    # if it doesn't link to the file we are deleting who cares
+                                    continue
+                        os.remove(delete_file)
 
         skeleton_path = folder + "/_model_source_skeleton.txt"
         save_model_skeleton(serialization_dict, skeleton_path)
+
+        # only look at save files, not .py .txt etc
+        all_pth_files = [a for a in all_files if ".pth" in a]
+        all_nums = sorted(list(set([get_int_id(x) for x in all_pth_files])))
+        if self.no_duplicates:
+            if gmatch in all_nums:
+                # early exit to avoid saving duplicates
+                # create symlinks instead
+                symlink_file_matches = [apf for apf in all_pth_files if get_int_id(apf) == gmatch]
+                for sfm in symlink_file_matches:
+                    # don't link to symlinks
+                    # IF there are symlinks with the gmatch number
+                    # THERE MUST be a root file with gmatch number as well
+                    # this allows the logic to work
+                    if os.path.islink(sfm):
+                        continue
+
+                    if "optimizer" in sfm.split(os.sep)[-1]:
+                        os.symlink(sfm, full_optimizer_path)
+                    elif "model" in sfm.split(os.sep)[-1]:
+                        os.symlink(sfm, full_model_path)
+                return None
 
         model = serialization_dict["model"]
         optimizer = serialization_dict["optimizer"]
@@ -528,8 +648,10 @@ def run_loop(train_loop_function, train_itr,
              n_valid_steps_per=-1,
              valid_stateful_args=None,
              status_every_s=5,
-             models_to_keep=5,
+             best_models_to_keep=5,
+             recent_models_to_keep=20,
              permanent_models_to_keep=50,
+             permanent_model_keep_type="quantile",
              fill_fn=np.median,
              save_every_n_steps="default",
              skip_first_n_steps_when_saving=0):
@@ -549,7 +671,6 @@ def run_loop(train_loop_function, train_itr,
     or
 
     return loss, None (if train_stateful_args or valid_stateful_args doesn't exist, you can just drop it)
-
     or
 
     return [loss1, ..., lossN], None, stateful_args
@@ -690,10 +811,10 @@ def run_loop(train_loop_function, train_itr,
         this_valid_stateful_args = valid_stateful_args
     last_status = time.time()
 
-    model_saver = Saver(max_to_keep=models_to_keep)
-    train_best_model_saver = Saver(max_to_keep=models_to_keep)
-    valid_best_model_saver = Saver(max_to_keep=models_to_keep)
-    perma_saver = Saver(max_to_keep=permanent_models_to_keep)
+    valid_best_model_saver = Saver(max_to_keep=best_models_to_keep)
+    train_best_model_saver = Saver(max_to_keep=best_models_to_keep, no_duplicates=True)
+    model_saver = Saver(max_to_keep=recent_models_to_keep, no_duplicates=True)
+    perma_saver = Saver(max_to_keep=permanent_models_to_keep, no_duplicates=True, model_keep_type=permanent_model_keep_type)
 
     checkpoint_dir = get_checkpoint_dir(tag=tag)
     thw = threaded_html_writer(tag=tag)
@@ -799,12 +920,6 @@ def run_loop(train_loop_function, train_itr,
                     overall_train_summaries[k] = []
                 overall_train_summaries[k] += this_train_summaries[k]
 
-        if train_loss < min_last_train_loss:
-            min_last_train_loss = train_loss
-            logger.info("had best train, step {}".format(train_itr_steps_taken))
-            train_best_model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "train_"),
-                                        train_itr_steps_taken)
-
         extras["train"] = False
         if n_valid_steps_per > 0:
             this_valid_loss = []
@@ -901,21 +1016,29 @@ def run_loop(train_loop_function, train_itr,
             results_dict["valid_cumulative_time_auto"] = cumulative_valid_time
             results_dict["valid_minibatch_count_auto"] = minibatch_valid_count
 
-        thw.send((save_html_path, results_dict))
+        if was_best_valid_loss:
+            logger.info("valid saver had best valid, step {}".format(train_itr_steps_taken))
+            valid_best_model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "valid_"),
+                                        train_itr_steps_taken)
+            was_best_valid_loss = False
 
-        model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "checkpoint_"),
-                         train_itr_steps_taken)
+        if train_loss < min_last_train_loss:
+            min_last_train_loss = train_loss
+            logger.info("had best train, step {}".format(train_itr_steps_taken))
+            train_best_model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "train_"),
+                                        train_itr_steps_taken)
 
         if save_every_n_steps == "default":
             # both must be inf, we checked this at the top of the function
             assert np.isinf(n_steps)
             assert np.isinf(n_epochs)
             # use the time of training to set a guess
-            # save every 30 mins roughly
-            # so 30 * 60 = desired num seconds
+            # save every 15 mins roughly
+            # so 15 * 60 = desired num seconds
             # sec / sec per step = step
-            tmp_save_every_n_steps = 30 * 60 * np.mean(minibatch_train_time)
-            logger.info("Using save_every_n_steps='default', permanent saver with training speed {} seconds per training minibatch, desired 30 min average save, saving every {} steps".format(np.mean(minibatch_train_time), tmp_save_every_n_steps))
+            tmp_save_every_n_steps = (15. * 60) / np.mean(minibatch_train_time)
+            tmp_save_every_n_steps = 1
+            logger.info("Using save_every_n_steps='default', permanent saver with training speed {} seconds per training minibatch, desired 15 min average save, saving every {} steps".format(np.mean(minibatch_train_time), tmp_save_every_n_steps))
 
         if np.isinf(n_steps):
             # just set it to a very large number
@@ -924,18 +1047,16 @@ def run_loop(train_loop_function, train_itr,
             tmp_n_steps = n_steps
 
         # want to do a first save immediately, rather than wait
+        # times 2 is because of hard coded 30 mins above
         if train_itr_steps_taken >= (last_perma_save + tmp_save_every_n_steps) or last_perma_save == 0:
             # if skip specified, override the "save immediately" option set by last_perma_save == 0
             if train_itr_steps_taken >= skip_first_n_steps_when_saving:
                 perma_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "permanent_"), train_itr_steps_taken)
                 last_perma_save = train_itr_steps_taken
 
-        if was_best_valid_loss:
-            logger.info("valid saver had best valid, step {}".format(train_itr_steps_taken))
-            valid_best_model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "valid_"),
-                                        train_itr_steps_taken)
-            was_best_valid_loss = False
-
+        thw.send((save_html_path, results_dict))
+        model_saver.save(serialization_dict, os.path.join(checkpoint_dir, "saved_models", "checkpoint_"),
+                         train_itr_steps_taken)
         extras["train"] = True
 
     logger.info("Training complete, exiting...")
