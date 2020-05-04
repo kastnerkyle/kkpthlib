@@ -545,6 +545,63 @@ class MusicJSONRasterIterator(object):
             return raster_roll_voices, mask, [ac.astype(np.float32) * mask[..., None] for ac in all_clocks]
 
 
+def convert_voice_roll_to_pitch_duration(voice_roll, quantization_rate=.25, onsets_boundary=100):
+    """
+    take in voice roll and turn it into a pitch, duration thing again
+
+    currently assume onsets are any notes > 100 , 0 is rest
+
+    example input, where 170, 70, 70, 70 is an onset of pitch 70 (noted as 170), followed by a continuation for 4 steps
+    array([[170.,  70.,  70.,  70.],
+           [165.,  65.,  65.,  65.],
+           [162.,  62.,  62.,  62.],
+           [158.,  58.,  58.,  58.]])
+    """
+    duration_step = quantization_rate
+    voice_data = {}
+    voice_data["parts"] = []
+    voice_data["parts_times"] = []
+    voice_data["parts_cumulative_times"] = []
+    for v in range(voice_roll.shape[0]):
+        voice_data["parts"].append([])
+        voice_data["parts_times"].append([])
+        voice_data["parts_cumulative_times"].append([])
+    for v in range(voice_roll.shape[0]):
+        ongoing_duration = duration_step
+        note_held = 0
+        for t in range(len(voice_roll[v])):
+            token = int(voice_roll[v][t])
+            if voice_roll[v][t] > onsets_boundary:
+                voice_data["parts"][v].append(note_held)
+                voice_data["parts_times"][v].append(ongoing_duration)
+                ongoing_duration = duration_step
+                note_held = token - onsets_boundary
+            elif token != 0:
+                if token != note_held:
+                    # make it an onset?
+                    print("WARNING: got non-onset pitch change, forcing onset token at step {}, voice {}".format(t, v))
+                    note_held = token
+                    ongoing_duration = duration_step
+                else:
+                    ongoing_duration += duration_step
+            else:
+                # just adding 16th note silences?
+                ongoing_duration = duration_step
+                note_held = 0
+                voice_data["parts"][v].append(note_held)
+                voice_data["parts_times"][v].append(ongoing_duration)
+        voice_data["parts_cumulative_times"][v] = [e for e in np.cumsum(voice_data["parts_times"][v])]
+    spq = .5
+    ppq = 220
+    qbpm = 120
+    voice_data["seconds_per_quarter"] = spq
+    voice_data["quarter_beats_per_minute"] = qbpm
+    voice_data["pulses_per_quarter"] = ppq
+    voice_data["parts_names"] = ["Soprano", "Alto", "Tenor", "Bass"]
+    j = json.dumps(voice_data, indent=4)
+    return j
+
+
 class MusicJSONVoiceIterator(object):
     """
             return pitch_batch, time_batch, voice_batch, cumulative_time_batch, mask

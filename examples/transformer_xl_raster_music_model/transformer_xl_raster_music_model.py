@@ -34,7 +34,7 @@ hp = HParams(memory_len=20,
              batch_size=10,
              n_layers=16,
              max_sequence_length=140,
-             max_vocabulary_size=10000,
+             max_vocabulary_size=133, # len(corpus.dictionary.counter)
              random_seed=2122)
 
 def get_hparams():
