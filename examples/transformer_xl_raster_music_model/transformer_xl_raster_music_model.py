@@ -23,17 +23,17 @@ from kkpthlib import fetch_jsb_chorales
 from kkpthlib import piano_roll_from_music_json_file
 from kkpthlib import MusicJSONCorpus
 
-hp = HParams(memory_len=20,
-             context_len=70,
+hp = HParams(memory_len=32,
+             context_len=128,
              embedding_dropout_keep_prob=.8,
              transformer_input_dim=380,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
              learning_rate=3E-4,
              min_learning_rate=1E-4,
              clip=.25,
-             batch_size=10,
+             batch_size=24,
              n_layers=16,
-             max_sequence_length=140,
+             max_sequence_length=256,
              max_vocabulary_size=133, # len(corpus.dictionary.counter)
              random_seed=2122)
 

@@ -178,6 +178,29 @@ def _populate_track_from_data(data, instrument=None):
     return mt
 
 
+def write_music_json(json_data, out_name, default_velocity=120):
+    """
+    assume data is formatted in "music JSON" format
+    """
+    data = json.loads(json_data)
+    ppq = data["pulses_per_quarter"]
+    qbpm = data["quarter_beats_per_minute"]
+    spq = data["seconds_per_quarter"]
+
+    parts = data["parts"]
+    parts_times = data["parts_times"]
+    # https://github.com/cuthbertLab/music21/blob/c6fc39204c16c47d1c540b545d0c9869a9cafa8f/music21/midi/__init__.py#L1471
+    if "parts_velocities" not in data:
+        # handle rests
+        parts_velocities = [[default_velocity if pi != 0 else 0 for pi in p] for p in parts]
+    else:
+        print("handle velocities in write_music_json")
+        from IPython import embed; embed(); raise ValueError()
+
+    with open(out_name, "w") as f:
+         json.dump(data, f, indent=4)
+
+
 def music_json_to_midi(json_file, out_name, tempo_factor=.5):
     """
     string (filepath) or json.dumps object
@@ -202,7 +225,8 @@ def music_json_to_midi(json_file, out_name, tempo_factor=.5):
     # https://github.com/cuthbertLab/music21/blob/c6fc39204c16c47d1c540b545d0c9869a9cafa8f/music21/midi/__init__.py#L1471
     if "parts_velocities" not in data:
         default_velocity = 120
-        parts_velocities = [[default_velocity] * len(p) for p in parts]
+        # handle rests
+        parts_velocities = [[default_velocity if pi != 0 else 0 for pi in p] for p in parts]
     else:
         print("handle velocities in json_to_midi")
         from IPython import embed; embed(); raise ValueError()
