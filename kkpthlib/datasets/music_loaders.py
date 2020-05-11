@@ -316,7 +316,7 @@ def piano_roll_from_music_json_file(json_file, default_velocity=120, quantizatio
 class MusicJSONCorpus(object):
     def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
                  max_vocabulary_size=-1,
-                 add_eos=True,
+                 add_eos=False,
                  tokenization_fn="flatten",
                  default_velocity=120, quantization_rate=.25, n_voices=4,
                  separate_onsets=True, onsets_boundary=100):
@@ -336,7 +336,8 @@ class MusicJSONCorpus(object):
             def tk(arr):
                 t = [el for el in arr.ravel()]
                 if add_eos:
-                   return t + [0] * 32
+                    # 2 measures of silence are the eos
+                    return t + [0] * 32
                 else:
                     return t
             self.tokenization_fn = tk

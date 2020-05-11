@@ -121,38 +121,43 @@ valid_names = bwv_names[:15]
 train_files = [f for f in all_transposed if all([vn not in f for vn in valid_names])]
 valid_files = [f for f in all_transposed if any([vn in f for vn in valid_names])]
 
+# now we want to aggregate "start" seeds from each of the files
+batch_size = args.batch_size
+assert batch_size <= len(valid_files)
+
+sample_len = args.sample_len
+
+seed_batches = []
+for i in range(batch_size):
+    corpus = MusicJSONCorpus(train_data_file_paths=train_files,
+                             valid_data_file_paths=[valid_files[i]])
+    seed_batches.append(np.array(corpus.valid[:sample_len]))
+
+# make the full corpus to ensure vocabulary matches training
 corpus = MusicJSONCorpus(train_data_file_paths=train_files,
                          valid_data_file_paths=valid_files)
 
-batch_size = args.batch_size
-train_batches = make_batches_from_list(corpus.train, batch_size=batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len)
-valid_batches = make_batches_from_list(corpus.valid, batch_size=batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len)
+min_len = min([sb.shape[0] for sb in seed_batches])
+if sample_len < min_len:
+    min_len = sample_len
 
-train_random_state = np.random.RandomState(vrng.randint(10000))
-valid_random_state = np.random.RandomState(vrng.randint(10000))
-
-random_seed = args.random_seed
-sampling_random_state = np.random.RandomState(random_seed)
-
-train_itr = StepIterator([train_batches], circular_rotation=True, random_state=train_random_state)
-valid_itr = StepIterator([valid_batches], random_state=valid_random_state)
-
-this_np_data = next(valid_itr)
-# try to get some variety in the seeds by taking pieces from multiple batches
-np_data = copy.deepcopy(this_np_data)
-for i in range(1, this_np_data.shape[1]):
-    this_np_data = next(valid_itr)
-    np_data[:, i] = this_np_data[:, i]
-
+seed_batches = [sb[:min_len] for sb in seed_batches]
+np_data = np.array(seed_batches).T
 true_data = np_data.copy()
 
 np_data = np_data[:hp.context_len + 1]
+# set same seed for all, check variability
+np_data_0 = np_data[:, 0]
+np_data[:, :] = np_data_0[:, None]
+
 out_mems = None
 
-sample_len = args.sample_len
 context_mult = args.context_mult
 temperature = args.temperature
 p_cutoff = args.p_cutoff
+
+random_seed = args.random_seed
+sampling_random_state = np.random.RandomState(random_seed)
 
 for i in range(sample_len - hp.context_len):
     context_sentence = [corpus.dictionary.idx2word[c] for c in np_data[:hp.context_len + 1, 0]]

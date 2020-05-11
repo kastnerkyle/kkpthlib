@@ -152,11 +152,11 @@ def get_models_dir(special_check=True, verbose=True):
     return checkpoint_dir
 
 
-def get_cache_dir(special_check=True):
+def get_cache_dir(special_check=True, verbose=True):
     if special_check and _special_check(verbose=verbose):
-        local_cache_dir = "/Tmp/" + USER + "/_kkpthlib_data_cache/"
+        local_cache_dir = "/Tmp/" + USER + "/_kkpthlib_cache/"
     else:
-        local_cache_dir = "/home/" + USER + "_kkpthlib_data_cache"
+        local_cache_dir = "/home/" + USER + "/_kkpthlib_cache/"
     if not os.path.exists(local_cache_dir):
         os.mkdir(local_cache_dir)
     return local_cache_dir

@@ -10,4 +10,5 @@ from .datasets import music_json_to_midi
 from .datasets import write_music_json
 from .datasets import piano_roll_from_music_json_file
 from .datasets import convert_voice_roll_to_pitch_duration
+from .checkers import *
 from .sample import *
