@@ -12,7 +12,7 @@ import collections
 
 logger = get_logger()
 
-def _music21_parse_and_save_json(p, fpath):
+def music21_parse_and_save_json(p, fpath, tempo_factor=1):
     piece_container = {}
     piece_container["parts"] = []
     piece_container["parts_times"] = []
@@ -39,7 +39,7 @@ def _music21_parse_and_save_json(p, fpath):
                 part.append(0)
             else:
                 part.append(n.midi)
-            part_time.append(n.duration.quarterLength)
+            part_time.append(n.duration.quarterLength * tempo_factor)
         piece_container["parts"][i] += part
         piece_container["parts_times"][i] += part_time
         piece_container["parts_cumulative_times"][i] += list(np.cumsum(part_time))
@@ -93,7 +93,7 @@ def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
                 elif 'minor' in k.name:
                     kt = "minor"
                 core_name = base_fpath + ".{}-{}-original.json".format(k.name.split(" ")[0], kt)
-                _music21_parse_and_save_json(p, core_name)
+                music21_parse_and_save_json(p, core_name, tempo_factor=1)
                 logger.info("Writing {}".format(core_name))
             for t in ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]:
                 if 'major' in k.name:
@@ -112,7 +112,7 @@ def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
                 i = interval.Interval(k.tonic, pitch.Pitch(t))
                 pn = p.transpose(i)
                 #kn = pn.analyze('key')
-                _music21_parse_and_save_json(pn, transpose_fpath)
+                music21_parse_and_save_json(pn, transpose_fpath, tempo_factor=1)
                 if verbose:
                     logger.info("Writing {}".format(transpose_fpath))
         except Exception as e:
@@ -130,6 +130,7 @@ def _populate_track_from_data(data, instrument=None):
     >>> me2 = midi.MidiEvent(mt)
     >>> rem = me2.parseChannelVoiceMessage(to_bytes([0xC0, 71]))
     # program change to instrument 71
+    # # 71 = clarinet (0-127 indexed)
     """
     mt = MidiTrack(1)
     t = 0

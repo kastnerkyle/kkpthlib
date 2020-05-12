@@ -59,8 +59,10 @@ class GroupDict(OrderedDict):
             # name of tag
             name = temp[0][1][0][0]
             for el in temp:
+               # value of format
+               # [(0, 51, '76:74:73:78:80:81:81:80->78', 1, 55),
+               # (18, 51, '76:74:73:78:80:81:81:80->78', 1, 55)]
                o[name] = [(e[1], e[2]) + el[0] for e in el[1]]
-            #o[name]
             done.append(p)
         return o
 
@@ -407,23 +409,18 @@ def get_music21_metadata(list_of_musicjson_or_midi_files, only_pieces_with_n_voi
     return {"files": files_list}
 
 
-def build_music_plagiarism_checkers(metajson_files):
+def build_music_plagiarism_checkers(metajson_files, roman_reduced_max_order=10, roman_checker_max_order=10,
+                                    pitched_functional_max_order=10,
+                                    functional_max_order=10,
+                                    pitches_max_order=10):
     """
     given list of metajson files, builds all the tries for checking plagiarism
     """
-    roman_reduced_max_order = 5
     roman_reduced_checker = MaxOrder(roman_reduced_max_order)
-
-    roman_checker_max_order = 5
     roman_checker = MaxOrder(roman_checker_max_order)
-
-    pitched_functional_max_order = 5
     pitched_functional_checker = MaxOrder(pitched_functional_max_order)
-
-    functional_max_order = 5
     functional_checker = MaxOrder(functional_max_order)
 
-    pitches_max_order = 12
     soprano_pitch_checker = MaxOrder(pitches_max_order)
     alto_pitch_checker = MaxOrder(pitches_max_order)
     tenor_pitch_checker = MaxOrder(pitches_max_order)
