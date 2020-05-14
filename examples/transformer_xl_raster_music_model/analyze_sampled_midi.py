@@ -13,19 +13,19 @@ import os
 import glob
 
 parser = argparse.ArgumentParser(description="script {}".format(__file__))
-parser.add_argument('sampled_outputs_path', type=str, default="")
+parser.add_argument('sampled_midi_file_to_analyze', type=str, default="")
 parser.add_argument('--data_seed', '-d', type=int, default=144,
                     help='random seed to use when seeding the sampling (default 144)')
 
 args = parser.parse_args()
-if args.sampled_outputs_path == "":
+if args.sampled_midi_file_to_analyze == "":
     parser.print_help()
     sys.exit(1)
 
-sampled_outputs_path = args.sampled_outputs_path
+sampled_midi_file_to_analyze = args.sampled_midi_file_to_analyze
 
-if not os.path.exists(sampled_outputs_path):
-    raise ValueError("Unable to find argument {} for file load! Check your paths, and be sure to remove aliases such as '~'".format(saved_outputs_path))
+if not os.path.exists(sampled_midi_file_to_analyze):
+    raise ValueError("Unable to find argument {} for file load! Check your paths, and be sure to remove aliases such as '~'".format(sampled_midi_file_to_analyze))
 
 from kkpthlib import StepIterator
 from kkpthlib import make_batches_from_list
@@ -91,7 +91,5 @@ else:
     end = time.time()
     print("Time to load {}s".format(end - start))
 
-midi_path = sampled_outputs_path + "/sampled0.midi"
+midi_path = sampled_midi_file_to_analyze
 evaluate_music_against_checkers(midi_path, checkers)
-
-#corpus = MusicJSONCorpus(train_data_file_paths=jsb["files"])

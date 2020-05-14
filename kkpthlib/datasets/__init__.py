@@ -1,7 +1,9 @@
 from loaders import *
 #from iterators import *
 from ..core import get_logger
+from .midi_instrument_map import *
 logger = get_logger()
+from music_loaders import *
 try:
     from music_loaders import *
 except ImportError:

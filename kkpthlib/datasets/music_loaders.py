@@ -4,10 +4,13 @@ from music21.midi import MidiTrack, MidiFile, MidiEvent, DeltaTime
 import os
 import json
 import time
+import struct
 import numpy as np
 from ..core import get_logger
 from ..data import LookupDictionary
 from .loaders import get_kkpthlib_dataset_dir
+from .midi_instrument_map import midi_instruments_number_to_name
+from .midi_instrument_map import midi_instruments_name_to_number
 import collections
 
 logger = get_logger()
@@ -123,23 +126,52 @@ def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
     return dataset_path
 
 
-def _populate_track_from_data(data, instrument=None):
+def _populate_track_from_data(data, program_changes=None):
     """
     example program change
     https://github.com/cuthbertLab/music21/blob/a78617291ed0aeb6595c71f82c5d398ebe604ef4/music21/midi/__init__.py
-    >>> me2 = midi.MidiEvent(mt)
-    >>> rem = me2.parseChannelVoiceMessage(to_bytes([0xC0, 71]))
-    # program change to instrument 71
-    # # 71 = clarinet (0-127 indexed)
+
+    instrument_sequence = [(instrument, ppq_adjusted_time)]
     """
     mt = MidiTrack(1)
     t = 0
-    tLast = 0
+    tlast = 0
+    pc_counter = 0
     for d, p, v in data:
+        # need these "blank" time events
+        # between each real event
+        # to parse correctly
         dt = DeltaTime(mt)
-        dt.time = t - tLast
+        dt.time = 0 #t - tLast
         # add to track events
         mt.events.append(dt)
+
+        if program_changes is not None:
+            if pc_counter >= len(program_changes):
+                pass
+            elif t >= program_changes[pc_counter][1] and tlast <= program_changes[pc_counter][1]:
+                # crossed a program change event
+                pc = MidiEvent(mt)
+                if program_changes[pc_counter][0] not in midi_instruments_name_to_number.keys():
+                    raise ValueError("Passed program change name {} not found in kkpthlib/datasets/midi_instrument_map.py".format(program_changes[pc_counter][0]))
+                inst_num = midi_instruments_name_to_number[program_changes[pc_counter][0]]
+                # convert from 1 indexed ala pretty-midi to 0 indexed ala music21...
+                inst_num = inst_num - 1
+                pc.type = "PROGRAM_CHANGE"
+                pc.channel = 1
+                pc.time = None
+                pc.data = inst_num
+                mt.events.append(pc)
+
+                # need these "blank" time events
+                # between each real event
+                # to parse correctly
+                dt = DeltaTime(mt)
+                dt.time = 0 #t - tLast
+                # add to track events
+                mt.events.append(dt)
+
+                pc_counter += 1
 
         me = MidiEvent(mt)
         me.type = "NOTE_ON"
@@ -163,8 +195,10 @@ def _populate_track_from_data(data, instrument=None):
         me.velocity = 0
         mt.events.append(me)
 
-        tLast = t + d # have delta to note off
-        t += d # next time
+        tlast = t
+        t += d
+
+
 
     # add end of track
     dt = DeltaTime(mt)
@@ -202,12 +236,52 @@ def write_music_json(json_data, out_name, default_velocity=120):
          json.dump(data, f, indent=4)
 
 
-def music_json_to_midi(json_file, out_name, tempo_factor=.5):
+def music_json_to_midi(json_file, out_name, tempo_factor=.5,
+                       default_velocity=120,
+                       dynamic_range_normalization=True,
+                       voice_program_map=None):
     """
     string (filepath) or json.dumps object
 
     tempo factor .5, twice as slow
     tempo factor 2, twice as fast
+
+    voice_program_map {0: [(instrument_name, time_in_quarters)],
+                       1: [(instrument_name, time_in_quarters)]}
+    voices ordered SATB by default
+
+    instrument names for program changes defined in kkpthlib/datasets/midi_instrument_map.py
+
+    An example program change, doing harpsichord the first 8 quarter notes then a special
+    mix as used by Music Transformer, Huang et. al.
+
+    and recommended by
+    https://musescore.org/en/node/109121
+
+    a = "Harpsichord"
+    b = "Harpsichord"
+    c = "Harpsichord"
+    d = "Harpsichord"
+
+    e = "Oboe"
+    f = "English Horn"
+    g = "Clarinet"
+    h = "Bassoon"
+
+    # key: voice
+    # values: list of tuples (instrument, time_in_quarter_notes_to_start_using) - optionally (instrument, time_in_quarters, global_amplitude)
+    # amplitude should be in 0-127
+    m = {0: [(a, 0), (e, 8)],
+         1: [(b, 0), (f, 8)],
+         2: [(c, 0), (g, 8)],
+         3: [(d, 0), (h, 8)]}
+
+    or
+
+    m = {0: [(a, 0, 60), (e, 8, 40)],
+         1: [(b, 0, 30), (f, 8, 30)],
+         2: [(c, 0, 30), (g, 8, 30)],
+         3: [(d, 0, 40), (h, 8, 50)]}
     """
     if json_file.endswith(".json"):
         with open(json_file) as f:
@@ -225,19 +299,56 @@ def music_json_to_midi(json_file, out_name, tempo_factor=.5):
     parts_times = data["parts_times"]
     # https://github.com/cuthbertLab/music21/blob/c6fc39204c16c47d1c540b545d0c9869a9cafa8f/music21/midi/__init__.py#L1471
     if "parts_velocities" not in data:
-        default_velocity = 120
         # handle rests
         parts_velocities = [[default_velocity if pi != 0 else 0 for pi in p] for p in parts]
     else:
         print("handle velocities in json_to_midi")
-        from IPython import embed; embed(); raise ValueError()
 
     all_mt = []
     for i in range(len(parts)):
         assert len(parts[i]) == len(parts_velocities[i])
         assert len(parts[i]) == len(parts_times[i])
-        track_data = [[int(parts_times[i][j] * ppq), parts[i][j], parts_velocities[i][j]] for j in range(len(parts[i]))]
-        mt = _populate_track_from_data(track_data)
+        program_changes = voice_program_map[i] if voice_program_map is not None else None
+        this_part_velocity = [parts_velocities[i][j] for j in range(len(parts[i]))]
+        if program_changes is not None:
+            program_changes = [(pg[0], int(pg[1] * ppq)) for pg in program_changes]
+            this_part_velocity_new = []
+            pg_counter = 0
+            last_step_tick = 0
+            current_step_tick = 0
+            current_velocity = default_velocity
+            for j in range(len(parts[i])):
+                last_step_tick = current_step_tick
+                current_step_tick = int(parts_times[i][j] * ppq)
+                if len(program_changes[pg_counter]) < 3:
+                    this_part_velocity_new.append(this_part_velocity[j])
+                else:
+                    # if it is the last program change then we just stay on that
+                    if pg_counter != len(program_changes) - 1:
+                        # check for tick boundary
+                        if last_step_tick <= int(program_changes[pg_counter + 1][1] * ppq) and current_step_tick >= int(program_changes[pg_counter + 1][1] * ppq):
+                            pg_counter += 1
+                    current_velocity = default_velocity if len(program_changes[pg_counter]) < 3 else program_changes[pg_counter][2]
+                    this_part_velocity_new.append(current_velocity)
+            this_part_velocity = this_part_velocity_new
+
+        if dynamic_range_normalization:
+            # normalize
+            mm = float(max(this_part_velocity))
+            mi = float(min(this_part_velocity))
+            # be sure that 0 range doesn't happen
+            dynamic_range =  max(1, (mm - mi))
+            # cap range at 90
+            range_cap = 90
+            dynamic_range = min(range_cap, dynamic_range)
+            # max vol is 120
+            # keep same scale just make it louder?
+            this_part_velocity = [int((range_cap - dynamic_range) + min(range_cap, int(v - mi))) for v in this_part_velocity]
+
+        track_data = [[int(parts_times[i][j] * ppq), parts[i][j], this_part_velocity[j]] for j in range(len(parts[i]))]
+
+        # do global velocity modulations...
+        mt = _populate_track_from_data(track_data, program_changes=program_changes)
         all_mt.append(mt)
 
     mf = MidiFile()
