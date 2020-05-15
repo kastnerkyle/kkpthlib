@@ -126,14 +126,14 @@ def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
     return dataset_path
 
 
-def _populate_track_from_data(data, program_changes=None):
+def _populate_track_from_data(data, index, program_changes=None):
     """
     example program change
     https://github.com/cuthbertLab/music21/blob/a78617291ed0aeb6595c71f82c5d398ebe604ef4/music21/midi/__init__.py
 
     instrument_sequence = [(instrument, ppq_adjusted_time)]
     """
-    mt = MidiTrack(1)
+    mt = MidiTrack(index)
     t = 0
     tlast = 0
     pc_counter = 0
@@ -143,6 +143,7 @@ def _populate_track_from_data(data, program_changes=None):
         # to parse correctly
         dt = DeltaTime(mt)
         dt.time = 0 #t - tLast
+        dt.channel = index
         # add to track events
         mt.events.append(dt)
 
@@ -158,7 +159,7 @@ def _populate_track_from_data(data, program_changes=None):
                 # convert from 1 indexed ala pretty-midi to 0 indexed ala music21...
                 inst_num = inst_num - 1
                 pc.type = "PROGRAM_CHANGE"
-                pc.channel = 1
+                pc.channel = index
                 pc.time = None
                 pc.data = inst_num
                 mt.events.append(pc)
@@ -175,7 +176,7 @@ def _populate_track_from_data(data, program_changes=None):
 
         me = MidiEvent(mt)
         me.type = "NOTE_ON"
-        me.channel = 1
+        me.channel = index
         me.time = None #d
         me.pitch = p
         me.velocity = v
@@ -184,12 +185,13 @@ def _populate_track_from_data(data, program_changes=None):
         # add note off / velocity zero message
         dt = DeltaTime(mt)
         dt.time = d
+        dt.channel = index
         # add to track events
         mt.events.append(dt)
 
         me = MidiEvent(mt)
         me.type = "NOTE_ON"
-        me.channel = 1
+        me.channel = index 
         me.time = None #d
         me.pitch = p
         me.velocity = 0
@@ -198,16 +200,15 @@ def _populate_track_from_data(data, program_changes=None):
         tlast = t
         t += d
 
-
-
     # add end of track
     dt = DeltaTime(mt)
     dt.time = 0
+    dt.channel = index
     mt.events.append(dt)
 
     me = MidiEvent(mt)
     me.type = "END_OF_TRACK"
-    me.channel = 1
+    me.channel = index 
     me.data = '' # must set data to empty string
     mt.events.append(me)
     return mt
@@ -235,10 +236,47 @@ def write_music_json(json_data, out_name, default_velocity=120):
     with open(out_name, "w") as f:
          json.dump(data, f, indent=4)
 
+_program_presets = {
+                    "dreamy_r_preset": [("Sitar", 30),
+                                        ("Orchestral Harp", 40),
+                                        ("Acoustic Guitar (nylon)", 40),
+                                        ("Pan Flute", 20)],
+                    "dreamy_preset": [("Pan Flute", 20),
+                                      ("Acoustic Guitar (nylon)", 40),
+                                      ("Orchestral Harp", 40),
+                                      ("Sitar", 30)],
+                    "zelda_preset": [("Pan Flute", 10),
+                                     ("Acoustic Guitar (nylon)", 25),
+                                     ("Acoustic Guitar (nylon)", 16),
+                                     ("Acoustic Guitar (nylon)", 20)],
+                    "nylon_preset": [("Acoustic Guitar (nylon)", 20),
+                                     ("Acoustic Guitar (nylon)", 25),
+                                     ("Acoustic Guitar (nylon)", 16),
+                                     ("Acoustic Guitar (nylon)", 20)],
+                    "organ_preset": [("Church Organ", 50),
+                                     ("Church Organ", 30),
+                                     ("Church Organ", 30),
+                                     ("Church Organ", 40)],
+                    "grand_piano_preset": [("Acoustic Grand Piano", 50),
+                                           ("Acoustic Grand Piano", 30),
+                                           ("Acoustic Grand Piano", 30),
+                                           ("Acoustic Grand Piano", 40)],
+                    "electric_piano_preset": [("Electric Piano 1", 50),
+                                              ("Electric Piano 1", 30),
+                                              ("Electric Piano 1", 30),
+                                              ("Electric Piano 1", 40)],
+                    "harpsichord_preset": [("Harpsichord", 50),
+                                           ("Harpsichord", 30),
+                                           ("Harpsichord", 30),
+                                           ("Harpsichord", 40)],
+                    "woodwind_preset": [("Oboe", 50),
+                                        ("English Horn", 30),
+                                        ("Clarinet", 30),
+                                        ("Bassoon", 40)],
+                   }
 
 def music_json_to_midi(json_file, out_name, tempo_factor=.5,
                        default_velocity=120,
-                       dynamic_range_normalization=True,
                        voice_program_map=None):
     """
     string (filepath) or json.dumps object
@@ -270,7 +308,7 @@ def music_json_to_midi(json_file, out_name, tempo_factor=.5,
 
     # key: voice
     # values: list of tuples (instrument, time_in_quarter_notes_to_start_using) - optionally (instrument, time_in_quarters, global_amplitude)
-    # amplitude should be in 0-127
+    # amplitude should be in [0 , 127]
     m = {0: [(a, 0), (e, 8)],
          1: [(b, 0), (f, 8)],
          2: [(c, 0), (g, 8)],
@@ -282,6 +320,25 @@ def music_json_to_midi(json_file, out_name, tempo_factor=.5,
          1: [(b, 0, 30), (f, 8, 30)],
          2: [(c, 0, 30), (g, 8, 30)],
          3: [(d, 0, 40), (h, 8, 50)]}
+
+    Alternatively, support "auto" groups which set custom voices and amplitudes
+    a = "harpsichord_preset"
+    b = "woodwind_preset"
+    m = {0: [(a, 0), (b, 8)],
+         1: [(a, 0), (b, 8)],
+         2: [(a, 0), (b, 8)],
+         3: [(a, 0), (b, 8)]}
+
+    valid preset values:
+                "dreamy_r_preset"
+                "dreamy_preset"
+                "zelda_preset"
+                "nylon_preset"
+                "organ_preset"
+                "grand_piano_preset"
+                "electric_piano_preset"
+                "harpsichord_preset"
+                "woodwind_preset"
     """
     if json_file.endswith(".json"):
         with open(json_file) as f:
@@ -311,7 +368,18 @@ def music_json_to_midi(json_file, out_name, tempo_factor=.5,
         program_changes = voice_program_map[i] if voice_program_map is not None else None
         this_part_velocity = [parts_velocities[i][j] for j in range(len(parts[i]))]
         if program_changes is not None:
-            program_changes = [(pg[0], int(pg[1] * ppq)) for pg in program_changes]
+            # remap presets
+            program_changes_new = []
+            for pc in program_changes:
+                if pc[0] in _program_presets.keys():
+                    p = _program_presets[pc[0]]
+                    program_changes_new.append((p[i][0], pc[1], p[i][1]))
+                else:
+                    program_changes_new.append(pc)
+            program_changes = program_changes_new
+
+        if program_changes is not None:
+            program_changes = [(pg[0], int(pg[1] * ppq)) if len(pg) < 3 else (pg[0], int(pg[1] * ppq), pg[2]) for pg in program_changes]
             this_part_velocity_new = []
             pg_counter = 0
             last_step_tick = 0
@@ -319,36 +387,25 @@ def music_json_to_midi(json_file, out_name, tempo_factor=.5,
             current_velocity = default_velocity
             for j in range(len(parts[i])):
                 last_step_tick = current_step_tick
-                current_step_tick = int(parts_times[i][j] * ppq)
+                current_step_tick += int(parts_times[i][j] * ppq)
                 if len(program_changes[pg_counter]) < 3:
                     this_part_velocity_new.append(this_part_velocity[j])
                 else:
                     # if it is the last program change then we just stay on that
-                    if pg_counter != len(program_changes) - 1:
+                    if pg_counter < len(program_changes) - 1:
                         # check for tick boundary
-                        if last_step_tick <= int(program_changes[pg_counter + 1][1] * ppq) and current_step_tick >= int(program_changes[pg_counter + 1][1] * ppq):
+                        # if we are exactly on a boundary... change it now
+                        if last_step_tick <= int(program_changes[pg_counter + 1][1]) and current_step_tick >= int(program_changes[pg_counter + 1][1]):
                             pg_counter += 1
                     current_velocity = default_velocity if len(program_changes[pg_counter]) < 3 else program_changes[pg_counter][2]
                     this_part_velocity_new.append(current_velocity)
             this_part_velocity = this_part_velocity_new
 
-        if dynamic_range_normalization:
-            # normalize
-            mm = float(max(this_part_velocity))
-            mi = float(min(this_part_velocity))
-            # be sure that 0 range doesn't happen
-            dynamic_range =  max(1, (mm - mi))
-            # cap range at 90
-            range_cap = 90
-            dynamic_range = min(range_cap, dynamic_range)
-            # max vol is 120
-            # keep same scale just make it louder?
-            this_part_velocity = [int((range_cap - dynamic_range) + min(range_cap, int(v - mi))) for v in this_part_velocity]
-
-        track_data = [[int(parts_times[i][j] * ppq), parts[i][j], this_part_velocity[j]] for j in range(len(parts[i]))]
+        track_data = [[int(parts_times[i][j] * ppq), parts[i][j], this_part_velocity[j] if parts[i][j] != 0 else 0] for j in range(len(parts[i]))]
 
         # do global velocity modulations...
-        mt = _populate_track_from_data(track_data, program_changes=program_changes)
+        # + 1 to account for MidiTrack starting at 1
+        mt = _populate_track_from_data(track_data, i + 1, program_changes=program_changes)
         all_mt.append(mt)
 
     mf = MidiFile()
