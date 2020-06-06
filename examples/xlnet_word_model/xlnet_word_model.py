@@ -21,7 +21,8 @@ from kkpthlib import run_loop
 
 
 hp = HParams(memory_len=20,
-             context_len=70,
+             context_len=64,
+             max_sequence_length=256,
              embedding_dropout_keep_prob=.8,
              transformer_input_dim=380,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
@@ -30,8 +31,9 @@ hp = HParams(memory_len=20,
              clip=.25,
              batch_size=10,
              n_layers=16,
+             input_dropout_keep_prob=.4,
+             output_dropout_keep_prob=.5,
              data_storage_dir="kjv",
-             max_sequence_length=140,
              max_vocabulary_size=10000,
              random_seed=2122)
 
@@ -45,15 +47,17 @@ def build_model(hp):
         def __init__(self):
             super(Model, self).__init__()
             self.embedding_k = EmbeddingDropout(hp.max_vocabulary_size,
-                                              hp.transformer_input_dim,
-                                              dropout_keep_prob=hp.embedding_dropout_keep_prob,
-                                              random_state=random_state,
-                                              device=hp.use_device,
-                                              name="embed")
+                                                hp.transformer_input_dim,
+                                                dropout_keep_prob=hp.embedding_dropout_keep_prob,
+                                                random_state=random_state,
+                                                device=hp.use_device,
+                                                name="embed")
             l = np.sqrt(6. / (hp.transformer_input_dim))
             self.embedding_q = nn.Parameter(torch.tensor(random_state.uniform(-l, l, size=(hp.transformer_input_dim,))))
             self.transformer = AWDXLNetDecoderBlock([hp.transformer_input_dim],
                                                      name="xlnet_block",
+                                                     input_dropout_keep_prob=hp.input_dropout_keep_prob,
+                                                     output_dropout_keep_prob=hp.output_dropout_keep_prob,
                                                      random_state=random_state,
                                                      memory_len=hp.memory_len,
                                                      context_len=hp.context_len,
@@ -123,7 +127,7 @@ if __name__ == "__main__":
 
         # +1 to account for autoregressive targets
         # context_len because we have a reduction mapping - targets are a subset of the "target sequence", effectively
-        np_perm_masks, np_target_mappings, np_target_masks, np_input_qs = model.transformer.make_masks_and_mappings(np_data, context_cut=hp.context_len + 1, random_state=gen_random_state)
+        np_perm_masks, np_target_mappings, np_target_masks, np_input_qs, np_perm_orders = model.transformer.make_masks_and_mappings(np_data, context_cut=hp.context_len + 1, random_state=gen_random_state)
 
         input_data = torch.tensor(np_data).to(hp.use_device)
         target = torch.tensor(np_data).long().to(hp.use_device)
@@ -137,6 +141,7 @@ if __name__ == "__main__":
         target = target[..., None]
 
         # these 3 use context_cut
+        # can sanity check using perm_masks = 0. aka everything looks at everything
         perm_masks = torch.tensor(np_perm_masks).to(hp.use_device)
         target_masks = torch.tensor(np_target_masks).to(hp.use_device)
         input_qs = torch.tensor(np_input_qs).to(hp.use_device)

@@ -2465,7 +2465,7 @@ def _xlnet_make_ar_perm_mask(tgt, is_masked_tgt, random_state, sequential_order=
     # 1: cannot attend if i <= j and j is not non-masked (masked_or_func_tokens)
     # 0: can attend if i > j or j is non-masked
     perm_mask = (self_rev_index[:, None] <= rev_index[None, :]) & np.array(mask_tokens, dtype=np.bool)
-    return perm_mask, np.array(np.copy(target_mask)), np.copy(np.array(target_mask))
+    return perm_mask, np.array(np.copy(target_mask)), np.copy(np.array(target_mask)), rev_index
 
 
 def _xlnet_make_target_mapping(tgt, tgt_mask):
@@ -2582,21 +2582,6 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
                             dtype=dtype)
         self.scale = 1. / (head_dim ** .5)
 
-        """
-        self.attention = RelativeMultiHeadAttention(list_of_input_dims,
-                                                    n_heads=n_heads,
-                                                    head_dim=head_dim,
-                                                    model_dim=model_dim,
-                                                    attention_dropout_keep_prob=attention_dropout_keep_prob,
-                                                    name=attention_name,
-                                                    random_state=random_state,
-                                                    strict=strict,
-                                                    init=init,
-                                                    scale=scale,
-                                                    device=device,
-                                                    dtype=dtype)
-        """
-
         self.position_ff = PositionwiseFeedforward(list_of_input_dims,
                                                    inner_dim,
                                                    dropout_keep_prob=inner_dropout_keep_prob,
@@ -2702,6 +2687,7 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
                                                         local_bias_bd,
                                                         decoder_attention_mask_h, self.scale)
         o_h = self.o_net([attention_weighted_values])
+
         o_h = self.locked_drop_h(o_h)
         output_h = self.ln(h + o_h)
 
@@ -2712,14 +2698,15 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
             attention_weighted_values_g = self._rel_attn_core(q_head_g, k_head_h, v_head_h, k_head_r,
                                                               local_bias_ac,
                                                               local_bias_bd,
-                                                              decoder_attention_mask_h, self.scale)
+                                                              decoder_attention_mask_g, self.scale)
             attention_weighted_values_g = torch.einsum('lbc,mlb->mbc', (attention_weighted_values_g, target_mappings))
         else:
             attention_weighted_values_g = self._rel_attn_core(q_head_g, k_head_h, v_head_h, k_head_r,
                                                               local_bias_ac,
                                                               local_bias_bd,
-                                                              decoder_attention_mask_h, self.scale)
+                                                              decoder_attention_mask_g, self.scale)
         o_g = self.o_net([attention_weighted_values_g])
+
         o_g = self.locked_drop_g(o_g)
         output_g = self.ln(g + o_g)
 
@@ -2854,6 +2841,7 @@ class AWDXLNetDecoderBlock(nn.Module):
         agg_target_mask = []
         agg_input_q = []
         agg_target_mapping = []
+        agg_perm_orders = []
         for i in range(numpy_sequence_array.shape[1]):
             # only care about targets AFTER context
             seq = numpy_sequence_array[context_cut:, i]
@@ -2863,7 +2851,7 @@ class AWDXLNetDecoderBlock(nn.Module):
 
             # no partial cuts - rather, partial predictions are autoregressive over random permutation. Still only predict a 1 / K subset, but no "cutting points" like mentioned in the paper... https://github.com/zihangdai/xlnet/issues/54
             # the cutting point is effectively handled by use of context_len in training, as in the transformer XL paper
-            perm_mask_0, target_mask_0, input_q_0 = _xlnet_make_ar_perm_mask(seq, mask, random_state=random_state, sequential_order=sequential_order)
+            perm_mask_0, target_mask_0, input_q_0, perm_order_0 = _xlnet_make_ar_perm_mask(seq, mask, random_state=random_state, sequential_order=sequential_order)
             full_seq = numpy_sequence_array[:, i]
             # target_mapping should be the length of the full sequence - due to the mechanics of the attention inside TwoStreamRelativeDecoder
             tm = 0. * full_seq
@@ -2873,12 +2861,14 @@ class AWDXLNetDecoderBlock(nn.Module):
             agg_target_mask.append(target_mask_0)
             agg_input_q.append(input_q_0)
             agg_target_mapping.append(target_mapping_0)
+            agg_perm_orders.append(perm_order_0)
 
         perm_masks = np.array(agg_perm_mask).transpose(1, 2, 0).astype("float32")
         target_masks = np.array(agg_target_mask).transpose(1, 0).astype("float32")
         input_qs = np.array(agg_input_q).transpose(1, 0).astype("float32")
         target_mappings = np.array(agg_target_mapping).transpose(2, 1, 0).astype("float32")
-        return perm_masks, target_mappings, target_masks, input_qs
+        perm_orders = np.array(agg_perm_orders).transpose(1, 0).astype("float32")
+        return perm_masks, target_mappings, target_masks, input_qs, perm_orders
 
     def init_list_of_mems(self):
         if self.device == "default":
