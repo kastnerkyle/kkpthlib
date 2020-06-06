@@ -1915,12 +1915,11 @@ class PositionwiseFeedforward(nn.Module):
         return self.ln(ds2 + inp)
 
 
-def _rel_shift(x):#, zero_triu=False):
+def _rel_shift(x, klen=-1):
     x_padded = x.reshape(x.size(1), x.size(0), *x.size()[2:])
     x = x_padded[1:].reshape(x.size(0), x.size(1) - 1, *x.size()[2:])
-    #if zero_triu:
-    #    ones = torch.ones((x.size(0), x.size(1)))
-    #    x = x * torch.tril(ones, x.size(1) - x.size(0))[:,:,None,None]
+    if klen != -1:
+        x = x[:, :klen, :, :]
     return x
 
 
@@ -1981,8 +1980,7 @@ class RelativeMultiHeadAttention(nn.Module):
                              dtype=dtype)
          self.scale = 1. / (head_dim ** .5)
 
-     # relative position embedding last entry is the bias? scuffed as...
-     def forward(self, list_of_inputs, relative_positional_embedding, attention_mask=None, memory=None):
+     def forward(self, list_of_inputs, relative_positional_embedding, local_bias, attention_mask=None, memory=None):
          i = torch.cat(list_of_inputs, dim=-1)
          r = relative_positional_embedding
          qlen = i.size(0)
@@ -2010,7 +2008,7 @@ class RelativeMultiHeadAttention(nn.Module):
 
          # attention
          # [qlen x bsz x n_head x d_head]
-         ir_head_q = i_head_q + r_head_q[-1] # bias term from pos embed
+         ir_head_q = i_head_q + local_bias #+ r_head_q[-1] # bias term from pos embed
          # [klen x bsz x n_head x d_head]
          # i_head_k
          # [qlen x klen x bsz x n_head]
@@ -2106,8 +2104,8 @@ class RelativeDecoderLayer(nn.Module):
                                                    device=device,
                                                    dtype=dtype)
 
-    def forward(self, decoder_input, relative_positional_embedding, decoder_attention_mask=None, memory=None):
-        output = self.attention([decoder_input], relative_positional_embedding, attention_mask=decoder_attention_mask,
+    def forward(self, decoder_input, relative_positional_embedding, local_bias, decoder_attention_mask=None, memory=None):
+        output = self.attention([decoder_input], relative_positional_embedding, local_bias=local_bias, attention_mask=decoder_attention_mask,
                                 memory=memory)
         output = self.position_ff([output])
         return output
@@ -2148,6 +2146,8 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         self.n_layers = n_layers
         self.device = device
         self.dtype = dtype
+        self.local_bias = nn.Parameter(torch.zeros(n_heads, head_dim))
+
         for i in range(n_layers):
             layer_name = name + "_relative_decoder_layer{}".format(i)
             l = RelativeDecoderLayer(list_of_input_dims,
@@ -2258,8 +2258,7 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         # relative positional embedding
         pos_seq = torch.arange(klen, -1, -1.0, device=input_tensor.device)
         pe = self.pos_emb(pos_seq, batch_size=shp[1])
-        # one longer than sequence because pe[-1] is a fixed "bias"
-        # and because _rel_shift reduces size by 1
+        # one longer than because _rel_shift reduces size by 1
 
         hids = []
         core_out = self.locked_drop_i(input_tensor)
@@ -2267,7 +2266,7 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         for i, this_layer in enumerate(self.layers):
             hids.append(core_out)
             mems_i = list_of_mems[i] if list_of_mems is not None else None
-            core_out = this_layer(core_out, pe, decoder_attention_mask=attn_mask, memory=mems_i)
+            core_out = this_layer(core_out, pe, local_bias=self.local_bias[None, None], decoder_attention_mask=attn_mask, memory=mems_i)
             if i < len(self.layers) - 1:
                 core_out = self.locked_drop_h(core_out)
 
@@ -2276,6 +2275,724 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         # qlen = len(inpt)
         #new_mems = self.update_list_of_mems(hids, list_of_mems, mlen, qlen)
         # original code had a bug, see comments for detail
+        new_mems = self.update_list_of_mems(hids, list_of_mems, qlen, mlen)
+
+        # slice according to context_len, normally set to 0
+        # in original code they do this via target size, but we don't have that information
+        core_out = core_out[self.context_len:]
+        core_out = self.locked_drop_o(core_out)
+        return core_out, new_mems
+
+
+def _xlnet_make_sample_mask(seq, goal_n_to_mask, random_state, n_spans=None, max_n_gram=5,
+                      alpha=6, beta=1, start_check_function=None):
+    """
+    seq is typically the INPUT to the XLNet model
+    not the target (which would be shifted by 1, in ar context)
+
+    can be target if input and target domains are different
+
+    n_spans will override goal_n_to_mask, forcing a specfic number of spans in the sampled mask
+
+    understanding and reimplementing _sample_mask from XLNet
+
+    0 / False means UNMASKED
+    1 / True means MASKED
+
+    add one trick - default code is biased towards masking near the start, if goal_n_to_mask is fairly low
+    all the masked tokens happen around the start - nothing in the code really prevents this
+
+    instead, we "overmask" the sequence. then check if we have >= goal_n_to_mask
+    if >= goal_n_to_mask, randomly "undelete" certain segments
+    otherwise, randomly mask single elements until we hit the condition (as in the original code)
+
+    start_check_function should be a function handle that takes the full sequence element, along with a position pos, and returns True if it is a valid start position
+    False otherwise
+
+    def scf(seq, pos):
+        return True
+    """
+    seq_len = len(seq)
+    mask = [False for s in seq]
+
+    n_masked_so_far = 0
+
+    if start_check_function is None:
+        def scf(seq, pos):
+            return True
+    else:
+        scf = start_check_function
+
+    # setup ngrams, weighted according to length so that longer selectionsa are less probable
+    # since they will mask out more tokens
+    ngrams = np.arange(1, max_n_gram + 1)
+    pvals = 1. / np.arange(1, max_n_gram + 1)
+    pvals = pvals / np.sum(pvals)
+
+    cur_step = 0
+    masked_bounds = []
+    while cur_step < seq_len:
+        # don't break if we went past mask, need to "overmask"
+        # then randomly undo so as to avoid biasing toward the start
+        # this is different than the original code
+        # in original code https://github.com/zihangdai/xlnet/blob/master/data_utils.py#L360
+        #if n_masked_so_far >= goal_n_to_mask:
+        #    break
+
+        # choose an n gram at random
+        n = random_state.choice(ngrams, p=pvals)
+
+        # be sure that if we are close to the goal, we only select smaller ones
+        # take this OUT, and handle after the loop
+        #n = min(n, goal_n_to_mask - n_masked_so_far)
+
+        # set a surrounding context to preserve
+        ctx_size = int((n * alpha) // beta)
+        # choose the left extent for the context (effectively, context is shifted around a center)
+        l_ctx = random_state.choice(ctx_size)
+        # choose right extent to complement the left
+        r_ctx = ctx_size - l_ctx
+
+        # in original code https://github.com/zihangdai/xlnet/blob/master/data_utils.py#L360
+        # only happened on start boundaries
+        # here we don't worry about start boundaries (for now)
+        b = cur_step + l_ctx
+        # scoot over to start on a start boundary... in original code
+        while b < seq_len and not scf(seq, b):
+            b += 1
+
+        if b >= seq_len:
+            break
+
+        # now find a valid end spot, by looking for next start point
+        e = b + 1
+        _n = 1
+        while e < seq_len:
+            _n += 1
+            if scf(seq, e):
+                if _n > n:
+                    break
+            e += 1
+
+        if e >= seq_len:
+            break
+
+        for i in range(b, e):
+            mask[i] = True
+        masked_bounds.append((b, e))
+        n_masked_so_far += e - b
+        cur_step = e + r_ctx
+
+    # got too many masked values, lets randomly delete "blocks" until back under
+    if n_spans is None:
+        while n_masked_so_far > goal_n_to_mask:
+            ii = random_state.choice(range(len(masked_bounds)))
+            b, e = masked_bounds[ii]
+            for i in range(b, e):
+                mask[i] = False
+            n_masked_so_far -= (e - b)
+            masked_bounds = [ma for n, ma in enumerate(masked_bounds) if n != ii]
+    else:
+        while len(masked_bounds) > n_spans:
+            ii = random_state.choice(range(len(masked_bounds)))
+            b, e = masked_bounds[ii]
+            for i in range(b, e):
+                mask[i] = False
+            n_masked_so_far -= (e - b)
+            masked_bounds = [ma for n, ma in enumerate(masked_bounds) if n != ii]
+
+    # this part would basically just add speckle noise to get to exactly goal_n_mask, but I prefer structure
+    # NECESSARY for batch prediction however due to target_mapping used inside XLNet via einsum... so we add it back :|
+    while n_masked_so_far < goal_n_to_mask:
+        ii = random_state.choice(range(seq_len))
+        if mask[ii] == False:
+            mask[ii] = True
+            n_masked_so_far += 1
+    return mask
+
+
+def _xlnet_make_ar_perm_mask(tgt, is_masked_tgt, random_state, sequential_order=False):
+    """
+    creates valid permutation mask
+
+    a target mask
+
+    and a convenient input stream (q in the paper)
+    q is a "blanked out" mask
+
+    k is just a copy of the input, we omit it here
+
+    returns perm_mask_0, target_mask_0, input_k_0, input_q_0
+
+    perm_mask[:, i] tells the connectivity of the ith element
+    if target_mask[i] is False, all elements of perm_mask[:, i] will be False, aka allowed to connect
+
+    if target_mask[i] is True, perm_mask[:, i] will be True, EXCEPT for values where self_rev_index[j] > self_rev_index[i]
+
+    basically, this means a target_token[i] for which self_rev_index[i] is a high value, will get very little extra context, whereas
+    a target_token[i] for which self_rev_index[i] is a low value, will get a lot of extra context. perm_mask[:, i] will reflect this
+
+    sequential_order will just create a "normal" sequential mask
+    """
+    seq_len = len(tgt)
+    shuffle_inds = np.arange(seq_len)
+    if not sequential_order:
+        random_state.shuffle(shuffle_inds)
+    else:
+        # reverse to get l to r order
+        shuffle_inds = shuffle_inds[::-1]
+
+    index = np.arange(seq_len)
+    index = index[shuffle_inds]
+    index = index.ravel()
+
+    # fully random permutation
+    non_mask_tokens = [not(imt) for imt in is_masked_tgt]
+    mask_tokens = [not(nmt) for nmt in non_mask_tokens]
+
+    # Set the permutation indices of non tokens to the
+    # smallest index (-1):
+    # (1) they can be seen by all other positions
+    # (2) they cannot see masked positions, so there won"t be information leak
+    rev_index = np.where(non_mask_tokens, -1 * np.ones((seq_len)), index)
+
+    target_mask = mask_tokens
+
+    # Create `perm_mask`
+    # `target_tokens` cannot see themselves
+    self_rev_index = np.where(target_mask, rev_index, rev_index + 1)
+
+    # 1: cannot attend if i <= j and j is not non-masked (masked_or_func_tokens)
+    # 0: can attend if i > j or j is non-masked
+    perm_mask = (self_rev_index[:, None] <= rev_index[None, :]) & np.array(mask_tokens, dtype=np.bool)
+    return perm_mask, np.array(np.copy(target_mask)), np.copy(np.array(target_mask))
+
+
+def _xlnet_make_target_mapping(tgt, tgt_mask):
+    """
+    make target mapping function
+    from target sequence and a mask of values to predict
+
+    returned one_hots has dimension
+    (num_predict, seq_len)
+    where num_predict = sum(tgt_mask == True) aka number of values unmasked
+    """
+    indices = np.arange(len(tgt))
+    indices = indices[np.where(tgt_mask)]
+    one_hots = np.zeros((len(indices), len(tgt)))
+    one_hots[np.arange(len(indices), dtype="int32"), indices] = 1
+    # one_hots has dimension
+    # (num_predict, seq_len)
+    # where num_predict = sum(tgt_mask == True) aka number of values unmasked
+    return one_hots
+
+
+class TwoStreamRelativeDecoderLayer(nn.Module):
+    def __init__(self, list_of_input_dims,
+                 n_heads=10,
+                 head_dim=38,
+                 model_dim=380,
+                 inner_dim=900,
+                 attention_dropout_keep_prob=0.8,
+                 inner_dropout_keep_prob=0.8,
+                 name=None,
+                 random_state=None,
+                 strict=None, init=None,
+                 scale="default",
+                 device="default",
+                 dtype="default"):
+        super(TwoStreamRelativeDecoderLayer, self).__init__()
+
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass random_state to TwoStreamRelativeDecoderLayer")
+
+        attention_name = name + "_multihead_attention"
+        feedforward_name = name + "_positionwise_ff"
+
+        self.n_heads = n_heads
+        self.head_dim = head_dim
+        self.model_dim = model_dim
+        self.attention_dropout_keep_prob = attention_dropout_keep_prob
+
+        self.drop = nn.Dropout(1. - attention_dropout_keep_prob)
+        self.locked_drop_h = LockedDropout(1. - attention_dropout_keep_prob, random_state=random_state, device=device)
+        self.locked_drop_g = LockedDropout(1. - attention_dropout_keep_prob, random_state=random_state, device=device)
+
+        # no biases in transformer XL code
+        self.k_net = Linear(list_of_input_dims,
+                            n_heads * head_dim,
+                            biases=False,
+                            random_state=random_state,
+                            name=name + "_k",
+                            strict=strict,
+                            init=init,
+                            scale=scale,
+                            device=device,
+                            dtype=dtype)
+
+        self.v_net = Linear(list_of_input_dims,
+                            n_heads * head_dim,
+                            biases=False,
+                            random_state=random_state,
+                            name=name + "_v",
+                            strict=strict,
+                            init=init,
+                            scale=scale,
+                            device=device,
+                            dtype=dtype)
+
+        self.r_net = Linear(list_of_input_dims,
+                            n_heads * head_dim,
+                            biases=False,
+                            random_state=random_state,
+                            name=name + "_r",
+                            strict=strict,
+                            init=init,
+                            scale=scale,
+                            device=device,
+                            dtype=dtype)
+
+        self.q_net = Linear(list_of_input_dims,
+                            n_heads * head_dim,
+                            biases=False,
+                            random_state=random_state,
+                            name=name + "_q",
+                            strict=strict,
+                            init=init,
+                            scale=scale,
+                            device=device,
+                            dtype=dtype)
+
+        self.o_net = Linear([head_dim * n_heads],
+                            model_dim,
+                            biases=False,
+                            random_state=random_state,
+                            name=name + "_o",
+                            strict=strict,
+                            init=init,
+                            scale=scale,
+                            device=device,
+                            dtype=dtype)
+
+        self.ln = LayerNorm(model_dim,
+                            device=device,
+                            dtype=dtype)
+        self.scale = 1. / (head_dim ** .5)
+
+        """
+        self.attention = RelativeMultiHeadAttention(list_of_input_dims,
+                                                    n_heads=n_heads,
+                                                    head_dim=head_dim,
+                                                    model_dim=model_dim,
+                                                    attention_dropout_keep_prob=attention_dropout_keep_prob,
+                                                    name=attention_name,
+                                                    random_state=random_state,
+                                                    strict=strict,
+                                                    init=init,
+                                                    scale=scale,
+                                                    device=device,
+                                                    dtype=dtype)
+        """
+
+        self.position_ff = PositionwiseFeedforward(list_of_input_dims,
+                                                   inner_dim,
+                                                   dropout_keep_prob=inner_dropout_keep_prob,
+                                                   name=feedforward_name,
+                                                   random_state=random_state,
+                                                   strict=strict,
+                                                   init=init,
+                                                   scale=scale,
+                                                   device=device,
+                                                   dtype=dtype)
+
+    def _rel_attn_core(self, q_head, k_head_h, v_head_h, k_head_r,
+                       local_bias_ac, local_bias_bd, attention_mask,
+                       scale):
+
+        """Core relative positional attention operations."""
+        # q_head
+        # [klen x bsz x n_head x d_head]
+        # i_head_k
+        # [qlen x klen x bsz x n_head]
+        AC = torch.einsum('ibnd,jbnd->ijbn', (q_head + local_bias_ac, k_head_h))
+
+        # position based attention score
+        BD = torch.einsum('ibnd,jbnd->ijbn', (q_head + local_bias_bd, k_head_r))
+
+        # rel shift effectively removes 1 along the 1st dim
+        BD = _rel_shift(BD, klen=AC.shape[1])
+
+        attention_score = AC + BD
+        # [qlen x klen x bsz x n_head]
+        attention_score *= self.scale
+
+        if attention_mask is not None:
+            attention_mask = attention_mask > 0 # cast to bool
+
+        if attention_mask is not None and attention_mask.any().item():
+            # fill 1s with neg inf, leave 0s alone!
+            if attention_mask.dim() == 2:
+                attention_score.masked_fill_(attention_mask[None, :, :, None], -float('inf'))
+            # can define either 2d or 3d mask here, but will need to be very careful about what is 0 and what is 1
+            elif attention_mask.dim() == 3:
+                attention_score.masked_fill_(attention_mask[:, :, :, None], -float('inf'))
+
+        faker = 0. * attention_score + 1.
+        faker_mask = self.drop(faker)
+        # can't fill with neginf since could all be 0 - hence all neginf, leading to nan in softmax
+        attention_score.masked_fill_(faker_mask == 0, -1E9)
+        attention_prob = F.softmax(attention_score, dim=1)
+
+        # this is how it is done in the PTB code but... not normalized anymore!
+        # question is, will other method freak out at test time? whereas this is more "normal" - basically same as dropping pieces of i_head_v
+        #attention_prob = self.drop(attention_prob)
+        # isn't this just dropout on the thing you are attending, in disguise?
+        # https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/layers/common_attention.py#L1822
+
+        attention_weighted_values = torch.einsum('ijbn,jbnd->ibnd', (attention_prob, v_head_h))
+
+        # [qlen x bsz x n_head x d_head]
+        attention_weighted_values = attention_weighted_values.contiguous().view(
+               attention_weighted_values.size(0),
+               attention_weighted_values.size(1),
+               self.n_heads * self.head_dim)
+        return attention_weighted_values
+
+    def forward(self, decoder_input_h, decoder_input_g, relative_positional_embedding,
+                      local_bias_ac,
+                      local_bias_bd,
+                      decoder_attention_mask_h=None,
+                      decoder_attention_mask_g=None,
+                      target_mappings=None,
+                      memory=None):
+
+        r = relative_positional_embedding
+        h = decoder_input_h
+        g = decoder_input_g.type(h.dtype)
+
+        qlen = h.size(0)
+        rlen = r.size(0)
+        batch_size = h.size(1)
+
+        if memory is not None:
+            cat = torch.cat([memory, h], 0)
+        else:
+            cat = h
+
+        k_head_h = self.k_net([cat])
+        v_head_h = self.v_net([cat])
+
+        k_head_r = self.r_net([r])
+
+        q_head_h = self.q_net([h])
+
+        klen = k_head_h.size(0)
+        k_head_h = k_head_h.view(klen, batch_size, self.n_heads, self.head_dim)
+        v_head_h = v_head_h.view(klen, batch_size, self.n_heads, self.head_dim)
+
+        k_head_r = k_head_r.view(rlen, batch_size, self.n_heads, self.head_dim)
+
+        q_head_h = q_head_h.view(qlen, batch_size, self.n_heads, self.head_dim)
+
+        attention_weighted_values = self._rel_attn_core(q_head_h, k_head_h, v_head_h, k_head_r,
+                                                        local_bias_ac,
+                                                        local_bias_bd,
+                                                        decoder_attention_mask_h, self.scale)
+        o_h = self.o_net([attention_weighted_values])
+        o_h = self.locked_drop_h(o_h)
+        output_h = self.ln(h + o_h)
+
+        q_head_g = self.q_net([g])
+        q_head_g = q_head_g.view(g.size(0), batch_size, self.n_heads, self.head_dim)
+        if target_mappings is not None:
+            q_head_g = torch.einsum('mbnd,mlb->lbnd', (q_head_g, target_mappings))
+            attention_weighted_values_g = self._rel_attn_core(q_head_g, k_head_h, v_head_h, k_head_r,
+                                                              local_bias_ac,
+                                                              local_bias_bd,
+                                                              decoder_attention_mask_h, self.scale)
+            attention_weighted_values_g = torch.einsum('lbc,mlb->mbc', (attention_weighted_values_g, target_mappings))
+        else:
+            attention_weighted_values_g = self._rel_attn_core(q_head_g, k_head_h, v_head_h, k_head_r,
+                                                              local_bias_ac,
+                                                              local_bias_bd,
+                                                              decoder_attention_mask_h, self.scale)
+        o_g = self.o_net([attention_weighted_values_g])
+        o_g = self.locked_drop_g(o_g)
+        output_g = self.ln(g + o_g)
+
+        output_h = self.position_ff([output_h])
+        output_g = self.position_ff([output_g])
+        return output_h, output_g
+
+
+class AWDXLNetDecoderBlock(nn.Module):
+    """
+    def scf(seq, pos):
+        if seq[pos] == " ":
+            return True
+        else:
+            return False
+
+    sent = "The purple balloon has a five foot leg."
+    mask = _make_sample_mask(sent, goal_n_to_mask=40, n_spans=2, random_state=random_state, max_n_gram=5, start_check_function=scf)
+    masked_sent = "".join(["-" if mask[n] else s for n, s in enumerate(sent)])
+    pieces = "".join([s for n, s in enumerate(sent) if mask[n] == True])
+
+    inp = sent[:-1]
+    tgt = sent[1:]
+
+    # no partial cuts - rather, partial predictions are autoregressive over random permutation. Still only predict a 1 / K subset, but no "cutting points" like mentioned in the paper... https://github.com/zihangdai/xlnet/issues/54
+    perm_mask_0, target_mask_0, input_k_0, input_q_0 = _xlnet_make_ar_perm_mask(inp, tgt, mask[1:], random_state=random_state, sequential_order=False)
+    target_mapping_0 = _xlnet_make_target_mapping(tgt, target_mask_0)
+    """
+    def __init__(self,
+                 list_of_input_dims,
+                 n_layers=16, n_heads=10, head_dim=38, model_dim=380, inner_dim=900,
+                 input_dropout_keep_prob=0.4,
+                 attention_dropout_keep_prob=0.8,
+                 inner_dropout_keep_prob=0.8,
+                 hidden_dropout_keep_prob=1.0,
+                 output_dropout_keep_prob=0.5,
+                 name=None,
+                 random_state=None,
+                 memory_len=0,
+                 context_len=0,
+                 strict=None,
+                 init=None,
+                 scale="default",
+                 device="default",
+                 dtype="default"):
+        super(AWDXLNetDecoderBlock, self).__init__()
+
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass random_state to AWDTransformerXLDecoderBlock")
+
+        self.layers = nn.ModuleList()
+        input_dim = sum(list_of_input_dims)
+        if input_dim != model_dim:
+            raise ValueError("sum of list_of_input_dims should match model_dim due to residual architecture, if this is not the case project the data or change dims! Have {}, sum = {}, model_dim = {}".format(list_of_input_dims, input_dim, model_dim))
+        if n_heads * head_dim != model_dim:
+            raise ValueError("head_dim * n_heads should == model_dim, have {} * {} != {}".format(head_dim, n_heads, model_dim))
+        self.n_layers = n_layers
+        self.device = device
+        self.dtype = dtype
+        self.local_bias_ac = nn.Parameter(torch.zeros(n_heads, head_dim))
+        self.local_bias_bd = nn.Parameter(torch.zeros(n_heads, head_dim))
+
+        for i in range(n_layers):
+            layer_name = name + "_relative_decoder_layer{}".format(i)
+            l = TwoStreamRelativeDecoderLayer(list_of_input_dims,
+                                              n_heads=n_heads,
+                                              head_dim=head_dim,
+                                              model_dim=model_dim,
+                                              inner_dim=inner_dim,
+                                              attention_dropout_keep_prob=attention_dropout_keep_prob,
+                                              inner_dropout_keep_prob=inner_dropout_keep_prob,
+                                              name=layer_name,
+                                              random_state=random_state,
+                                              strict=strict,
+                                              init=init,
+                                              scale=scale,
+                                              device=device,
+                                              dtype=dtype)
+            self.layers.append(l)
+
+        self.memory_len = memory_len
+        self.context_len = context_len
+        self.pos_emb = PositionalEmbedding(model_dim,
+                                           device=device,
+                                           dtype=dtype)
+        self.locked_drop_i = LockedDropout(input_dropout_keep_prob,
+                                           random_state=random_state,
+                                           device=device,
+                                           dtype=dtype)
+        self.locked_drop_h_h = LockedDropout(hidden_dropout_keep_prob,
+                                             random_state=random_state,
+                                             device=device,
+                                             dtype=dtype)
+        self.locked_drop_h_g = LockedDropout(hidden_dropout_keep_prob,
+                                             random_state=random_state,
+                                             device=device,
+                                             dtype=dtype)
+        self.locked_drop_o = LockedDropout(output_dropout_keep_prob,
+                                           random_state=random_state,
+                                           device=device,
+                                           dtype=dtype)
+
+    def make_masks_and_mappings(self, numpy_sequence_array, context_cut, start_check_function=None,
+                                K=6, max_n_gram=5, sequential_order=False, random_state=None):
+        """
+        context_len should be accounted for!
+
+        numpy_sequence_array = np_data[hp.context_len:]
+
+        """
+        if random_state is None:
+            raise ValueError("Random state necessary")
+
+        if start_check_function is None:
+            def scf(seq, pos):
+                return True
+        else:
+            scf = start_check_function
+
+        if len(numpy_sequence_array.shape) < 2:
+            raise ValueError("Sequence array should be (length, examples) in shape)")
+
+        # actual target size matters here
+        # so account for context_len / context_cut
+        l = len(numpy_sequence_array[context_cut:])
+        goal_n_to_mask = int(l // K)
+
+        agg_perm_mask = []
+        agg_target_mask = []
+        agg_input_q = []
+        agg_target_mapping = []
+        for i in range(numpy_sequence_array.shape[1]):
+            # only care about targets AFTER context
+            seq = numpy_sequence_array[context_cut:, i]
+            mask = _xlnet_make_sample_mask(seq, goal_n_to_mask=goal_n_to_mask, random_state=random_state, max_n_gram=max_n_gram, start_check_function=scf)
+            # inpt goes through xlnet_make_ar_perm_mask basically untouched...
+            # we take it out of the function definition for generality
+
+            # no partial cuts - rather, partial predictions are autoregressive over random permutation. Still only predict a 1 / K subset, but no "cutting points" like mentioned in the paper... https://github.com/zihangdai/xlnet/issues/54
+            # the cutting point is effectively handled by use of context_len in training, as in the transformer XL paper
+            perm_mask_0, target_mask_0, input_q_0 = _xlnet_make_ar_perm_mask(seq, mask, random_state=random_state, sequential_order=sequential_order)
+            full_seq = numpy_sequence_array[:, i]
+            # target_mapping should be the length of the full sequence - due to the mechanics of the attention inside TwoStreamRelativeDecoder
+            tm = 0. * full_seq
+            tm[-len(target_mask_0):] = target_mask_0
+            target_mapping_0 = _xlnet_make_target_mapping(full_seq, tm)
+            agg_perm_mask.append(perm_mask_0)
+            agg_target_mask.append(target_mask_0)
+            agg_input_q.append(input_q_0)
+            agg_target_mapping.append(target_mapping_0)
+
+        perm_masks = np.array(agg_perm_mask).transpose(1, 2, 0).astype("float32")
+        target_masks = np.array(agg_target_mask).transpose(1, 0).astype("float32")
+        input_qs = np.array(agg_input_q).transpose(1, 0).astype("float32")
+        target_mappings = np.array(agg_target_mapping).transpose(2, 1, 0).astype("float32")
+        return perm_masks, target_mappings, target_masks, input_qs
+
+    def init_list_of_mems(self):
+        if self.device == "default":
+            device = get_device_default()
+        else:
+            device = self.device
+
+        if self.dtype == "default":
+            dtype = get_dtype_default()
+        if dtype == "float32":
+            dtype = torch.float32
+        else:
+            dtype = torch.float64
+
+        # returns None if mem_len is 0 else
+        if self.memory_len > 0:
+            mems = []
+
+            for i in range(self.n_layers):
+                empty = torch.empty(0, dtype=dtype, device=torch.device(device))
+                mems.append(empty)
+            return mems
+        else:
+            return None
+
+    def update_list_of_mems(self, hiddens, list_of_mems, query_len, memory_len):
+        # mlen and qlen were swapped in call vs signature in original code!
+        # https://github.com/kimiyoung/transformer-xl/issues/96
+        # effectively, would mean memory_len= len query
+        # and query_len= 0 for PTB experiment
+        # where self.context_len was 70
+        # self.mem_len 0
+        # we swap the call to be correct, and set hyperparameters to actually use memory
+        if list_of_mems is None:
+            return None
+
+        if self.memory_len == 0:
+            return None
+
+        qlen = query_len
+        mlen = memory_len
+
+        assert len(hiddens) == len(list_of_mems), "len(list_of_mems) != len(hiddens)"
+
+        # Copied from transformer XL main code
+        # There are `mlen + qlen` steps that can be cached into mems
+        # For the next step, the last `ext_len` of the `qlen` tokens
+        # will be used as the extended context. Hence, we only cache
+        # the tokens from `mlen + qlen - self.ext_len - self.mem_len`
+        # to `mlen + qlen - self.ext_len`.
+        with torch.no_grad():
+            new_mems = []
+            end_idx = mlen + max(0, qlen - 0 - self.context_len)
+            beg_idx = max(0, end_idx - self.memory_len)
+            for i in range(len(hiddens)):
+                cat = torch.cat([list_of_mems[i], hiddens[i]], dim=0)
+                new_mems.append(cat[beg_idx:end_idx].detach())
+        return new_mems
+
+
+    def forward(self, input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=None):
+        if not list_of_mems:
+            list_of_mems = self.init_list_of_mems()
+
+        # input_mask = None and perm_mask is not None case from 
+        # https://github.com/zihangdai/xlnet/blob/master/modeling.py#L490
+        # attn_mask = None for attn_type = 'bi'
+        data_mask = perm_masks
+
+        qlen = input_ks.shape[0]
+        mlen = list_of_mems[0].size(0) if list_of_mems is not None else 0
+        klen = qlen + mlen
+        context_pad = input_ks.new_zeros(data_mask.shape[0], input_ks.shape[0] - data_mask.shape[0], data_mask.shape[2])
+        mem_pad = input_ks.new_zeros(data_mask.shape[0], mlen, data_mask.shape[2])
+
+        data_mask = torch.cat((mem_pad, context_pad, data_mask), 1)
+        attn_mask = 1. * data_mask[:, :, :, None].bool()
+
+        # mask which allows non-targets to "see" the input for better context mixing
+        excess_pad = input_ks.new_zeros((data_mask.shape[0], input_ks.shape[0] - data_mask.shape[0] + mlen))
+        non_tgt_mask = -1 * torch.eye(data_mask.shape[0], dtype=excess_pad.dtype, device=excess_pad.device)
+        non_tgt_mask = torch.cat((excess_pad, non_tgt_mask), -1)
+        non_tgt_mask = attn_mask + non_tgt_mask[:, :, None, None]
+        non_tgt_mask = 1. * (non_tgt_mask > 0)
+
+        # relative positional embedding
+        pos_seq = torch.arange(klen, -1 if mlen == 0 else -qlen, -1.0, device=input_ks.device)
+        pe = self.pos_emb(pos_seq, batch_size=input_ks.shape[1])
+        # one longer than because _rel_shift reduces size by 1
+
+        hids = []
+        output_h = self.locked_drop_i(input_ks)
+        output_g = self.locked_drop_i(input_qs)
+        pe = self.locked_drop_i(pe)
+        for i, this_layer in enumerate(self.layers):
+            hids.append(output_h)
+            mems_i = list_of_mems[i] if list_of_mems is not None else None
+            output_h, output_g = this_layer(output_h, output_g, pe,
+                                  local_bias_ac=self.local_bias_ac[None, None],
+                                  local_bias_bd=self.local_bias_bd[None, None],
+                                  decoder_attention_mask_h=non_tgt_mask,
+                                  decoder_attention_mask_g=attn_mask,
+                                  target_mappings=target_mappings,
+                                  memory=mems_i)
+            if i < len(self.layers) - 1:
+                output_h = self.locked_drop_h_h(output_h)
+                output_g = self.locked_drop_h_g(output_g)
+
+        # update memory
+        # mlen = 0
+        # qlen = len(inpt)
+        #new_mems = self.update_list_of_mems(hids, list_of_mems, mlen, qlen)
+        # original code had a bug, see comments for detail
+        core_out = output_g
         new_mems = self.update_list_of_mems(hids, list_of_mems, qlen, mlen)
 
         # slice according to context_len, normally set to 0

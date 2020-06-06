@@ -482,7 +482,7 @@ def piano_roll_from_music_json_file(json_file, default_velocity=120, quantizatio
     return roll_voices
 
 
-class MusicJSONCorpus(object):
+class MusicJSONRasterCorpus(object):
     def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
                  max_vocabulary_size=-1,
                  add_eos=False,
@@ -507,6 +507,97 @@ class MusicJSONCorpus(object):
                 if add_eos:
                     # 2 measures of silence are the eos
                     return t + [0] * 32
+                else:
+                    return t
+            self.tokenization_fn = tk
+        else:
+            raise ValueError("Unknown tokenization_fn {}".format(tokenization_fn))
+
+        base = [fp for fp in train_data_file_paths]
+        if valid_data_file_paths is not None:
+            base = base + [fp for fp in valid_data_file_paths]
+        if test_data_file_paths is not None:
+            base = base + [fp for fp in test_data_file_paths]
+
+        self.build_vocabulary(base)
+
+        if self.max_vocabulary_size > -1:
+            self.dictionary._prune_to_top_k_counts(self.max_vocabulary_size)
+
+        self.train = self.tokenize(train_data_file_paths)
+        if valid_data_file_paths is not None:
+            self.valid = self.tokenize(valid_data_file_paths)
+        if test_data_file_paths is not None:
+            self.test = self.tokenize(test_data_file_paths)
+
+    def build_vocabulary(self, json_file_paths):
+        """Tokenizes a text file."""
+        for path in json_file_paths:
+            assert os.path.exists(path)
+            roll = piano_roll_from_music_json_file(path,
+                                                   default_velocity=self.default_velocity,
+                                                   quantization_rate=self.quantization_rate,
+                                                   n_voices=self.n_voices,
+                                                   separate_onsets=self.separate_onsets,
+                                                   onsets_boundary=self.onsets_boundary,
+                                                   as_numpy=True)
+            words = self.tokenization_fn(roll)
+
+            for word in words:
+                self.dictionary.add_word(word)
+
+    def tokenize(self, paths):
+        """Tokenizes a text file."""
+        ids = []
+        for path in paths:
+            assert os.path.exists(path)
+            # Add words to the dictionary
+            roll = piano_roll_from_music_json_file(path,
+                                                   default_velocity=self.default_velocity,
+                                                   quantization_rate=self.quantization_rate,
+                                                   n_voices=self.n_voices,
+                                                   separate_onsets=self.separate_onsets,
+                                                   onsets_boundary=self.onsets_boundary,
+                                                   as_numpy=True)
+            words = self.tokenization_fn(roll)
+            for word in words:
+                if word in self.dictionary.word2idx:
+                    token = self.dictionary.word2idx[word]
+                else:
+                    token = self.dictionary.word2idx["<unk>"]
+                ids.append(token)
+        return ids
+
+
+class MusicJSONCorpus(object):
+    def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
+                 max_vocabulary_size=-1,
+                 add_eos=False,
+                 eos_amount=32,
+                 eos_symbol=0,
+                 tokenization_fn="flatten",
+                 default_velocity=120, n_voices=4,
+                 separate_onsets=True, onsets_boundary=100):
+        """
+        """
+        self.dictionary = LookupDictionary()
+
+        self.max_vocabulary_size = max_vocabulary_size
+        self.default_velocity = default_velocity
+        self.quantization_rate = quantization_rate
+        self.n_voices = n_voices
+        self.separate_onsets = separate_onsets
+        self.onsets_boundary = onsets_boundary
+        self.add_eos = add_eos
+        self.eos_amount = eos_amount
+        self.eos_symbol = eos_symbol
+
+        if tokenization_fn == "flatten":
+            def tk(arr):
+                t = [el for el in arr.ravel()]
+                if add_eos:
+                    # 2 measures of silence are the eos
+                    return t + [self.eos_symbol] * self.eos_amount
                 else:
                     return t
             self.tokenization_fn = tk

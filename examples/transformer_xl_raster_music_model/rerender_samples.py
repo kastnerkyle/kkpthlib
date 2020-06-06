@@ -55,7 +55,9 @@ for ij in input_json:
     #     3: [(d, 0, 40), (h, 8, 50)]}
     a = "harpsichord_preset"
     #b = "woodwind_preset"
-    b = "organ_preset"
+    #b = "organ_preset"
+    # TODO: rewrite amplitudes so that everything non onset is a rest for piano / percussion in general?
+    b = "grand_piano_preset"
     #b = "electric_piano_preset"
     #b = "zelda_preset"
     #b = "dreamy_preset"

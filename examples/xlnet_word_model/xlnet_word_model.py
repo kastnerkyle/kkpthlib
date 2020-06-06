@@ -7,7 +7,7 @@ import torch
 from torch import nn
 import torch.functional as F
 
-from kkpthlib import AWDTransformerXLDecoderBlock
+from kkpthlib import AWDXLNetDecoderBlock
 from kkpthlib import HParams
 from kkpthlib import Linear
 from kkpthlib import EmbeddingDropout
@@ -19,23 +19,22 @@ from kkpthlib import clipping_grad_norm_
 from kkpthlib import RampOpt
 from kkpthlib import run_loop
 
-from kkpthlib import fetch_jsb_chorales
-from kkpthlib import piano_roll_from_music_json_file
-from kkpthlib import MusicJSONRasterCorpus
 
-hp = HParams(memory_len=32,
-             context_len=128,
+hp = HParams(memory_len=20,
+             context_len=70,
              embedding_dropout_keep_prob=.8,
              transformer_input_dim=380,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
              learning_rate=3E-4,
              min_learning_rate=1E-4,
              clip=.25,
-             batch_size=24,
+             batch_size=10,
              n_layers=16,
-             max_sequence_length=256,
-             max_vocabulary_size=133, # len(corpus.dictionary.counter)
+             data_storage_dir="kjv",
+             max_sequence_length=140,
+             max_vocabulary_size=10000,
              random_seed=2122)
+
 
 def get_hparams():
     return hp
@@ -45,20 +44,22 @@ def build_model(hp):
     class Model(nn.Module):
         def __init__(self):
             super(Model, self).__init__()
-            self.embedding = EmbeddingDropout(hp.max_vocabulary_size,
+            self.embedding_k = EmbeddingDropout(hp.max_vocabulary_size,
                                               hp.transformer_input_dim,
                                               dropout_keep_prob=hp.embedding_dropout_keep_prob,
                                               random_state=random_state,
                                               device=hp.use_device,
                                               name="embed")
-            self.transformer = AWDTransformerXLDecoderBlock([hp.transformer_input_dim],
-                                                            name="transformer_block",
-                                                            random_state=random_state,
-                                                            memory_len=hp.memory_len,
-                                                            context_len=hp.context_len,
-                                                            init="normal",
-                                                            scale=0.02,
-                                                            device=hp.use_device)
+            l = np.sqrt(6. / (hp.transformer_input_dim))
+            self.embedding_q = nn.Parameter(torch.tensor(random_state.uniform(-l, l, size=(hp.transformer_input_dim,))))
+            self.transformer = AWDXLNetDecoderBlock([hp.transformer_input_dim],
+                                                     name="xlnet_block",
+                                                     random_state=random_state,
+                                                     memory_len=hp.memory_len,
+                                                     context_len=hp.context_len,
+                                                     init="normal",
+                                                     scale=0.02,
+                                                     device=hp.use_device)
             self.out_proj = Linear([hp.transformer_input_dim],
                                     hp.max_vocabulary_size,
                                     random_state=random_state,
@@ -67,43 +68,45 @@ def build_model(hp):
                                     scale=0.02,
                                     name="model_out")
 
-        def forward(self, x, list_of_mems=None):
-            xe, de = self.embedding(x)
-            out, l_o_m = self.transformer(xe, list_of_mems=list_of_mems)
+        def forward(self, input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=None):
+            xe_k, de_k = self.embedding_k(input_ks)
+            # target_mappings is not None case
+            # use xe_k for size broadcasting
+            # mask embedding is kind of silly with target_mappings provided
+            xe_q = 0. * xe_k.detach() + self.embedding_q[None, None]
+            out, l_o_m = self.transformer(xe_k, xe_q,
+                                          perm_masks,
+                                          target_mappings,
+                                          target_masks,
+                                          list_of_mems=list_of_mems)
             p = self.out_proj([out])
             return p, l_o_m
     return Model().to(hp.use_device)
 
 if __name__ == "__main__":
-    jsb = fetch_jsb_chorales()
-
-    # sort into minor / major, then by key
-    all_transposed = sorted([f for f in jsb["files"] if "original" not in f], key=lambda x:
-                            (x.split(os.sep)[-1].split(".")[-2].split("transposed")[0].split("-")[0],
-                             x.split(os.sep)[-1].split(".")[-2].split("transposed")[0].split("-")[1]))
-
-    bwv_names = sorted(list(set([f.split(os.sep)[-1].split(".")[0] for f in all_transposed])))
-    vrng = np.random.RandomState(144)
-    vrng.shuffle(bwv_names)
-    # 15 is ~5% of the data
-    # holding out whole songs so actually a pretty hard validation set...
-    valid_names = bwv_names[:15]
-    train_files = [f for f in all_transposed if all([vn not in f for vn in valid_names])]
-    valid_files = [f for f in all_transposed if any([vn in f for vn in valid_names])]
-
-    corpus = MusicJSONRasterCorpus(train_data_file_paths=train_files,
-                                   valid_data_file_paths=valid_files)
-    #all_pp = [piano_roll_from_music_json_file(at).ravel() for at in all_transposed]
-    #all_pp = [ppi for ppi in np.concatenate(all_pp)]
-    # all_pp is one giant list
+    # are memories correct, or should they be shifted by half to account for "context"
+    train_data_file_path = hp.data_storage_dir + os.sep + "train.txt"
+    valid_data_file_path = hp.data_storage_dir + os.sep + "valid.txt"
+    test_data_file_path = hp.data_storage_dir + os.sep + "test.txt"
+    corpus = WordCorpus(train_data_file_path=train_data_file_path,
+                        valid_data_file_path=valid_data_file_path,
+                        test_data_file_path=test_data_file_path,
+                        cleaner_fn="lower_ascii_keep_standard_punctuation",
+                        max_vocabulary_size=hp.max_vocabulary_size,
+                        use_eos=False)
     train_batches = make_batches_from_list(corpus.train, batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len)
     valid_batches = make_batches_from_list(corpus.valid, batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len)
+    test_batches = make_batches_from_list(corpus.test, batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len)
 
     train_random_state = np.random.RandomState(hp.random_seed)
     valid_random_state = np.random.RandomState(hp.random_seed + 1)
+    test_random_state = np.random.RandomState(hp.random_seed + 2)
+
+    gen_random_state = np.random.RandomState(hp.random_seed + 3)
 
     train_itr = StepIterator([train_batches], circular_rotation=True, random_state=train_random_state)
     valid_itr = StepIterator([valid_batches], random_state=valid_random_state)
+    test_itr = StepIterator([test_batches], random_state=test_random_state)
 
     model = build_model(hp)
     loss_fun = CategoricalCrossEntropyFromLogits()
@@ -117,16 +120,32 @@ if __name__ == "__main__":
 
     def loop(itr, extras, stateful_args):
         np_data = next(itr)
+
+        # +1 to account for autoregressive targets
+        # context_len because we have a reduction mapping - targets are a subset of the "target sequence", effectively
+        np_perm_masks, np_target_mappings, np_target_masks, np_input_qs = model.transformer.make_masks_and_mappings(np_data, context_cut=hp.context_len + 1, random_state=gen_random_state)
+
         input_data = torch.tensor(np_data).to(hp.use_device)
         target = torch.tensor(np_data).long().to(hp.use_device)
+
+        # input_data is input_k_0 in xlnet code
         input_data = input_data[:-1]
         input_data = input_data[..., None]
+
         # need to embed it?
         target = target[1:]
         target = target[..., None]
 
+        # these 3 use context_cut
+        perm_masks = torch.tensor(np_perm_masks).to(hp.use_device)
+        target_masks = torch.tensor(np_target_masks).to(hp.use_device)
+        input_qs = torch.tensor(np_input_qs).to(hp.use_device)
+
+        # this one doesn't - need to cut manually to match target
+        target_mappings = torch.tensor(np_target_mappings[1:]).to(hp.use_device)
+
         in_mems = stateful_args
-        out, out_mems = model(input_data, list_of_mems=in_mems)
+        out, out_mems = model(input_data, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=in_mems)
         loss = loss_fun(out, target[hp.context_len:])
         #loss = loss.sum(axis=0).mean()
         loss = loss.mean()
@@ -138,9 +157,11 @@ if __name__ == "__main__":
             optimizer.step()
         return l, None, out_mems
 
+    """
     # the out-of-loop-check
-    #r = loop(train_itr, {"train": True}, None)
-    #r2 = loop(train_itr, {"train": True}, r[-1])
+    r = loop(train_itr, {"train": True}, None)
+    r2 = loop(train_itr, {"train": True}, r[-1])
+    """
 
     s = {"model": model,
          "optimizer": optimizer,
