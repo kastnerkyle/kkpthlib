@@ -1950,7 +1950,7 @@ class RelativeMultiHeadAttention(nn.Module):
          o_name = name + "_out"
 
          self.drop = nn.Dropout(1. - attention_dropout_keep_prob)
-         self.locked_drop = LockedDropout(1. - attention_dropout_keep_prob, random_state=random_state, device=device)
+         self.locked_drop = LockedDropout(attention_dropout_keep_prob, random_state=random_state, device=device)
 
          # no biases in transformer XL code
          self.qkv_net = Linear(list_of_input_dims,
@@ -1980,7 +1980,7 @@ class RelativeMultiHeadAttention(nn.Module):
                              dtype=dtype)
          self.scale = 1. / (head_dim ** .5)
 
-     def forward(self, list_of_inputs, relative_positional_embedding, local_bias, attention_mask=None, memory=None):
+     def forward(self, list_of_inputs, relative_positional_embedding, local_bias_ac, local_bias_bd, attention_mask=None, memory=None):
          i = torch.cat(list_of_inputs, dim=-1)
          r = relative_positional_embedding
          qlen = i.size(0)
@@ -2008,13 +2008,13 @@ class RelativeMultiHeadAttention(nn.Module):
 
          # attention
          # [qlen x bsz x n_head x d_head]
-         ir_head_q = i_head_q + local_bias #+ r_head_q[-1] # bias term from pos embed
+         ir_head_q = i_head_q + local_bias_ac #+ r_head_q[-1] # bias term from pos embed
          # [klen x bsz x n_head x d_head]
          # i_head_k
          # [qlen x klen x bsz x n_head]
          AC = torch.einsum('ibnd,jbnd->ijbn', (ir_head_q, i_head_k))
 
-         ir2_head_q = i_head_q + r_head_q[-1] # bias term
+         ir2_head_q = i_head_q + local_bias_bd # bias term
          BD = torch.einsum('ibnd,jbnd->ijbn', (ir2_head_q, r_head_k))
          # rel shift effectively removes 1 along the 1st dim
          BD = _rel_shift(BD)
@@ -2104,8 +2104,8 @@ class RelativeDecoderLayer(nn.Module):
                                                    device=device,
                                                    dtype=dtype)
 
-    def forward(self, decoder_input, relative_positional_embedding, local_bias, decoder_attention_mask=None, memory=None):
-        output = self.attention([decoder_input], relative_positional_embedding, local_bias=local_bias, attention_mask=decoder_attention_mask,
+    def forward(self, decoder_input, relative_positional_embedding, local_bias_ac, local_bias_bd, decoder_attention_mask=None, memory=None):
+        output = self.attention([decoder_input], relative_positional_embedding, local_bias_ac=local_bias_ac, local_bias_bd=local_bias_bd, attention_mask=decoder_attention_mask,
                                 memory=memory)
         output = self.position_ff([output])
         return output
@@ -2146,7 +2146,8 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         self.n_layers = n_layers
         self.device = device
         self.dtype = dtype
-        self.local_bias = nn.Parameter(torch.zeros(n_heads, head_dim))
+        self.local_bias_ac = nn.Parameter(torch.zeros(n_heads, head_dim))
+        self.local_bias_bd = nn.Parameter(torch.zeros(n_heads, head_dim))
 
         for i in range(n_layers):
             layer_name = name + "_relative_decoder_layer{}".format(i)
@@ -2266,7 +2267,10 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         for i, this_layer in enumerate(self.layers):
             hids.append(core_out)
             mems_i = list_of_mems[i] if list_of_mems is not None else None
-            core_out = this_layer(core_out, pe, local_bias=self.local_bias[None, None], decoder_attention_mask=attn_mask, memory=mems_i)
+            core_out = this_layer(core_out, pe,
+                                  local_bias_ac=self.local_bias_ac[None, None], 
+                                  local_bias_bd=self.local_bias_bd[None, None],
+                                  decoder_attention_mask=attn_mask, memory=mems_i)
             if i < len(self.layers) - 1:
                 core_out = self.locked_drop_h(core_out)
 
@@ -2518,8 +2522,8 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
         self.attention_dropout_keep_prob = attention_dropout_keep_prob
 
         self.drop = nn.Dropout(1. - attention_dropout_keep_prob)
-        self.locked_drop_h = LockedDropout(1. - attention_dropout_keep_prob, random_state=random_state, device=device)
-        self.locked_drop_g = LockedDropout(1. - attention_dropout_keep_prob, random_state=random_state, device=device)
+        self.locked_drop_h = LockedDropout(attention_dropout_keep_prob, random_state=random_state, device=device)
+        self.locked_drop_g = LockedDropout(attention_dropout_keep_prob, random_state=random_state, device=device)
 
         # no biases in transformer XL code
         self.k_net = Linear(list_of_input_dims,
@@ -2602,6 +2606,7 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
         # [klen x bsz x n_head x d_head]
         # i_head_k
         # [qlen x klen x bsz x n_head]
+        # content based attention score
         AC = torch.einsum('ibnd,jbnd->ijbn', (q_head + local_bias_ac, k_head_h))
 
         # position based attention score
@@ -2687,7 +2692,6 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
                                                         local_bias_bd,
                                                         decoder_attention_mask_h, self.scale)
         o_h = self.o_net([attention_weighted_values])
-
         o_h = self.locked_drop_h(o_h)
         output_h = self.ln(h + o_h)
 
@@ -2699,14 +2703,17 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
                                                               local_bias_ac,
                                                               local_bias_bd,
                                                               decoder_attention_mask_g, self.scale)
-            attention_weighted_values_g = torch.einsum('lbc,mlb->mbc', (attention_weighted_values_g, target_mappings))
+            attention_weighted_values_g = attention_weighted_values_g.view(attention_weighted_values_g.size(0), batch_size, self.n_heads, self.head_dim)
+
+            attention_weighted_values_g = torch.einsum('lbnd,mlb->mbnd', (attention_weighted_values_g, target_mappings))
+            attention_weighted_values_g = attention_weighted_values_g.view(attention_weighted_values_g.size(0), batch_size, self.n_heads * self.head_dim)
         else:
             attention_weighted_values_g = self._rel_attn_core(q_head_g, k_head_h, v_head_h, k_head_r,
                                                               local_bias_ac,
                                                               local_bias_bd,
                                                               decoder_attention_mask_g, self.scale)
-        o_g = self.o_net([attention_weighted_values_g])
 
+        o_g = self.o_net([attention_weighted_values_g])
         o_g = self.locked_drop_g(o_g)
         output_g = self.ln(g + o_g)
 
@@ -2866,6 +2873,7 @@ class AWDXLNetDecoderBlock(nn.Module):
         perm_masks = np.array(agg_perm_mask).transpose(1, 2, 0).astype("float32")
         target_masks = np.array(agg_target_mask).transpose(1, 0).astype("float32")
         input_qs = np.array(agg_input_q).transpose(1, 0).astype("float32")
+        # num_predict, tgt_len, bsz
         target_mappings = np.array(agg_target_mapping).transpose(2, 1, 0).astype("float32")
         perm_orders = np.array(agg_perm_orders).transpose(1, 0).astype("float32")
         return perm_masks, target_mappings, target_masks, input_qs, perm_orders
@@ -2967,12 +2975,12 @@ class AWDXLNetDecoderBlock(nn.Module):
             hids.append(output_h)
             mems_i = list_of_mems[i] if list_of_mems is not None else None
             output_h, output_g = this_layer(output_h, output_g, pe,
-                                  local_bias_ac=self.local_bias_ac[None, None],
-                                  local_bias_bd=self.local_bias_bd[None, None],
-                                  decoder_attention_mask_h=non_tgt_mask,
-                                  decoder_attention_mask_g=attn_mask,
-                                  target_mappings=target_mappings,
-                                  memory=mems_i)
+                                            local_bias_ac=self.local_bias_ac[None, None],
+                                            local_bias_bd=self.local_bias_bd[None, None],
+                                            decoder_attention_mask_h=non_tgt_mask,
+                                            decoder_attention_mask_g=attn_mask,
+                                            target_mappings=target_mappings,
+                                            memory=mems_i)
             if i < len(self.layers) - 1:
                 output_h = self.locked_drop_h_h(output_h)
                 output_g = self.locked_drop_h_g(output_g)
@@ -2982,11 +2990,10 @@ class AWDXLNetDecoderBlock(nn.Module):
         # qlen = len(inpt)
         #new_mems = self.update_list_of_mems(hids, list_of_mems, mlen, qlen)
         # original code had a bug, see comments for detail
-        core_out = output_g
         new_mems = self.update_list_of_mems(hids, list_of_mems, qlen, mlen)
 
         # slice according to context_len, normally set to 0
         # in original code they do this via target size, but we don't have that information
-        core_out = core_out[self.context_len:]
-        core_out = self.locked_drop_o(core_out)
-        return core_out, new_mems
+        output_g = self.locked_drop_o(output_g[self.context_len:])
+        output_h = self.locked_drop_o(output_h[self.context_len:])
+        return output_h, output_g, new_mems

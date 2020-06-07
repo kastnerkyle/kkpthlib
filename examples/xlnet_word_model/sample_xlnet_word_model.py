@@ -113,7 +113,6 @@ np_perm_masks, np_target_mappings, np_target_masks, np_input_qs, np_perm_orders 
 
 from IPython import embed; embed(); raise ValueError()
 
-
 np_data = np_data[:hp.context_len + 1]
 out_mems = None
 
