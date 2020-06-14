@@ -1853,6 +1853,11 @@ class LayerNorm(torch.nn.Module):
         # want to use sqrt of var + eps instead
         var = x.var(-1, keepdim=True)
         return self.weight * (x - mean) / torch.sqrt(var + self.eps) + self.bias
+        """
+        rms_x = x.norm(2, dim=-1, keepdim=True)
+        x_normed = x / (rms_x + self.eps)
+        return self.weight * x_normed
+        """
 
 
 class PositionwiseFeedforward(nn.Module):
@@ -2629,15 +2634,17 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
             elif attention_mask.dim() == 3:
                 attention_score.masked_fill_(attention_mask[:, :, :, None], -float('inf'))
 
-        faker = 0. * attention_score + 1.
-        faker_mask = self.drop(faker)
+        # alternative method which can preserve attn summing to 1
+        #faker = 0. * attention_score + 1.
+        #faker_mask = self.drop(faker)
         # can't fill with neginf since could all be 0 - hence all neginf, leading to nan in softmax
-        attention_score.masked_fill_(faker_mask == 0, -1E30)
+        #attention_score.masked_fill_(faker_mask == 0, -1E9)
+
         attention_prob = F.softmax(attention_score, dim=1)
 
         # this is how it is done in the PTB code but... not normalized anymore!
         # question is, will other method freak out at test time? whereas this is more "normal" - basically same as dropping pieces of i_head_v
-        #attention_prob = self.drop(attention_prob)
+        attention_prob = self.drop(attention_prob)
         # isn't this just dropout on the thing you are attending, in disguise?
         # https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/layers/common_attention.py#L1822
 
@@ -2702,16 +2709,14 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
                                                               local_bias_ac,
                                                               local_bias_bd,
                                                               decoder_attention_mask_g, self.scale)
-            attention_weighted_values_g = attention_weighted_values_g.view(attention_weighted_values_g.size(0), batch_size, self.n_heads, self.head_dim)
-
+            attention_weighted_values_g = attention_weighted_values_g.view(attention_weighted_values_g.size(0), batch_size, self.n_heads, self.head_dim).contiguous()
             attention_weighted_values_g = torch.einsum('lbnd,mlb->mbnd', (attention_weighted_values_g, target_mappings))
-            attention_weighted_values_g = attention_weighted_values_g.view(attention_weighted_values_g.size(0), batch_size, self.n_heads * self.head_dim)
+            attention_weighted_values_g = attention_weighted_values_g.view(attention_weighted_values_g.size(0), batch_size, self.n_heads * self.head_dim).contiguous()
         else:
             attention_weighted_values_g = self._rel_attn_core(q_head_g, k_head_h, v_head_h, k_head_r,
                                                               local_bias_ac,
                                                               local_bias_bd,
                                                               decoder_attention_mask_g, self.scale)
-
         o_g = self.o_net([attention_weighted_values_g])
         o_g = self.locked_drop_g(o_g)
         output_g = self.ln(g + o_g)

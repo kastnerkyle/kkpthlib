@@ -146,6 +146,17 @@ if __name__ == "__main__":
         # context_len because we have a reduction mapping - targets are a subset of the "target sequence", effectively
         np_perm_masks, np_target_mappings, np_target_masks, np_input_ks, np_input_qs, np_targets, np_perm_orders = model.transformer.make_inputs_targets_masks_and_mappings(np_data, K=6, context_cut=hp.context_len, random_state=gen_random_state)
 
+        #np_target_mappings = None
+        if np_target_mappings is not None:
+            np_targets = np_targets[np_target_masks == 1].reshape(-1, hp.batch_size)
+            np_target_masks = np_target_masks[np_target_masks == 1].reshape(-1, hp.batch_size)
+            pad_l = np.zeros((hp.context_len, hp.batch_size))
+            np_targets = np.concatenate((pad_l, np_targets))
+            np_target_masks = np.concatenate((pad_l, np_target_masks))
+            pad_r = np.zeros((len(np_target_mappings) - len(np_targets), hp.batch_size))
+            np_targets = np.concatenate((np_targets, pad_r))
+            np_target_masks = np.concatenate((np_target_masks, pad_r))
+
         input_ks = torch.tensor(np_input_ks).to(hp.use_device)
         input_qs = torch.tensor(np_input_qs).to(hp.use_device)
         targets = torch.tensor(np_targets).long().to(hp.use_device)
@@ -156,30 +167,27 @@ if __name__ == "__main__":
         input_qs = input_qs[..., None]
         targets = targets[..., None]
 
-        # these 3 use context_cut
-        # can sanity check using perm_masks = 0. aka everything looks at everything
         perm_masks = torch.tensor(np_perm_masks).to(hp.use_device)
         target_masks = torch.tensor(np_target_masks).to(hp.use_device)
 
         # this one doesn't - need to cut manually to match target
         target_mappings = torch.tensor(np_target_mappings).to(hp.use_device)
 
-        #target_mappings = None
-
         in_mems = stateful_args
 
         out_h, out_g, out_mems = model(input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=in_mems)
 
-        targets = targets[target_masks == 1].reshape(-1, out_g.shape[1], 1).contiguous()
-        loss = loss_fun(out_g[hp.context_len:hp.context_len + targets.shape[0], : , :].contiguous(), targets)
-        loss = loss.sum() / target_masks.sum()
+        # slicing here is bad times for NaN in the model
+        # do it with pad masks and moving the targets instead
+        #targets = targets[target_masks == 1].reshape(-1, out_g.shape[1], 1).contiguous()
+        #loss = loss_fun(out_g[:targets.shape[0]].contiguous(), targets)
+        #loss = loss_fun(out_g[hp.context_len:hp.context_len + targets.shape[0], : , :].contiguous(), targets)
+        #loss = loss.sum() / target_masks.sum()
         #from IPython import embed; embed(); raise ValueError()
 
-        # more generally do it with masks
-        # in this case, target_mappings etc used the reduced form to speed up computation
-        #loss = loss_fun(out_g, targets)
-        #loss = target_masks * loss
-        #loss = loss.sum() / target_masks.sum()
+        loss = loss_fun(out_g, targets)
+        loss = target_masks * loss
+        loss = loss.sum() / target_masks.sum()
 
         l = loss.cpu().data.numpy()
         optimizer.zero_grad()
@@ -187,12 +195,14 @@ if __name__ == "__main__":
             loss.backward()
             #clipping_grad_value_(model.named_parameters(), hp.clip, named_check=True)
             #clipping_grad_value_(model.parameters(), hp.clip)
-            # LARGE gradients on LN biases
+            # check LARGE gradients on LN biases
             #clipping_grad_norm_(model.named_parameters(), hp.clip, named_check=True)
+            #from IPython import embed; embed(); raise ValueError()
             clipping_grad_norm_(model.parameters(), hp.clip)
             optimizer.step()
         return l, None, out_mems
 
+    """
     # the out-of-loop-check
     rs = []
     for i in range(5):
@@ -203,6 +213,7 @@ if __name__ == "__main__":
             r = loop(train_itr, {"train": True}, rs[-1][-1])
         rs.append(r)
     from IPython import embed; embed(); raise ValueError()
+    """
 
     s = {"model": model,
          "optimizer": optimizer,
