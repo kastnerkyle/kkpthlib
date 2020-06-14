@@ -16,6 +16,7 @@ from kkpthlib import make_batches_from_list
 from kkpthlib import StepIterator
 from kkpthlib import CategoricalCrossEntropyFromLogits
 from kkpthlib import clipping_grad_norm_
+from kkpthlib import clipping_grad_value_
 from kkpthlib import RampOpt
 from kkpthlib import run_loop
 
@@ -26,19 +27,19 @@ hp = HParams(memory_len=20,
              transformer_input_dim=380,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
              learning_rate=1E-4,
-             min_learning_rate=1E-5,
+             min_learning_rate=1E-6,
              clip=.25,
-             batch_size=20,
+             batch_size=15,
              n_layers=16,
              #input_dropout_keep_prob=.4,
              #output_dropout_keep_prob=.5,
              #embedding_dropout_keep_prob=.8,
-             embedding_dropout_keep_prob=1.,
-             input_dropout_keep_prob=1.,
-             inner_dropout_keep_prob=1.,
+             embedding_dropout_keep_prob=.8,
+             input_dropout_keep_prob=.4,
+             inner_dropout_keep_prob=.8,
              hidden_dropout_keep_prob=1.,
-             attention_dropout_keep_prob=1.,
-             output_dropout_keep_prob=1.,
+             attention_dropout_keep_prob=.8,
+             output_dropout_keep_prob=.5,
              data_storage_dir="kjv",
              max_vocabulary_size=10000,
              random_seed=2122)
@@ -59,7 +60,7 @@ def build_model(hp):
                                                 device=hp.use_device,
                                                 name="embed")
             l = np.sqrt(6. / (hp.transformer_input_dim))
-            #self.embedding_q = nn.Parameter(torch.tensor(random_state.uniform(-l, l, size=(hp.transformer_input_dim,))))
+            self.embedding_q = nn.Parameter(torch.tensor(random_state.uniform(-l, l, size=(hp.transformer_input_dim,))))
             self.transformer = AWDXLNetDecoderBlock([hp.transformer_input_dim],
                                                      name="xlnet_block",
                                                      input_dropout_keep_prob=hp.input_dropout_keep_prob,
@@ -83,17 +84,21 @@ def build_model(hp):
 
         def forward(self, input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=None):
             xe_k, de_k = self.embedding_k(input_ks)
+
             # target_mappings is not None case
             # use xe_k for size broadcasting
             # mask embedding is kind of silly with target_mappings provided
+            _q = 0. * xe_k.detach() + self.embedding_q[None, None]
 
-            #xe_q = 0. * xe_k.detach() + self.embedding_q[None, None]
-            xe_q = xe_k
+            xe_q = 0. * xe_k # set the prior embeddings to match the word ones
+            # everywhere there is a target, blank out the standard embedding and replace with the learned mask emb
+            xe_q = target_masks[..., None] * _q + (1. - target_masks[..., None]) * xe_k
+
             out_h, out_g, l_o_m = self.transformer(xe_k, xe_q,
-                                          0. * perm_masks,
-                                          target_mappings,
-                                          target_masks,
-                                          list_of_mems=list_of_mems)
+                                                   perm_masks,
+                                                   target_mappings,
+                                                   target_masks,
+                                                   list_of_mems=list_of_mems)
             p_h = self.out_proj([out_h])
             p_g = self.out_proj([out_g])
             return p_h, p_g, l_o_m
@@ -139,49 +144,65 @@ if __name__ == "__main__":
 
         # +1 to account for autoregressive targets
         # context_len because we have a reduction mapping - targets are a subset of the "target sequence", effectively
-        np_perm_masks, np_target_mappings, np_target_masks, np_input_qs, np_perm_orders = model.transformer.make_masks_and_mappings(np_data, context_cut=hp.context_len, random_state=gen_random_state)
+        np_perm_masks, np_target_mappings, np_target_masks, np_input_ks, np_input_qs, np_targets, np_perm_orders = model.transformer.make_inputs_targets_masks_and_mappings(np_data, K=6, context_cut=hp.context_len, random_state=gen_random_state)
 
-        input_data = torch.tensor(np_data).to(hp.use_device)
-        target = torch.tensor(np_data).long().to(hp.use_device)
+        input_ks = torch.tensor(np_input_ks).to(hp.use_device)
+        input_qs = torch.tensor(np_input_qs).to(hp.use_device)
+        targets = torch.tensor(np_targets).long().to(hp.use_device)
 
         # input_data is input_k_0 in xlnet code
         #input_data = input_data[:-1]
-        input_data = input_data[..., None]
-
-        # need to embed it?
-        #target = target[1:]
-        target = target[..., None]
+        input_ks = input_ks[..., None]
+        input_qs = input_qs[..., None]
+        targets = targets[..., None]
 
         # these 3 use context_cut
         # can sanity check using perm_masks = 0. aka everything looks at everything
         perm_masks = torch.tensor(np_perm_masks).to(hp.use_device)
         target_masks = torch.tensor(np_target_masks).to(hp.use_device)
-        input_qs = torch.tensor(np_input_qs).to(hp.use_device)
 
         # this one doesn't - need to cut manually to match target
         target_mappings = torch.tensor(np_target_mappings).to(hp.use_device)
 
+        #target_mappings = None
+
         in_mems = stateful_args
-        out_h, out_g, out_mems = model(input_data, input_qs, 0. * perm_masks, target_mappings, target_masks, list_of_mems=in_mems)
-        loss = loss_fun(out_g, target[hp.context_len:])
-        loss = target_masks * loss
+
+        out_h, out_g, out_mems = model(input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=in_mems)
+
+        targets = targets[target_masks == 1].reshape(-1, out_g.shape[1], 1).contiguous()
+        loss = loss_fun(out_g[hp.context_len:hp.context_len + targets.shape[0], : , :].contiguous(), targets)
         loss = loss.sum() / target_masks.sum()
-        #loss = loss.sum(axis=0).mean()
-        #loss = loss.mean()
+        #from IPython import embed; embed(); raise ValueError()
+
+        # more generally do it with masks
+        # in this case, target_mappings etc used the reduced form to speed up computation
+        #loss = loss_fun(out_g, targets)
+        #loss = target_masks * loss
+        #loss = loss.sum() / target_masks.sum()
+
         l = loss.cpu().data.numpy()
         optimizer.zero_grad()
         if extras["train"]:
             loss.backward()
+            #clipping_grad_value_(model.named_parameters(), hp.clip, named_check=True)
+            #clipping_grad_value_(model.parameters(), hp.clip)
+            # LARGE gradients on LN biases
+            #clipping_grad_norm_(model.named_parameters(), hp.clip, named_check=True)
             clipping_grad_norm_(model.parameters(), hp.clip)
             optimizer.step()
         return l, None, out_mems
 
-    """
     # the out-of-loop-check
-    r = loop(train_itr, {"train": True}, None)
-    r2 = loop(train_itr, {"train": True}, r[-1])
+    rs = []
+    for i in range(5):
+        print(i)
+        if i == 0:
+            r = loop(train_itr, {"train": True}, None)
+        else:
+            r = loop(train_itr, {"train": True}, rs[-1][-1])
+        rs.append(r)
     from IPython import embed; embed(); raise ValueError()
-    """
 
     s = {"model": model,
          "optimizer": optimizer,

@@ -499,6 +499,7 @@ def clipping_grad_norm_(parameters, rescale, named_parameters=False, named_check
         for n, p in parameters:
             print("Checking {} grad.data".format(n))
             assert p.grad.data is not None
+            print(p.grad.data.sum())
             print("{}, OK".format(n))
         raise ValueError("named_check complete!")
     if not named_parameters:
@@ -520,6 +521,7 @@ def clipping_grad_value_(parameters, clip_value, named_parameters=False, named_c
         for n, p in parameters:
             print("Checking {} grad.data".format(n))
             assert p.grad.data is not None
+            print(p.grad.data.sum())
             print("{}, OK".format(n))
         raise ValueError("named_check complete!")
     if not named_parameters:
@@ -2415,7 +2417,7 @@ def _xlnet_make_sample_mask(seq, goal_n_to_mask, random_state, n_spans=None, max
     return mask
 
 
-def _xlnet_make_ar_perm_mask(tgt, is_masked_tgt, random_state, sequential_order=False):
+def _xlnet_make_ar_perm_mask(inp, tgt, is_masked, random_state, sequential_order=False):
     """
     creates valid permutation mask
 
@@ -2451,7 +2453,7 @@ def _xlnet_make_ar_perm_mask(tgt, is_masked_tgt, random_state, sequential_order=
     index = index.ravel()
 
     # fully random permutation
-    non_mask_tokens = [not(imt) for imt in is_masked_tgt]
+    non_mask_tokens = [not(imt) for imt in is_masked]
     mask_tokens = [not(nmt) for nmt in non_mask_tokens]
 
     # Set the permutation indices of non tokens to the
@@ -2469,25 +2471,22 @@ def _xlnet_make_ar_perm_mask(tgt, is_masked_tgt, random_state, sequential_order=
     # 1: cannot attend if i <= j and j is not non-masked (masked_or_func_tokens)
     # 0: can attend if i > j or j is non-masked
     perm_mask = (self_rev_index[:, None] <= rev_index[None, :]) & np.array(mask_tokens, dtype=np.bool)
-    return perm_mask, np.array(np.copy(target_mask)), np.copy(np.array(target_mask)), rev_index
+    return perm_mask, rev_index
 
 
-def _xlnet_make_target_mapping(tgt, tgt_mask):
+def _xlnet_make_target_mapping(tgt_mask):
     """
     make target mapping function
     from target sequence and a mask of values to predict
 
     returned one_hots has dimension
     (num_predict, seq_len)
-    where num_predict = sum(tgt_mask == True) aka number of values unmasked
+    where num_predict = sum(tgt_mask == True) aka number of values masked
     """
-    indices = np.arange(len(tgt))
+    indices = np.arange(len(tgt_mask))
     indices = indices[np.where(tgt_mask)]
-    one_hots = np.zeros((len(indices), len(tgt)))
+    one_hots = np.zeros((len(indices), len(tgt_mask)))
     one_hots[np.arange(len(indices), dtype="int32"), indices] = 1
-    # one_hots has dimension
-    # (num_predict, seq_len)
-    # where num_predict = sum(tgt_mask == True) aka number of values unmasked
     return one_hots
 
 
@@ -2633,7 +2632,7 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
         faker = 0. * attention_score + 1.
         faker_mask = self.drop(faker)
         # can't fill with neginf since could all be 0 - hence all neginf, leading to nan in softmax
-        attention_score.masked_fill_(faker_mask == 0, -1E9)
+        attention_score.masked_fill_(faker_mask == 0, -1E30)
         attention_prob = F.softmax(attention_score, dim=1)
 
         # this is how it is done in the PTB code but... not normalized anymore!
@@ -2819,8 +2818,8 @@ class AWDXLNetDecoderBlock(nn.Module):
                                            device=device,
                                            dtype=dtype)
 
-    def make_masks_and_mappings(self, numpy_sequence_array, context_cut, start_check_function=None,
-                                K=6, max_n_gram=5, sequential_order=False, random_state=None):
+    def make_inputs_targets_masks_and_mappings(self, numpy_sequence_array, context_cut, start_check_function=None,
+                                               K=6, max_n_gram=5, sequential_order=False, random_state=None):
         """
         context_len should be accounted for!
 
@@ -2841,42 +2840,72 @@ class AWDXLNetDecoderBlock(nn.Module):
 
         # actual target size matters here
         # so account for context_len / context_cut
-        l = len(numpy_sequence_array[context_cut:])
+        l = len(numpy_sequence_array[context_cut:]) - 1
         goal_n_to_mask = int(l // K)
+
+        agg_input_q = []
+        agg_input_k = []
+        agg_target = []
 
         agg_perm_mask = []
         agg_target_mask = []
-        agg_input_q = []
         agg_target_mapping = []
         agg_perm_orders = []
         for i in range(numpy_sequence_array.shape[1]):
             # only care about targets AFTER context
-            seq = numpy_sequence_array[context_cut:, i]
-            mask = _xlnet_make_sample_mask(seq, goal_n_to_mask=goal_n_to_mask, random_state=random_state, max_n_gram=max_n_gram, start_check_function=scf)
+            assert context_cut >= 1
+            #seq = numpy_sequence_array[context_cut:, i]
+            #
+            full_inp = numpy_sequence_array[:-1, i]
+            full_tgt = numpy_sequence_array[1:, i]
+            inp = full_inp[context_cut:]
+            tgt = full_tgt[context_cut:]
+
+            # tgt is a shift of the input by 1 step as in "classic" AR language models
+            mask = _xlnet_make_sample_mask(inp, goal_n_to_mask=goal_n_to_mask, random_state=random_state, max_n_gram=max_n_gram, start_check_function=scf)
             # inpt goes through xlnet_make_ar_perm_mask basically untouched...
             # we take it out of the function definition for generality
 
             # no partial cuts - rather, partial predictions are autoregressive over random permutation. Still only predict a 1 / K subset, but no "cutting points" like mentioned in the paper... https://github.com/zihangdai/xlnet/issues/54
             # the cutting point is effectively handled by use of context_len in training, as in the transformer XL paper
-            perm_mask_0, target_mask_0, input_q_0, perm_order_0 = _xlnet_make_ar_perm_mask(seq, mask, random_state=random_state, sequential_order=sequential_order)
-            full_seq = numpy_sequence_array[:, i]
+            #perm_mask_0, target_0, target_mask_0, input_k_0, input_q_0, perm_order_0 = _xlnet_make_ar_perm_mask(inp, tgt, mask, random_state=random_state, sequential_order=sequential_order)
+            perm_mask_0, perm_order_0 = _xlnet_make_ar_perm_mask(inp, tgt, mask, random_state=random_state, sequential_order=sequential_order)
+
+            perm_mask_0 = perm_mask_0.astype("float32")
+            pad_u = np.zeros((context_cut, perm_mask_0.shape[1]))
+            perm_mask_0 = np.concatenate((pad_u, perm_mask_0), axis=0)
+            pad_l = np.zeros((perm_mask_0.shape[0], context_cut))
+            perm_mask_0 = np.concatenate((pad_l, perm_mask_0), axis=1)
+
             # target_mapping should be the length of the full sequence - due to the mechanics of the attention inside TwoStreamRelativeDecoder
-            tm = 0. * full_seq
-            tm[-len(target_mask_0):] = target_mask_0
-            target_mapping_0 = _xlnet_make_target_mapping(full_seq, tm)
+            target_mask_0 = np.array(mask).astype("float32")
+            pad_l = np.zeros((len(full_tgt) - len(tgt),))
+            target_mask_0 = np.concatenate((pad_l, target_mask_0))
+            target_mapping_0 = _xlnet_make_target_mapping(target_mask_0)
+
+            input_q_0 = np.copy(target_mask_0)
+            input_k_0 = np.copy(full_inp)
+            target_0 = np.copy(full_tgt)
+
+            agg_input_q.append(input_q_0)
+            agg_input_k.append(input_k_0)
+
+            agg_target.append(target_0)
             agg_perm_mask.append(perm_mask_0)
             agg_target_mask.append(target_mask_0)
-            agg_input_q.append(input_q_0)
             agg_target_mapping.append(target_mapping_0)
+
             agg_perm_orders.append(perm_order_0)
 
         perm_masks = np.array(agg_perm_mask).transpose(1, 2, 0).astype("float32")
         target_masks = np.array(agg_target_mask).transpose(1, 0).astype("float32")
+        targets = np.array(agg_target).transpose(1, 0).astype("float32")
         input_qs = np.array(agg_input_q).transpose(1, 0).astype("float32")
+        input_ks = np.array(agg_input_q).transpose(1, 0).astype("float32")
         # num_predict, tgt_len, bsz
         target_mappings = np.array(agg_target_mapping).transpose(2, 1, 0).astype("float32")
         perm_orders = np.array(agg_perm_orders).transpose(1, 0).astype("float32")
-        return perm_masks, target_mappings, target_masks, input_qs, perm_orders
+        return perm_masks, target_mappings, target_masks, input_ks, input_qs, targets, perm_orders
 
     def init_list_of_mems(self):
         if self.device == "default":
@@ -2994,6 +3023,6 @@ class AWDXLNetDecoderBlock(nn.Module):
 
         # slice according to context_len, normally set to 0
         # in original code they do this via target size, but we don't have that information
-        output_g = self.locked_drop_o(output_g[self.context_len:])
-        output_h = self.locked_drop_o(output_h[self.context_len:])
+        output_g = self.locked_drop_o(output_g)
+        output_h = self.locked_drop_o(output_h)
         return output_h, output_g, new_mems

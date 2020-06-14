@@ -107,16 +107,59 @@ np_data = next(valid_itr)
 true_data = np_data.copy()
 
 gen_random_state = np.random.RandomState(hp.random_seed + 3)
-# +1 to account for autoregressive targets
-# context_len because we have a reduction mapping - targets are a subset of the "target sequence", effectively
-np_perm_masks, np_target_mappings, np_target_masks, np_input_qs, np_perm_orders = model.transformer.make_masks_and_mappings(np_data, context_cut=hp.context_len + 1, random_state=gen_random_state, sequential_order=True)
 
-from IPython import embed; embed(); raise ValueError()
+np_perm_masks, np_target_mappings, np_target_masks, np_input_qs, np_perm_orders = model.transformer.make_masks_and_mappings(np_data, context_cut=hp.context_len, random_state=gen_random_state, sequential_order=True)
 
-np_data = np_data[:hp.context_len + 1]
 out_mems = None
 
-for i in range(210):
+finished = [False] * np_data.shape[1]
+blanks_indexer = [0] * np_data.shape[1]
+keep_blanks = []
+keep_offset_blanks = []
+for k in range(np_data.shape[1]):
+    blanks = np.where(np_target_masks[:, k])[0]
+    keep_blanks.append(blanks)
+    # account for context len offset
+    offset_blanks = [b + hp.context_len for b in blanks]
+    keep_offset_blanks.append(offset_blanks)
+    np_data[offset_blanks, k] = corpus.dictionary.word2idx["<unk>"]
+
+while True:
+    in_mems = None
+    #in_mems = out_mems
+
+    input_data = torch.tensor(np_data).to(hp.use_device)
+    input_data = input_data[..., None]
+
+    # these 3 use context_cut
+    # can sanity check using perm_masks = 0. aka everything looks at everything
+    perm_masks = torch.tensor(np_perm_masks).to(hp.use_device)
+    target_masks = torch.tensor(np_target_masks).to(hp.use_device)
+    input_qs = torch.tensor(np_input_qs).to(hp.use_device)
+
+    # this one doesn't - need to cut manually to match target
+    target_mappings = torch.tensor(np_target_mappings).to(hp.use_device)
+
+    perm_masks[0, 1, :] = 0.
+    out_h, out_g, out_mems = model(input_data, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=in_mems)
+    temp = .9
+    reduced = top_p_from_logits_np(out_g.cpu().data.numpy() / temp, .95)
+    reduced_probs = softmax_np(reduced)
+    for k in range(np_data.shape[1]):
+        # element we are sampling
+        si = keep_blanks[k][blanks_indexer[k]]
+
+        context_sentence = " ".join([corpus.dictionary.idx2word[c] for c in np_data[:, k]])
+        sampled_si = sampling_random_state.choice(np.arange(reduced_probs.shape[-1]), p=reduced_probs[si, k])
+        np_data[si + hp.context_len, k] = sampled_si
+        new_context_sentence = " ".join([corpus.dictionary.idx2word[c] for c in np_data[:, k]])
+
+        blanks_indexer[k] += 1
+        print(context_sentence)
+        print(new_context_sentence)
+        from IPython import embed; embed(); raise ValueError()
+
+
     context_sentence = " ".join([corpus.dictionary.idx2word[c] for c in np_data[:hp.context_len + 1, 0]])
     sampled_sentence = " ".join([corpus.dictionary.idx2word[c] for c in np_data[hp.context_len + 1:, 0]])
     print("==================")

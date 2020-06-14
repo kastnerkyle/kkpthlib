@@ -96,7 +96,7 @@ from kkpthlib import StepIterator
 from kkpthlib import make_batches_from_list
 from kkpthlib import fetch_jsb_chorales
 from kkpthlib import piano_roll_from_music_json_file
-from kkpthlib import MusicJSONCorpus
+from kkpthlib import MusicJSONRasterCorpus
 from kkpthlib import convert_voice_roll_to_pitch_duration
 from kkpthlib import music_json_to_midi
 from kkpthlib import write_music_json
@@ -129,13 +129,13 @@ sample_len = args.sample_len
 
 seed_batches = []
 for i in range(batch_size):
-    corpus = MusicJSONCorpus(train_data_file_paths=train_files,
-                             valid_data_file_paths=[valid_files[i]])
+    corpus = MusicJSONRasterCorpus(train_data_file_paths=train_files,
+                                   valid_data_file_paths=[valid_files[i]])
     seed_batches.append(np.array(corpus.valid[:sample_len]))
 
 # make the full corpus to ensure vocabulary matches training
-corpus = MusicJSONCorpus(train_data_file_paths=train_files,
-                         valid_data_file_paths=valid_files)
+corpus = MusicJSONRasterCorpus(train_data_file_paths=train_files,
+                               valid_data_file_paths=valid_files)
 
 min_len = min([sb.shape[0] for sb in seed_batches])
 if sample_len < min_len:
