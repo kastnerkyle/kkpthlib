@@ -2606,9 +2606,12 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
                        scale):
 
         """Core relative positional attention operations."""
+        # [qlen x bsz x n_head x d_head]
         # q_head
+
         # [klen x bsz x n_head x d_head]
         # i_head_k
+
         # [qlen x klen x bsz x n_head]
         # content based attention score
         AC = torch.einsum('ibnd,jbnd->ijbn', (q_head + local_bias_ac, k_head_h))
@@ -2877,8 +2880,14 @@ class AWDXLNetDecoderBlock(nn.Module):
             perm_mask_0, perm_order_0 = _xlnet_make_ar_perm_mask(inp, tgt, mask, random_state=random_state, sequential_order=sequential_order)
 
             perm_mask_0 = perm_mask_0.astype("float32")
+
+            blocked_ind = np.where(np.array(mask) == False)[0][0]
             pad_u = np.zeros((context_cut, perm_mask_0.shape[1]))
+            pad_u = np.copy(perm_mask_0[blocked_ind][None]) + pad_u
+            # pad_u should respect the default "don't look at any targets" setting to avoid data leaks
             perm_mask_0 = np.concatenate((pad_u, perm_mask_0), axis=0)
+
+            # pad_l is covering context info, which is all valid to be looked at
             pad_l = np.zeros((perm_mask_0.shape[0], context_cut))
             perm_mask_0 = np.concatenate((pad_l, perm_mask_0), axis=1)
 
@@ -2907,8 +2916,8 @@ class AWDXLNetDecoderBlock(nn.Module):
         targets = np.array(agg_target).transpose(1, 0).astype("float32")
         input_qs = np.array(agg_input_q).transpose(1, 0).astype("float32")
         input_ks = np.array(agg_input_q).transpose(1, 0).astype("float32")
-        # num_predict, tgt_len, bsz
-        target_mappings = np.array(agg_target_mapping).transpose(2, 1, 0).astype("float32")
+        # num_predict, tgt_len, bsz?
+        target_mappings = np.array(agg_target_mapping).transpose(1, 2, 0).astype("float32")
         perm_orders = np.array(agg_perm_orders).transpose(1, 0).astype("float32")
         return perm_masks, target_mappings, target_masks, input_ks, input_qs, targets, perm_orders
 
@@ -2969,7 +2978,7 @@ class AWDXLNetDecoderBlock(nn.Module):
                 cat = torch.cat([list_of_mems[i], hiddens[i]], dim=0)
                 new_mems.append(cat[beg_idx:end_idx].detach())
         return new_mems
-
+#
 
     def forward(self, input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=None):
         if not list_of_mems:
@@ -3000,6 +3009,10 @@ class AWDXLNetDecoderBlock(nn.Module):
         pos_seq = torch.arange(klen, -1 if mlen == 0 else -qlen, -1.0, device=input_ks.device)
         pe = self.pos_emb(pos_seq, batch_size=input_ks.shape[1])
         # one longer than because _rel_shift reduces size by 1
+
+        if target_mappings is not None:
+            input_qs = input_qs[target_masks == 1]
+            input_qs = input_qs.reshape(-1, input_ks.shape[1], input_qs.shape[-1])
 
         hids = []
         output_h = self.locked_drop_i(input_ks)

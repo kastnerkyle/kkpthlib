@@ -23,23 +23,29 @@ from kkpthlib import run_loop
 
 hp = HParams(memory_len=20,
              context_len=64,
-             max_sequence_length=256,
+             max_sequence_length=128,
              transformer_input_dim=380,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
              learning_rate=1E-4,
              min_learning_rate=1E-6,
              clip=.25,
-             batch_size=15,
+             batch_size=11,
              n_layers=16,
-             #input_dropout_keep_prob=.4,
-             #output_dropout_keep_prob=.5,
-             #embedding_dropout_keep_prob=.8,
+
              embedding_dropout_keep_prob=.8,
              input_dropout_keep_prob=.4,
              inner_dropout_keep_prob=.8,
              hidden_dropout_keep_prob=1.,
              attention_dropout_keep_prob=.8,
              output_dropout_keep_prob=.5,
+
+             #embedding_dropout_keep_prob=.9,
+             #input_dropout_keep_prob=.9,
+             #inner_dropout_keep_prob=.9,
+             #hidden_dropout_keep_prob=1.,
+             #attention_dropout_keep_prob=.9,
+             #output_dropout_keep_prob=.9,
+
              data_storage_dir="kjv",
              max_vocabulary_size=10000,
              random_seed=2122)
@@ -153,7 +159,8 @@ if __name__ == "__main__":
             pad_l = np.zeros((hp.context_len, hp.batch_size))
             np_targets = np.concatenate((pad_l, np_targets))
             np_target_masks = np.concatenate((pad_l, np_target_masks))
-            pad_r = np.zeros((len(np_target_mappings) - len(np_targets), hp.batch_size))
+            # assume len(np_input_ks) == orig len(targets)
+            pad_r = np.zeros((len(np_input_ks) - len(np_targets), hp.batch_size))
             np_targets = np.concatenate((np_targets, pad_r))
             np_target_masks = np.concatenate((np_target_masks, pad_r))
 
@@ -170,12 +177,16 @@ if __name__ == "__main__":
         perm_masks = torch.tensor(np_perm_masks).to(hp.use_device)
         target_masks = torch.tensor(np_target_masks).to(hp.use_device)
 
-        # this one doesn't - need to cut manually to match target
-        target_mappings = torch.tensor(np_target_mappings).to(hp.use_device)
+        if np_target_mappings is not None:
+            target_mappings = torch.tensor(np_target_mappings).to(hp.use_device)
+        else:
+            target_mappings = None
 
         in_mems = stateful_args
-
-        out_h, out_g, out_mems = model(input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=in_mems)
+        if extras["train"]:
+            out_h, out_g, out_mems = model(input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=in_mems)
+        else:
+            out_h, out_g, out_mems = model(input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=None)
 
         # slicing here is bad times for NaN in the model
         # do it with pad masks and moving the targets instead
@@ -185,8 +196,8 @@ if __name__ == "__main__":
         #loss = loss.sum() / target_masks.sum()
         #from IPython import embed; embed(); raise ValueError()
 
-        loss = loss_fun(out_g, targets)
-        loss = target_masks * loss
+        loss = loss_fun(out_g, targets[:out_g.shape[0]])
+        #loss = target_masks * loss
         loss = loss.sum() / target_masks.sum()
 
         l = loss.cpu().data.numpy()
@@ -200,6 +211,9 @@ if __name__ == "__main__":
             #from IPython import embed; embed(); raise ValueError()
             clipping_grad_norm_(model.parameters(), hp.clip)
             optimizer.step()
+        else:
+            # don't carry over valid memories into train, just copy the train ones over
+            out_mems = in_mems
         return l, None, out_mems
 
     """
