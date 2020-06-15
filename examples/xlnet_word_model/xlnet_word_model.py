@@ -23,13 +23,13 @@ from kkpthlib import run_loop
 
 hp = HParams(memory_len=20,
              context_len=64,
-             max_sequence_length=128,
+             max_sequence_length=256,
              transformer_input_dim=380,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
              learning_rate=1E-4,
              min_learning_rate=1E-6,
              clip=.25,
-             batch_size=11,
+             batch_size=20,
              n_layers=16,
 
              embedding_dropout_keep_prob=.8,
@@ -156,6 +156,7 @@ if __name__ == "__main__":
         if np_target_mappings is not None:
             np_targets = np_targets[np_target_masks == 1].reshape(-1, hp.batch_size)
             np_target_masks = np_target_masks[np_target_masks == 1].reshape(-1, hp.batch_size)
+
             pad_l = np.zeros((hp.context_len, hp.batch_size))
             np_targets = np.concatenate((pad_l, np_targets))
             np_target_masks = np.concatenate((pad_l, np_target_masks))
@@ -196,9 +197,10 @@ if __name__ == "__main__":
         #loss = loss.sum() / target_masks.sum()
         #from IPython import embed; embed(); raise ValueError()
 
-        loss = loss_fun(out_g, targets[:out_g.shape[0]])
+        loss = loss_fun(out_g, targets[hp.context_len:hp.context_len + out_g.shape[0]])
         #loss = target_masks * loss
-        loss = loss.sum() / target_masks.sum()
+        #loss = loss.sum() / target_masks.sum()
+        loss = loss.mean()
 
         l = loss.cpu().data.numpy()
         optimizer.zero_grad()

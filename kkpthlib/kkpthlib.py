@@ -2899,6 +2899,7 @@ class AWDXLNetDecoderBlock(nn.Module):
 
             input_q_0 = np.copy(target_mask_0)
             input_k_0 = np.copy(full_inp)
+
             target_0 = np.copy(full_tgt)
 
             agg_input_q.append(input_q_0)
@@ -2915,7 +2916,7 @@ class AWDXLNetDecoderBlock(nn.Module):
         target_masks = np.array(agg_target_mask).transpose(1, 0).astype("float32")
         targets = np.array(agg_target).transpose(1, 0).astype("float32")
         input_qs = np.array(agg_input_q).transpose(1, 0).astype("float32")
-        input_ks = np.array(agg_input_q).transpose(1, 0).astype("float32")
+        input_ks = np.array(agg_input_k).transpose(1, 0).astype("float32")
         # num_predict, tgt_len, bsz?
         target_mappings = np.array(agg_target_mapping).transpose(1, 2, 0).astype("float32")
         perm_orders = np.array(agg_perm_orders).transpose(1, 0).astype("float32")
