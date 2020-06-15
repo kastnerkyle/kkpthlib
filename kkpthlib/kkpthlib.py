@@ -2636,6 +2636,10 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
             # can define either 2d or 3d mask here, but will need to be very careful about what is 0 and what is 1
             elif attention_mask.dim() == 3:
                 attention_score.masked_fill_(attention_mask[:, :, :, None], -float('inf'))
+            elif attention_mask.dim() == 4:
+                attention_score.masked_fill_(attention_mask, -float('inf'))
+            else:
+                raise ValueError("Attention mask dim unhandled in _rel_attn_core")
 
         # alternative method which can preserve attn summing to 1
         #faker = 0. * attention_score + 1.
