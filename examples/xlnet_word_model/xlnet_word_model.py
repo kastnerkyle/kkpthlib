@@ -23,28 +23,31 @@ from kkpthlib import run_loop
 
 hp = HParams(memory_len=20,
              context_len=64,
-             max_sequence_length=256,
+             max_sequence_length=128,
              transformer_input_dim=380,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
-             learning_rate=1E-4,
+             learning_rate=1E-5,
              min_learning_rate=1E-6,
              clip=.25,
-             batch_size=20,
-             n_layers=16,
+             batch_size=6,
+             n_layers=24,
 
-             embedding_dropout_keep_prob=.8,
-             input_dropout_keep_prob=.4,
-             inner_dropout_keep_prob=.8,
+             #embedding_dropout_keep_prob=.8,
+             #input_dropout_keep_prob=.9,
+             #inner_dropout_keep_prob=.9,
+             #hidden_dropout_keep_prob=.9,
+             #attention_dropout_keep_prob=.95,
+             #output_dropout_keep_prob=.8,
+
+             use_target_mappings=True,
+
+             embedding_dropout_keep_prob=1.,
+             input_dropout_keep_prob=1.,
+             inner_dropout_keep_prob=1.,
              hidden_dropout_keep_prob=1.,
-             attention_dropout_keep_prob=.8,
-             output_dropout_keep_prob=.5,
+             attention_dropout_keep_prob=1.,
+             output_dropout_keep_prob=1.,
 
-             #embedding_dropout_keep_prob=1.,
-             #input_dropout_keep_prob=1.,
-             #inner_dropout_keep_prob=1.,
-             #hidden_dropout_keep_prob=1.,
-             #attention_dropout_keep_prob=1.,
-             #output_dropout_keep_prob=1.,
 
              data_storage_dir="kjv",
              max_vocabulary_size=10000,
@@ -77,9 +80,11 @@ def build_model(hp):
                                                      random_state=random_state,
                                                      memory_len=hp.memory_len,
                                                      context_len=hp.context_len,
+                                                     n_layers=hp.n_layers, 
                                                      init="normal",
                                                      scale=0.02,
                                                      device=hp.use_device)
+
             self.out_proj = Linear([hp.transformer_input_dim],
                                     hp.max_vocabulary_size,
                                     random_state=random_state,
@@ -91,14 +96,16 @@ def build_model(hp):
         def forward(self, input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=None):
             xe_k, de_k = self.embedding_k(input_ks)
 
-            # target_mappings is not None case
-            # use xe_k for size broadcasting
-            # mask embedding is kind of silly with target_mappings provided
-            _q = 0. * xe_k.detach() + self.embedding_q[None, None]
-
-            xe_q = 0. * xe_k # set the prior embeddings to match the word ones
-            # everywhere there is a target, blank out the standard embedding and replace with the learned mask emb
-            xe_q = target_masks[..., None] * _q + (1. - target_masks[..., None]) * xe_k
+            if target_mappings == None:
+                # use xe_k for size broadcasting
+                _q = 0. * xe_k.detach() + self.embedding_q[None, None]
+                xe_q = 0. * xe_k.detach()
+                # everywhere there is a target, blank out the standard embedding and replace with the learned mask emb
+                # inside transformer if target_mappings is provided this gets sliced down
+                xe_q = target_masks[..., None] * _q + (1. - target_masks[..., None]) * xe_k
+            else:
+                # 
+                xe_q = 0. * xe_k[:target_masks.sum(dim=0).max().long()].detach() + self.embedding_q[None, None]
 
             out_h, out_g, l_o_m = self.transformer(xe_k, xe_q,
                                                    perm_masks,
@@ -147,15 +154,14 @@ if __name__ == "__main__":
 
     def loop(itr, extras, stateful_args):
         np_data = next(itr)
-
-        # +1 to account for autoregressive targets
-        # context_len because we have a reduction mapping - targets are a subset of the "target sequence", effectively
         np_perm_masks, np_target_mappings, np_target_masks, np_input_ks, np_input_qs, np_targets, np_perm_orders = model.transformer.make_inputs_targets_masks_and_mappings(np_data, K=6, context_cut=hp.context_len, random_state=gen_random_state)
 
-        #np_target_mappings = None
-        if np_target_mappings is not None:
-            np_targets = np_targets[np_target_masks == 1].reshape(-1, hp.batch_size)
-            np_target_masks = np_target_masks[np_target_masks == 1].reshape(-1, hp.batch_size)
+        if hp.use_target_mappings:
+            old = np.copy(np_targets)
+            old_subs = [old[np.where(np_target_masks[:, i])[0], i][None] for i in range(hp.batch_size)]
+            np_targets = np.concatenate(old_subs).transpose(1, 0)
+            # all 1s mask
+            np_target_masks = 0. * np_targets + 1.
 
             pad_l = np.zeros((hp.context_len, hp.batch_size))
             np_targets = np.concatenate((pad_l, np_targets))
@@ -164,13 +170,13 @@ if __name__ == "__main__":
             pad_r = np.zeros((len(np_input_ks) - len(np_targets), hp.batch_size))
             np_targets = np.concatenate((np_targets, pad_r))
             np_target_masks = np.concatenate((np_target_masks, pad_r))
+        else:
+            np_target_mappings = None
 
         input_ks = torch.tensor(np_input_ks).to(hp.use_device)
         input_qs = torch.tensor(np_input_qs).to(hp.use_device)
         targets = torch.tensor(np_targets).long().to(hp.use_device)
 
-        # input_data is input_k_0 in xlnet code
-        #input_data = input_data[:-1]
         input_ks = input_ks[..., None]
         input_qs = input_qs[..., None]
         targets = targets[..., None]
@@ -189,18 +195,15 @@ if __name__ == "__main__":
         else:
             out_h, out_g, out_mems = model(input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=None)
 
-        # slicing here is bad times for NaN in the model
-        # do it with pad masks and moving the targets instead
-        #targets = targets[target_masks == 1].reshape(-1, out_g.shape[1], 1).contiguous()
-        #loss = loss_fun(out_g[:targets.shape[0]].contiguous(), targets)
-        #loss = loss_fun(out_g[hp.context_len:hp.context_len + targets.shape[0], : , :].contiguous(), targets)
-        #loss = loss.sum() / target_masks.sum()
-        #from IPython import embed; embed(); raise ValueError()
-
-        loss = loss_fun(out_g, targets[hp.context_len:hp.context_len + out_g.shape[0]])
-        #loss = target_masks * loss
-        #loss = loss.sum() / target_masks.sum()
-        loss = loss.mean()
+        if target_mappings is None:
+            loss = loss_fun(out_g, targets)
+            loss = target_masks * loss
+            loss = loss.sum() / target_masks.sum()
+        else:
+            loss = loss_fun(out_g, targets[hp.context_len:(hp.context_len + out_g.shape[0])])
+            #loss = target_masks * loss
+            loss = loss.sum() / target_masks.sum()
+            #loss = loss.mean()
 
         l = loss.cpu().data.numpy()
         optimizer.zero_grad()

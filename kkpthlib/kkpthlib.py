@@ -1771,8 +1771,10 @@ class LockedDropout(nn.Module):
     def forward(self, x):
         if not self.training or self.dropout == 0.:
             return x
-        m = x.data.new(1, *x.size()[1:]).bernoulli_(1 - self.dropout, generator=self.g)
-        mask = Variable(m, requires_grad=False) / (1 - self.dropout)
+        pm = x.data.new(1, *x.size()[1:]).zero_()
+        pm = 0. * pm + (1. - self.dropout)
+        m = torch.bernoulli(pm, generator=self.g)
+        mask = Variable(m, requires_grad=False) / (1. - self.dropout)
         mask = mask.expand_as(x)
         return mask * x
 
@@ -1883,6 +1885,7 @@ class PositionwiseFeedforward(nn.Module):
         o_dim = sum(list_of_input_dims)
         self.i = Linear(list_of_input_dims,
                         projection_dim,
+                        biases=True,
                         random_state=random_state,
                         name=name_i,
                         strict=strict,
@@ -1893,7 +1896,7 @@ class PositionwiseFeedforward(nn.Module):
 
         self.o = Linear([projection_dim],
                          o_dim,
-                         biases=False,
+                         biases=True,
                          random_state=random_state,
                          name=name_o,
                          strict=strict,
@@ -1917,7 +1920,8 @@ class PositionwiseFeedforward(nn.Module):
         inp = torch.cat(list_of_inputs, dim=-1)
         s1 = relu(self.i([inp]))
         ds1 = self.ld1(s1)
-        s2 = self.o([s1])
+
+        s2 = self.o([ds1])
         ds2 = self.ld2(s2)
         return self.ln(ds2 + inp)
 
@@ -2036,6 +2040,8 @@ class RelativeMultiHeadAttention(nn.Module):
              # can define either 2d or 3d mask here, but will need to be very careful about what is 0 and what is 1
              elif attention_mask.dim() == 3:
                  attention_score.masked_fill_(attention_mask[:, :, :, None], -float('inf'))
+             else:
+                 raise ValueError("Attention_mask dim not handled in relative multihead attention!")
 
          faker = 0. * attention_score + 1.
          faker_mask = self.drop(faker)
@@ -2450,8 +2456,8 @@ def _xlnet_make_ar_perm_mask(inp, tgt, is_masked, random_state, sequential_order
     if not sequential_order:
         random_state.shuffle(shuffle_inds)
     else:
-        # reverse to get l to r order
-        shuffle_inds = shuffle_inds[::-1]
+        # l to r order
+        shuffle_inds = shuffle_inds
 
     index = np.arange(seq_len)
     index = index[shuffle_inds]
@@ -2631,13 +2637,15 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
 
         if attention_mask is not None and attention_mask.any().item():
             # fill 1s with neg inf, leave 0s alone!
+            #filler = -float('inf')
+            filler = -1E30
             if attention_mask.dim() == 2:
-                attention_score.masked_fill_(attention_mask[None, :, :, None], -float('inf'))
+                attention_score.masked_fill_(attention_mask[None, :, :, None], filler)
             # can define either 2d or 3d mask here, but will need to be very careful about what is 0 and what is 1
             elif attention_mask.dim() == 3:
-                attention_score.masked_fill_(attention_mask[:, :, :, None], -float('inf'))
+                attention_score.masked_fill_(attention_mask[:, :, :, None], filler)
             elif attention_mask.dim() == 4:
-                attention_score.masked_fill_(attention_mask, -float('inf'))
+                attention_score.masked_fill_(attention_mask, filler)
             else:
                 raise ValueError("Attention mask dim unhandled in _rel_attn_core")
 
@@ -2708,28 +2716,32 @@ class TwoStreamRelativeDecoderLayer(nn.Module):
         o_h = self.locked_drop_h(o_h)
         output_h = self.ln(h + o_h)
 
-        q_head_g = self.q_net([g])
-        q_head_g = q_head_g.view(g.size(0), batch_size, self.n_heads, self.head_dim)
-        if target_mappings is not None:
-            q_head_g = torch.einsum('mbnd,mlb->lbnd', (q_head_g, target_mappings))
-            attention_weighted_values_g = self._rel_attn_core(q_head_g, k_head_h, v_head_h, k_head_r,
-                                                              local_bias_ac,
-                                                              local_bias_bd,
-                                                              decoder_attention_mask_g, self.scale)
-            attention_weighted_values_g = attention_weighted_values_g.view(attention_weighted_values_g.size(0), batch_size, self.n_heads, self.head_dim).contiguous()
-            attention_weighted_values_g = torch.einsum('lbnd,mlb->mbnd', (attention_weighted_values_g, target_mappings))
-            attention_weighted_values_g = attention_weighted_values_g.view(attention_weighted_values_g.size(0), batch_size, self.n_heads * self.head_dim).contiguous()
+        if decoder_input_g is not None:
+            q_head_g = self.q_net([g])
+            q_head_g = q_head_g.view(g.size(0), batch_size, self.n_heads, self.head_dim)
+            if target_mappings is not None:
+                q_head_g = torch.einsum('mbnd,mlb->lbnd', (q_head_g, target_mappings))
+                attention_weighted_values_g = self._rel_attn_core(q_head_g, k_head_h, v_head_h, k_head_r,
+                                                                  local_bias_ac,
+                                                                  local_bias_bd,
+                                                                  decoder_attention_mask_g, self.scale)
+                attention_weighted_values_g = attention_weighted_values_g.view(attention_weighted_values_g.size(0), batch_size, self.n_heads, self.head_dim).contiguous()
+                attention_weighted_values_g = torch.einsum('lbnd,mlb->mbnd', (attention_weighted_values_g, target_mappings))
+                attention_weighted_values_g = attention_weighted_values_g.view(attention_weighted_values_g.size(0), batch_size, self.n_heads * self.head_dim).contiguous()
+            else:
+                attention_weighted_values_g = self._rel_attn_core(q_head_g, k_head_h, v_head_h, k_head_r,
+                                                                  local_bias_ac,
+                                                                  local_bias_bd,
+                                                                  decoder_attention_mask_g, self.scale)
+            o_g = self.o_net([attention_weighted_values_g])
+            o_g = self.locked_drop_g(o_g)
+            output_g = self.ln(g + o_g)
+
+            output_g = self.position_ff([output_g])
         else:
-            attention_weighted_values_g = self._rel_attn_core(q_head_g, k_head_h, v_head_h, k_head_r,
-                                                              local_bias_ac,
-                                                              local_bias_bd,
-                                                              decoder_attention_mask_g, self.scale)
-        o_g = self.o_net([attention_weighted_values_g])
-        o_g = self.locked_drop_g(o_g)
-        output_g = self.ln(g + o_g)
+            output_g = None
 
         output_h = self.position_ff([output_h])
-        output_g = self.position_ff([output_g])
         return output_h, output_g
 
 
@@ -2833,10 +2845,6 @@ class AWDXLNetDecoderBlock(nn.Module):
     def make_inputs_targets_masks_and_mappings(self, numpy_sequence_array, context_cut, start_check_function=None,
                                                K=6, max_n_gram=5, sequential_order=False, random_state=None):
         """
-        context_len should be accounted for!
-
-        numpy_sequence_array = np_data[hp.context_len:]
-
         """
         if random_state is None:
             raise ValueError("Random state necessary")
@@ -2904,12 +2912,18 @@ class AWDXLNetDecoderBlock(nn.Module):
             input_q_0 = np.copy(target_mask_0)
             input_k_0 = np.copy(full_inp)
 
-            target_0 = np.copy(full_tgt)
+            # See
+            # https://github.com/zihangdai/xlnet/issues/104
+            # masking prevents the current step from "seeing itself"
+            # basically, new_target becomes full_inp again
+            new_target = np.concatenate((full_inp[0:1], full_tgt[:-1]), axis=0)
+            target_0 = np.copy(new_target)
 
             agg_input_q.append(input_q_0)
             agg_input_k.append(input_k_0)
 
             agg_target.append(target_0)
+
             agg_perm_mask.append(perm_mask_0)
             agg_target_mask.append(target_mask_0)
             agg_target_mapping.append(target_mapping_0)
@@ -2983,7 +2997,6 @@ class AWDXLNetDecoderBlock(nn.Module):
                 cat = torch.cat([list_of_mems[i], hiddens[i]], dim=0)
                 new_mems.append(cat[beg_idx:end_idx].detach())
         return new_mems
-#
 
     def forward(self, input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=None):
         if not list_of_mems:
@@ -3003,10 +3016,10 @@ class AWDXLNetDecoderBlock(nn.Module):
         data_mask = torch.cat((mem_pad, context_pad, data_mask), 1)
         attn_mask = 1. * data_mask[:, :, :, None].bool()
 
-        # mask which allows non-targets to "see" the input for better context mixing
         excess_pad = input_ks.new_zeros((data_mask.shape[0], input_ks.shape[0] - data_mask.shape[0] + mlen))
         non_tgt_mask = -1 * torch.eye(data_mask.shape[0], dtype=excess_pad.dtype, device=excess_pad.device)
         non_tgt_mask = torch.cat((excess_pad, non_tgt_mask), -1)
+
         non_tgt_mask = attn_mask + non_tgt_mask[:, :, None, None]
         non_tgt_mask = 1. * (non_tgt_mask > 0)
 
@@ -3015,13 +3028,13 @@ class AWDXLNetDecoderBlock(nn.Module):
         pe = self.pos_emb(pos_seq, batch_size=input_ks.shape[1])
         # one longer than because _rel_shift reduces size by 1
 
-        if target_mappings is not None:
-            input_qs = input_qs[target_masks == 1]
-            input_qs = input_qs.reshape(-1, input_ks.shape[1], input_qs.shape[-1])
-
         hids = []
         output_h = self.locked_drop_i(input_ks)
-        output_g = self.locked_drop_i(input_qs)
+        if input_qs is not None:
+            output_g = self.locked_drop_i(input_qs)
+        else:
+            output_g = None
+
         pe = self.locked_drop_i(pe)
         for i, this_layer in enumerate(self.layers):
             hids.append(output_h)
@@ -3035,7 +3048,11 @@ class AWDXLNetDecoderBlock(nn.Module):
                                             memory=mems_i)
             if i < len(self.layers) - 1:
                 output_h = self.locked_drop_h_h(output_h)
-                output_g = self.locked_drop_h_g(output_g)
+                if input_qs is not None:
+                    output_g = self.locked_drop_h_g(output_g)
+                else:
+                    output_g = None
+
 
         # update memory
         # mlen = 0
@@ -3046,6 +3063,9 @@ class AWDXLNetDecoderBlock(nn.Module):
 
         # slice according to context_len, normally set to 0
         # in original code they do this via target size, but we don't have that information
-        output_g = self.locked_drop_o(output_g)
         output_h = self.locked_drop_o(output_h)
+        if input_qs is not None:
+            output_g = self.locked_drop_o(output_g)
+        else:
+            output_g = None
         return output_h, output_g, new_mems

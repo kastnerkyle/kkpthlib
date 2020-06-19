@@ -108,58 +108,99 @@ true_data = np_data.copy()
 
 gen_random_state = np.random.RandomState(hp.random_seed + 3)
 
-np_perm_masks, np_target_mappings, np_target_masks, np_input_qs, np_perm_orders = model.transformer.make_masks_and_mappings(np_data, context_cut=hp.context_len, random_state=gen_random_state, sequential_order=True)
+np_perm_masks, np_target_mappings, np_target_masks, np_input_ks, np_input_qs, np_targets, np_perm_orders = model.transformer.make_inputs_targets_masks_and_mappings(np_data, K=6, context_cut=hp.context_len, random_state=gen_random_state, sequential_order=True)
 
 out_mems = None
 
-finished = [False] * np_data.shape[1]
-blanks_indexer = [0] * np_data.shape[1]
-keep_blanks = []
-keep_offset_blanks = []
-for k in range(np_data.shape[1]):
-    blanks = np.where(np_target_masks[:, k])[0]
-    keep_blanks.append(blanks)
-    # account for context len offset
-    offset_blanks = [b + hp.context_len for b in blanks]
-    keep_offset_blanks.append(offset_blanks)
-    np_data[offset_blanks, k] = corpus.dictionary.word2idx["<unk>"]
+num_blanks = np.sum(np_target_masks, axis=0)
+num_filled = 0. * num_blanks
+orig_np_target_masks = np.copy(np_target_masks)
 
-while True:
-    in_mems = None
-    #in_mems = out_mems
+in_mems = None
+#in_mems = out_mems
 
-    input_data = torch.tensor(np_data).to(hp.use_device)
-    input_data = input_data[..., None]
+np_target_mappings = None
+if np_target_mappings is not None:
+    np_targets = np_targets[np_target_masks == 1].reshape(-1, hp.batch_size)
+    np_target_masks = np_target_masks[np_target_masks == 1].reshape(-1, hp.batch_size)
 
-    # these 3 use context_cut
-    # can sanity check using perm_masks = 0. aka everything looks at everything
-    perm_masks = torch.tensor(np_perm_masks).to(hp.use_device)
-    target_masks = torch.tensor(np_target_masks).to(hp.use_device)
-    input_qs = torch.tensor(np_input_qs).to(hp.use_device)
+    pad_l = np.zeros((hp.context_len, hp.batch_size))
+    np_targets = np.concatenate((pad_l, np_targets))
+    np_target_masks = np.concatenate((pad_l, np_target_masks))
+    # assume len(np_input_ks) == orig len(targets)
+    pad_r = np.zeros((len(np_input_ks) - len(np_targets), hp.batch_size))
+    np_targets = np.concatenate((np_targets, pad_r))
+    np_target_masks = np.concatenate((np_target_masks, pad_r))
 
-    # this one doesn't - need to cut manually to match target
+input_ks = torch.tensor(np_input_ks).to(hp.use_device)
+input_qs = torch.tensor(np_input_qs).to(hp.use_device)
+targets = torch.tensor(np_targets).long().to(hp.use_device)
+
+input_ks = input_ks[..., None]
+input_qs = input_qs[..., None]
+targets = targets[..., None]
+
+perm_masks = torch.tensor(np_perm_masks).to(hp.use_device)
+target_masks = torch.tensor(np_target_masks).to(hp.use_device)
+
+if np_target_mappings is not None:
     target_mappings = torch.tensor(np_target_mappings).to(hp.use_device)
+else:
+    target_mappings = None
 
-    perm_masks[0, 1, :] = 0.
-    out_h, out_g, out_mems = model(input_data, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=in_mems)
+# loop through and UNK out to be assured of no leaks?
+# update: placing UNK here makes things worse, even though it shouldn't 
+for k in range(np_data.shape[1]):
+    blank_spots = np.where(orig_np_target_masks[:, k])[0]
+    np_data[blank_spots, k] = corpus.dictionary.word2idx["<unk>"]
+
+all_sentences = [list() for i in range(np_data.shape[1])]
+finished_sampling = [False for i in range(np_data.shape[1])]
+while not all(finished_sampling):
+    print("step {} done".format(max(num_filled)))
+    np_input_ks = np_data[:-1].astype("float32")
+    input_ks = torch.tensor(np_input_ks).to(hp.use_device)
+    input_ks = input_ks[..., None]
+
+    #input_qs = None
+
+    # modify perm masks and target masks?
+    # once we sample, should we recreate the perm masks and target masks with one less
+
+    out_h, out_g, out_mems = model(input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=in_mems)
     temp = .9
     reduced = top_p_from_logits_np(out_g.cpu().data.numpy() / temp, .95)
     reduced_probs = softmax_np(reduced)
+
     for k in range(np_data.shape[1]):
-        # element we are sampling
-        si = keep_blanks[k][blanks_indexer[k]]
+        blank_spots = np.where(orig_np_target_masks[:, k])[0]
+        si = int(num_filled[k])
+
+        if si >= len(blank_spots):
+            finished_sampling[k] = True
+            continue
+
+        blank_spot = blank_spots[si]
+        #perm_masks[:, blank_spot, k] = 0.
+        #target_masks[blank_spot, k] = 0.
+        #input_qs[blank_spot, k, 0] = 0.
 
         context_sentence = " ".join([corpus.dictionary.idx2word[c] for c in np_data[:, k]])
-        sampled_si = sampling_random_state.choice(np.arange(reduced_probs.shape[-1]), p=reduced_probs[si, k])
-        np_data[si + hp.context_len, k] = sampled_si
+        if len(all_sentences[k]) == 0:
+            all_sentences[k].append(context_sentence)
+
+        sampled_i = sampling_random_state.choice(np.arange(reduced_probs.shape[-1]), p=reduced_probs[si, k])
+
+        np_data[blank_spot, k] = sampled_i
+
         new_context_sentence = " ".join([corpus.dictionary.idx2word[c] for c in np_data[:, k]])
+        all_sentences[k].append(new_context_sentence)
 
-        blanks_indexer[k] += 1
-        print(context_sentence)
-        print(new_context_sentence)
-        from IPython import embed; embed(); raise ValueError()
+        num_filled[k] += 1
+from IPython import embed; embed(); raise ValueError()
 
-
+# do a true sampling?
+if False:
     context_sentence = " ".join([corpus.dictionary.idx2word[c] for c in np_data[:hp.context_len + 1, 0]])
     sampled_sentence = " ".join([corpus.dictionary.idx2word[c] for c in np_data[hp.context_len + 1:, 0]])
     print("==================")
