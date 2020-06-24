@@ -32,22 +32,21 @@ hp = HParams(memory_len=20,
              batch_size=6,
              n_layers=24,
 
-             #embedding_dropout_keep_prob=.8,
-             #input_dropout_keep_prob=.9,
-             #inner_dropout_keep_prob=.9,
-             #hidden_dropout_keep_prob=.9,
-             #attention_dropout_keep_prob=.95,
-             #output_dropout_keep_prob=.8,
+             embedding_dropout_keep_prob=.9,
+             input_dropout_keep_prob=.9,
+             inner_dropout_keep_prob=.9,
+             hidden_dropout_keep_prob=.9,
+             attention_dropout_keep_prob=.95,
+             output_dropout_keep_prob=.8,
 
              use_target_mappings=True,
 
-             embedding_dropout_keep_prob=1.,
-             input_dropout_keep_prob=1.,
-             inner_dropout_keep_prob=1.,
-             hidden_dropout_keep_prob=1.,
-             attention_dropout_keep_prob=1.,
-             output_dropout_keep_prob=1.,
-
+             #embedding_dropout_keep_prob=1.,
+             #input_dropout_keep_prob=1.,
+             #inner_dropout_keep_prob=1.,
+             #hidden_dropout_keep_prob=1.,
+             #attention_dropout_keep_prob=1.,
+             #output_dropout_keep_prob=1.,
 
              data_storage_dir="kjv",
              max_vocabulary_size=10000,
@@ -80,7 +79,7 @@ def build_model(hp):
                                                      random_state=random_state,
                                                      memory_len=hp.memory_len,
                                                      context_len=hp.context_len,
-                                                     n_layers=hp.n_layers, 
+                                                     n_layers=hp.n_layers,
                                                      init="normal",
                                                      scale=0.02,
                                                      device=hp.use_device)
@@ -106,6 +105,17 @@ def build_model(hp):
             else:
                 # 
                 xe_q = 0. * xe_k[:target_masks.sum(dim=0).max().long()].detach() + self.embedding_q[None, None]
+
+            # debug hooks for grad checks
+            #xe_k = xe_k.detach()
+            #xe_q = xe_q.detach()
+
+            #self.tmp_k = xe_k
+            #self.tmp_k.requires_grad = True
+            #self.tmp_q = xe_q
+            #self.tmp_q.requires_grad = True
+
+            #xe_k.detach()
 
             out_h, out_g, l_o_m = self.transformer(xe_k, xe_q,
                                                    perm_masks,
@@ -154,7 +164,7 @@ if __name__ == "__main__":
 
     def loop(itr, extras, stateful_args):
         np_data = next(itr)
-        np_perm_masks, np_target_mappings, np_target_masks, np_input_ks, np_input_qs, np_targets, np_perm_orders = model.transformer.make_inputs_targets_masks_and_mappings(np_data, K=6, context_cut=hp.context_len, random_state=gen_random_state)
+        np_perm_masks, np_target_mappings, np_target_masks, np_input_ks, np_input_qs, np_targets, np_perm_orders = model.transformer.make_inputs_targets_masks_and_mappings(np_data, K=6, context_cut=hp.context_len, random_state=gen_random_state, sequential_order=True)
 
         if hp.use_target_mappings:
             old = np.copy(np_targets)
@@ -209,11 +219,6 @@ if __name__ == "__main__":
         optimizer.zero_grad()
         if extras["train"]:
             loss.backward()
-            #clipping_grad_value_(model.named_parameters(), hp.clip, named_check=True)
-            #clipping_grad_value_(model.parameters(), hp.clip)
-            # check LARGE gradients on LN biases
-            #clipping_grad_norm_(model.named_parameters(), hp.clip, named_check=True)
-            #from IPython import embed; embed(); raise ValueError()
             clipping_grad_norm_(model.parameters(), hp.clip)
             optimizer.step()
         else:

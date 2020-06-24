@@ -119,10 +119,12 @@ orig_np_target_masks = np.copy(np_target_masks)
 in_mems = None
 #in_mems = out_mems
 
-np_target_mappings = None
-if np_target_mappings is not None:
-    np_targets = np_targets[np_target_masks == 1].reshape(-1, hp.batch_size)
-    np_target_masks = np_target_masks[np_target_masks == 1].reshape(-1, hp.batch_size)
+if hp.use_target_mappings:
+    old = np.copy(np_targets)
+    old_subs = [old[np.where(np_target_masks[:, i])[0], i][None] for i in range(hp.batch_size)]
+    np_targets = np.concatenate(old_subs).transpose(1, 0)
+    # all 1s mask
+    np_target_masks = 0. * np_targets + 1.
 
     pad_l = np.zeros((hp.context_len, hp.batch_size))
     np_targets = np.concatenate((pad_l, np_targets))
@@ -131,6 +133,9 @@ if np_target_mappings is not None:
     pad_r = np.zeros((len(np_input_ks) - len(np_targets), hp.batch_size))
     np_targets = np.concatenate((np_targets, pad_r))
     np_target_masks = np.concatenate((np_target_masks, pad_r))
+else:
+    np_target_mappings = None
+
 
 input_ks = torch.tensor(np_input_ks).to(hp.use_device)
 input_qs = torch.tensor(np_input_qs).to(hp.use_device)
@@ -148,13 +153,13 @@ if np_target_mappings is not None:
 else:
     target_mappings = None
 
-# loop through and UNK out to be assured of no leaks?
-# update: placing UNK here makes things worse, even though it shouldn't 
+
+# loop through and UNK out to be assured of no leaks
 for k in range(np_data.shape[1]):
     blank_spots = np.where(orig_np_target_masks[:, k])[0]
     np_data[blank_spots, k] = corpus.dictionary.word2idx["<unk>"]
 
-all_sentences = [list() for i in range(np_data.shape[1])]
+filled_sentences = [list() for i in range(np_data.shape[1])]
 finished_sampling = [False for i in range(np_data.shape[1])]
 while not all(finished_sampling):
     print("step {} done".format(max(num_filled)))
@@ -169,7 +174,13 @@ while not all(finished_sampling):
 
     out_h, out_g, out_mems = model(input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=in_mems)
     temp = .9
+
+    #unk_index = corpus.dictionary.word2idx["<unk>"]
+    # don't let it predict UNK
+    #out_g[:, :, unk_index] = -1E30
+
     reduced = top_p_from_logits_np(out_g.cpu().data.numpy() / temp, .95)
+    # don't let it predict unk
     reduced_probs = softmax_np(reduced)
 
     for k in range(np_data.shape[1]):
@@ -180,24 +191,30 @@ while not all(finished_sampling):
             finished_sampling[k] = True
             continue
 
+        if np_target_mappings is None:
+            print("ARE WE HANDLING NP_TARGET_MAPPINGS CORRECTLY AND INDEXING APPROPRIATELY")
+            from IPython import embed; embed(); raise ValueError()
+
         blank_spot = blank_spots[si]
         #perm_masks[:, blank_spot, k] = 0.
         #target_masks[blank_spot, k] = 0.
         #input_qs[blank_spot, k, 0] = 0.
 
         context_sentence = " ".join([corpus.dictionary.idx2word[c] for c in np_data[:, k]])
-        if len(all_sentences[k]) == 0:
-            all_sentences[k].append(context_sentence)
+        if len(filled_sentences[k]) == 0:
+            filled_sentences[k].append(context_sentence)
 
         sampled_i = sampling_random_state.choice(np.arange(reduced_probs.shape[-1]), p=reduced_probs[si, k])
 
         np_data[blank_spot, k] = sampled_i
 
         new_context_sentence = " ".join([corpus.dictionary.idx2word[c] for c in np_data[:, k]])
-        all_sentences[k].append(new_context_sentence)
+        filled_sentences[k].append(new_context_sentence)
 
         num_filled[k] += 1
+
 from IPython import embed; embed(); raise ValueError()
+np_data = np_data[:hp.context_len]
 
 # do a true sampling?
 if False:
