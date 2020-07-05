@@ -731,9 +731,9 @@ class MusicJSONFlatMeasureCorpus(object):
         flat_voice = []
 
         flat_pitch.append(self.measure_value)
-        flat_duration.append(self.measure_value)
-        flat_velocity.append(self.measure_value)
-        flat_voice.append(self.measure_value)
+        flat_duration.append(self.fill_value)
+        flat_velocity.append(self.fill_value)
+        flat_voice.append(len(pitch))
 
         for i in range(len(group[0][0])):
             for v in range(len(group)):
@@ -747,9 +747,9 @@ class MusicJSONFlatMeasureCorpus(object):
                 flat_velocity.extend(m_v)
                 flat_voice.extend(m_vv)
             flat_pitch.append(self.measure_value)
-            flat_duration.append(self.measure_value)
-            flat_velocity.append(self.measure_value)
-            flat_voice.append(self.measure_value)
+            flat_duration.append(self.fill_value)
+            flat_velocity.append(self.fill_value)
+            flat_voice.append(len(pitch))
         return flat_pitch, flat_duration, flat_velocity, flat_voice
 
 

@@ -18,7 +18,8 @@ def batchify(data, bsz, args):
     return data
 """
 
-def make_batches_from_list(list_of_data, batch_size, sequence_length, overlap=0):
+def make_batches_from_list(list_of_data, batch_size, sequence_length, overlap=0, cut_points=None,
+                            fill_value="auto"):
     """
     this function truncates ragged batches
     """
@@ -28,7 +29,18 @@ def make_batches_from_list(list_of_data, batch_size, sequence_length, overlap=0)
     chunk_size = len(list_of_data) // int(batch_size)
     # use the classic zip-splat-iter trick
     # naturally truncates due to zip
+
+    # one above the max should be guaranteed unique...
+    if cut_points is not None:
+        # TODO: handle non-integer case?
+        fill_value = max(list(set(list_of_data))) + 1
+
+    # group into long chunks, total of batch_size
     rs = list(zip(*[iter(list_of_data)] * chunk_size))
+    if cut_points is not None:
+        # group into long chunks, total of batch_size
+        assert len(cut_points) == len(list_of_data)
+        cuts = list(zip(*[iter(cut_points)] * chunk_size))
     assert len(rs) == batch_size
     assert overlap < sequence_length
     ro = []
@@ -38,8 +50,21 @@ def make_batches_from_list(list_of_data, batch_size, sequence_length, overlap=0)
         for i in range(len(rs[0]) // (sequence_length - overlap)):
             start = i * (sequence_length - overlap)
             stop = start + sequence_length
-            rj.append(r[start:stop])
+            if cut_points is not None:
+                # tweak so that is starts and stops on a boundary?
+                candidates = [s for s in range(start, min(stop, len(cuts[j]))) if cuts[j][s]]
+                start = candidates[0]
+                stop = candidates[-1]
+                leftover = sequence_length - len(r[start:stop])
+                if leftover > 0:
+                    # now we are right back to padding / masking again...
+                    rj.append(list(r[start:stop]) + [fill_value for i in range(leftover)])
+                else:
+                    rj.append(r[start:stop])
+            else:
+                rj.append(r[start:stop])
         if len(rj[0]) != len(rj[-1]):
+            # cut the last ragged one?
             assert len(rj) > 1
             rj = rj[:-1]
         assert len(rj[0]) == len(rj[-1])

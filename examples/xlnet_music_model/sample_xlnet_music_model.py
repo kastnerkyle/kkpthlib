@@ -101,7 +101,11 @@ vrng.shuffle(bwv_names)
 valid_names = bwv_names[:15]
 train_files = [f for f in all_transposed if all([vn not in f for vn in valid_names])]
 valid_files = [f for f in all_transposed if any([vn in f for vn in valid_names])]
+assert all([vf not in train_files for vf in valid_files])
 
+# shuffle the train and valid files before we make the flat_measure_corpus
+vrng.shuffle(train_files)
+vrng.shuffle(valid_files)
 flat_measure_corpus = MusicJSONFlatMeasureCorpus(train_data_file_paths=train_files,
                                                  valid_data_file_paths=valid_files)
 
@@ -132,11 +136,28 @@ sampling_random_state = np.random.RandomState(2123)
 np_data = next(valid_itr)
 true_data = np_data.copy()
 
+midi_sample_dir = "midi_samples"
+if not os.path.exists(midi_sample_dir):
+    os.mkdir(midi_sample_dir)
+
+for i in range(true_data.shape[1]):
+    pitches = [flat_measure_corpus.pitch_dictionary.idx2word[c] for c in true_data[:, i, 0]]
+    durations = [flat_measure_corpus.duration_dictionary.idx2word[c] for c in true_data[:, i, 1]]
+    data = convert_voice_lists_to_music_json(pitch_lists=pitches, duration_lists=durations, voices_list=true_data[:, i, -1])
+
+    json_fpath = midi_sample_dir + os.sep + "true{}.json".format(i)
+    write_music_json(data, json_fpath)
+
+    fpath = midi_sample_dir + os.sep + "true{}.midi".format(i)
+    music_json_to_midi(data, fpath)
+    print("Wrote out {}".format(fpath))
+
 gen_random_state = np.random.RandomState(hp.random_seed + 3)
 
 np_pitch_data = np_data[..., 0]
 np_perm_masks, np_target_mappings, np_target_masks, _, _, _, np_perm_orders = model.transformer.make_inputs_targets_masks_and_mappings(
-    np_pitch_data, K=6, context_cut=hp.context_len, random_state=gen_random_state, sequential_order=True)
+    np_pitch_data, K=hp.mask_K, max_n_gram=hp.max_n_gram,
+    context_cut=hp.context_len, random_state=gen_random_state, sequential_order=True)
 
 np_targets = np_pitch_data[:-1]
 # will have to split this up
@@ -250,21 +271,6 @@ while not all(finished_sampling):
         filled_sequences[k].append(new_context_sequence)
 
         num_filled[k] += 1
-
-midi_sample_dir = "midi_samples"
-if not os.path.exists(midi_sample_dir):
-    os.mkdir(midi_sample_dir)
-
-for i in range(np_data.shape[1]):
-    pitches = [flat_measure_corpus.pitch_dictionary.idx2word[c] for c in np_data[:, i, 0]]
-    durations = [flat_measure_corpus.duration_dictionary.idx2word[c] for c in np_data[:, i, 1]]
-    data = convert_voice_lists_to_music_json(pitch_lists=pitches, duration_lists=durations, voices_list=np_data[:, i, -1])
-    json_fpath = midi_sample_dir + os.sep + "sampled{}.json".format(i)
-    write_music_json(data, json_fpath)
-
-    fpath = midi_sample_dir + os.sep + "sampled{}.midi".format(i)
-    music_json_to_midi(data, fpath)
-    print("Wrote out {}".format(fpath))
 
 for i in range(true_data.shape[1]):
     pitches = [flat_measure_corpus.pitch_dictionary.idx2word[c] for c in true_data[:, i, 0]]

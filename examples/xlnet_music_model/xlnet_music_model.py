@@ -21,20 +21,23 @@ from kkpthlib import RampOpt
 from kkpthlib import run_loop
 
 from kkpthlib import fetch_jsb_chorales
-from kkpthlib import piano_roll_from_music_json_file
 from kkpthlib import MusicJSONFlatMeasureCorpus
+from kkpthlib import convert_voice_lists_to_music_json
+from kkpthlib import music_json_to_midi
+from kkpthlib import write_music_json
 
 hp = HParams(memory_len=20,
              context_len=64,
-             max_sequence_length=128,
+             max_sequence_length=256,
              transformer_input_dim=380,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
              learning_rate=1E-5,
              min_learning_rate=1E-6,
              clip=.25,
-             batch_size=6,
+             batch_size=12,
              n_layers=24,
-
+             mask_K=6,
+             max_n_gram=24,
              embedding_dropout_keep_prob=.9,
              input_dropout_keep_prob=1.,
              inner_dropout_keep_prob=1.,
@@ -52,7 +55,7 @@ hp = HParams(memory_len=20,
              #output_dropout_keep_prob=1.,
 
              data_storage_dir="kjv",
-             max_vocabulary_size=68,
+             max_vocabulary_size=69,
              random_seed=2122)
 
 
@@ -160,22 +163,31 @@ if __name__ == "__main__":
     bwv_names = sorted(list(set([f.split(os.sep)[-1].split(".")[0] for f in all_transposed])))
     vrng = np.random.RandomState(144)
     vrng.shuffle(bwv_names)
-    # 15 is ~5% of the data
+
+    # 15 is ~5% of the data if you hold out all 12 transpositions
     # holding out whole songs so actually a pretty hard validation set...
     valid_names = bwv_names[:15]
     train_files = [f for f in all_transposed if all([vn not in f for vn in valid_names])]
     valid_files = [f for f in all_transposed if any([vn in f for vn in valid_names])]
+    assert all([vf not in train_files for vf in valid_files])
 
+    # shuffle the train and valid files before we make the flat_measure_corpus
+    vrng.shuffle(train_files)
+    vrng.shuffle(valid_files)
     flat_measure_corpus = MusicJSONFlatMeasureCorpus(train_data_file_paths=train_files,
                                                      valid_data_file_paths=valid_files)
 
     # length of that list is the number of feature groups!
+
     train_batches = None
     valid_batches = None
+    # we need to only cut sequences on "start points" where all 4 voices begin. Otherwise there are a lot of alignment issues in prediction
+    train_cut_points = [p == flat_measure_corpus.pitch_dictionary.word2idx[99] for p in flat_measure_corpus.train[0]]
+    valid_cut_points = [p == flat_measure_corpus.pitch_dictionary.word2idx[99] for p in flat_measure_corpus.valid[0]]
     for v in range(len(flat_measure_corpus.train)):
         # num_batch_steps, time_length_of_batch, batch_size
-        this_train_batches = make_batches_from_list(flat_measure_corpus.train[v], batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len)
-        this_valid_batches = make_batches_from_list(flat_measure_corpus.valid[v], batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len)
+        this_train_batches = make_batches_from_list(flat_measure_corpus.train[v], batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len, cut_points=train_cut_points)
+        this_valid_batches = make_batches_from_list(flat_measure_corpus.valid[v], batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len, cut_points=valid_cut_points)
         if train_batches is None:
             train_batches = this_train_batches[..., None]
             valid_batches = this_valid_batches[..., None]
@@ -191,6 +203,27 @@ if __name__ == "__main__":
     train_itr = StepIterator([train_batches], circular_rotation=True, random_state=train_random_state)
     valid_itr = StepIterator([valid_batches], random_state=valid_random_state)
 
+    # need this for now
+    np_data = next(valid_itr)
+    true_data = np_data.copy()
+
+    """
+    midi_sample_dir = "midi_samples"
+    if not os.path.exists(midi_sample_dir):
+        os.mkdir(midi_sample_dir)
+
+    for i in range(true_data.shape[1]):
+        pitches = [flat_measure_corpus.pitch_dictionary.idx2word[c] for c in true_data[:, i, 0]]
+        durations = [flat_measure_corpus.duration_dictionary.idx2word[c] for c in true_data[:, i, 1]]
+        data = convert_voice_lists_to_music_json(pitch_lists=pitches, duration_lists=durations, voices_list=true_data[:, i, -1])
+
+        json_fpath = midi_sample_dir + os.sep + "true{}.json".format(i)
+        write_music_json(data, json_fpath)
+
+        fpath = midi_sample_dir + os.sep + "true{}.midi".format(i)
+        music_json_to_midi(data, fpath)
+        print("Wrote out {}".format(fpath))
+    """
 
     model = build_model(hp)
     loss_fun = CategoricalCrossEntropyFromLogits()
@@ -211,7 +244,7 @@ if __name__ == "__main__":
         np_voice_data = np_data[..., 3]
 
         #np_perm_masks, np_target_mappings, np_target_masks, np_input_ks, np_input_qs, np_targets, np_perm_orders = model.transformer.make_inputs_targets_masks_and_mappings(np_pitch_data, K=6, context_cut=hp.context_len, random_state=gen_random_state)
-        np_perm_masks, np_target_mappings, np_target_masks, _, _, _, np_perm_orders = model.transformer.make_inputs_targets_masks_and_mappings(np_pitch_data, K=6, context_cut=hp.context_len, random_state=gen_random_state)
+        np_perm_masks, np_target_mappings, np_target_masks, _, _, _, np_perm_orders = model.transformer.make_inputs_targets_masks_and_mappings(np_pitch_data, K=hp.mask_K, max_n_gram=hp.max_n_gram, context_cut=hp.context_len, random_state=gen_random_state)
         #qs are target_mask
         #ks are input data
         np_targets = np_pitch_data[:-1]
