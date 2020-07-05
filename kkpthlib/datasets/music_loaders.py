@@ -6,6 +6,7 @@ import json
 import time
 import struct
 import numpy as np
+import itertools
 from ..core import get_logger
 from ..data import LookupDictionary
 from .loaders import get_kkpthlib_dataset_dir
@@ -482,6 +483,87 @@ def piano_roll_from_music_json_file(json_file, default_velocity=120, quantizatio
     return roll_voices
 
 
+def pitch_duration_velocity_lists_from_music_json_file(json_file, default_velocity=120, n_voices=4,
+                                                       add_measure_values=True,
+                                                       measure_value=99,
+                                                       measure_quarters=4,
+                                                       fill_value=-1):
+    """
+    return list of list [[each_voice] n_voices] or numpy array of shape (time_len, n_voices)
+    """
+    with open(json_file) as f:
+        data = json.load(f)
+    ppq = data["pulses_per_quarter"]
+    qbpm = data["quarter_beats_per_minute"]
+    spq = data["seconds_per_quarter"]
+
+    parts = data["parts"]
+    parts_times = data["parts_times"]
+    parts_cumulative_times = data["parts_cumulative_times"]
+    # https://github.com/cuthbertLab/music21/blob/c6fc39204c16c47d1c540b545d0c9869a9cafa8f/music21/midi/__init__.py#L1471
+    if "parts_velocities" not in data:
+        default_velocity = default_velocity
+        parts_velocities = [[default_velocity] * len(p) for p in parts]
+    else:
+        parts_velocities = data["parts_velocities"]
+
+    n_steps = max([len(p) for p in parts])
+
+    measure_stops = [[] for p in parts]
+    for v in range(len(parts)):
+        for s in range(n_steps):
+            if s >= len(parts[v]):
+                continue
+            p_s = parts[v][s]
+            d_s = parts_times[v][s]
+            p_c_s = parts_cumulative_times[v][s]
+            p_v_s = parts_velocities[v][s]
+
+            #new_parts[v].append(p_s)
+            #new_parts_times[v].append(d_s)
+            #new_parts_cumulative_times[v].append(p_c_s)
+            #new_parts_velocities[v].append(p_v_s)
+            if p_c_s % measure_quarters == 0:
+                measure_stops[v].append((s + 1, p_c_s))
+
+    # the set of stop points consistent within all voices 
+
+    count = collections.Counter([m_i_s[1] for m_i in measure_stops for m_i_s in m_i])
+    shared_stop_points = sorted([k for k in count.keys() if count[k] == len(parts)])
+    if len(shared_stop_points) < 1:
+        raise ValueError("No points where all voices start on the measure start...?")
+
+    cleaned_measure_stops = []
+    for v in range(len(parts)):
+        r = [mi for mi in measure_stops[v] if mi[1] in shared_stop_points]
+        cleaned_measure_stops.append(r)
+
+
+    new_parts = [[] for p in parts]
+    new_parts_times = [[] for p in parts]
+    new_parts_cumulative_times = [[] for p in parts]
+    new_parts_velocities = [[] for p in parts]
+    last_vs = [0 for v in range(len(parts))]
+    for v in range(len(parts)):
+        cm = cleaned_measure_stops[v]
+        for cmi in cm:
+            last = last_vs[v]
+
+            new_parts[v].extend(parts[v][last:cmi[0]])
+            new_parts_times[v].extend(parts_times[v][last:cmi[0]])
+            new_parts_cumulative_times[v].extend(parts_cumulative_times[v][last:cmi[0]])
+            new_parts_velocities[v].extend(parts_velocities[v][last:cmi[0]])
+
+            if add_measure_values:
+                new_parts[v].append(measure_value)
+                new_parts_times[v].append(fill_value)
+                new_parts_cumulative_times[v].append(fill_value)
+                new_parts_velocities[v].append(fill_value)
+
+            last_vs[v] = cmi[0]
+    return new_parts, new_parts_times, new_parts_velocities
+
+
 class MusicJSONRasterCorpus(object):
     def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
                  max_vocabulary_size=-1,
@@ -567,6 +649,155 @@ class MusicJSONRasterCorpus(object):
                     token = self.dictionary.word2idx["<unk>"]
                 ids.append(token)
         return ids
+
+
+class MusicJSONFlatMeasureCorpus(object):
+    def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
+                 max_vocabulary_size=-1,
+                 add_measure_marks=True,
+                 tokenization_fn="measure_flatten",
+                 default_velocity=120, n_voices=4,
+                 measure_value=99,
+                 fill_value=-1,
+                 separate_onsets=True, onsets_boundary=100):
+        """
+        """
+        self.pitch_dictionary = LookupDictionary()
+        self.duration_dictionary = LookupDictionary()
+        self.velocity_dictionary = LookupDictionary()
+        self.voice_dictionary = LookupDictionary()
+        
+        self.max_vocabulary_size = max_vocabulary_size
+        self.default_velocity = default_velocity
+        self.n_voices = n_voices
+        self.measure_value = measure_value
+        self.fill_value = fill_value
+        self.separate_onsets = separate_onsets
+        self.onsets_boundary = onsets_boundary
+        self.add_measure_marks = add_measure_marks
+
+        if tokenization_fn != "measure_flatten":
+            raise ValueError("Only default tokenization_fn currently supported")
+
+        base = [fp for fp in train_data_file_paths]
+        if valid_data_file_paths is not None:
+            base = base + [fp for fp in valid_data_file_paths]
+        if test_data_file_paths is not None:
+            base = base + [fp for fp in test_data_file_paths]
+
+        self.build_vocabulary(base)
+
+        if self.max_vocabulary_size > -1:
+            self.dictionary._prune_to_top_k_counts(self.max_vocabulary_size)
+
+        self.train = self.tokenize(train_data_file_paths)
+        if valid_data_file_paths is not None:
+            self.valid = self.tokenize(valid_data_file_paths)
+        if test_data_file_paths is not None:
+            self.test = self.tokenize(test_data_file_paths)
+
+    def _process(self, path):
+        assert os.path.exists(path)
+        pitch, duration, velocity = pitch_duration_velocity_lists_from_music_json_file(path,
+                                                                                       default_velocity=self.default_velocity,
+                                                                                       n_voices=self.n_voices,
+                                                                                       measure_value=self.measure_value,
+                                                                                       fill_value=self.fill_value)
+
+        def isplit(iterable, splitters):
+            return [list(g) for k,g in itertools.groupby(iterable,lambda x:x in splitters) if not k]
+
+        group = []
+        for v in range(len(pitch)):
+            # per voice, do split and merge
+            s_p = isplit(pitch[v], [self.measure_value])
+            s_d = isplit(duration[v], [self.fill_value])
+            s_v = isplit(velocity[v], [self.fill_value])
+            group.append([s_p, s_d, s_v])
+
+        not_merged = True
+        # all should be the same length in terms of measures so we can merge
+        try:
+            assert len(group[0][0]) == len(group[1][0])
+            for g in group:
+                assert len(group[0][0]) == len(g[0])
+        except:
+            raise ValueError("Group check assertion failed in _process of MusicJSONFlatMeasureCorpus")
+
+        # just checked that all have the same number of measures, so now we combine them
+        flat_pitch = []
+        flat_duration = []
+        flat_velocity = []
+        flat_voice = []
+
+        flat_pitch.append(self.measure_value)
+        flat_duration.append(self.measure_value)
+        flat_velocity.append(self.measure_value)
+        flat_voice.append(self.measure_value)
+
+        for i in range(len(group[0][0])):
+            for v in range(len(group)):
+                m_p = group[v][0][i]
+                m_d = group[v][1][i]
+                m_v = group[v][2][i]
+                m_vv = [v for el in m_p]
+
+                flat_pitch.extend(m_p)
+                flat_duration.extend(m_d)
+                flat_velocity.extend(m_v)
+                flat_voice.extend(m_vv)
+            flat_pitch.append(self.measure_value)
+            flat_duration.append(self.measure_value)
+            flat_velocity.append(self.measure_value)
+            flat_voice.append(self.measure_value)
+        return flat_pitch, flat_duration, flat_velocity, flat_voice
+
+
+    def build_vocabulary(self, json_file_paths):
+        """Tokenizes a text file."""
+        for path in json_file_paths:
+            pitch, duration, velocity, voice = self._process(path)
+
+            for p in pitch:
+                self.pitch_dictionary.add_word(p)
+
+            for d in duration:
+                self.duration_dictionary.add_word(d)
+
+            for v in velocity:
+                self.velocity_dictionary.add_word(v)
+
+            for vv in voice:
+                self.voice_dictionary.add_word(vv)
+
+
+    def tokenize(self, paths):
+        """Tokenizes a text file."""
+        pitches = []
+        durations = []
+        velocities = []
+        voices = []
+        for path in paths:
+            pitch, duration, velocity, voice = self._process(path)
+
+            # do we even bother to check for unknown words
+            for p in pitch:
+                p_token = self.pitch_dictionary.word2idx[p]
+                pitches.append(p_token)
+
+            for d in duration:
+                d_token = self.duration_dictionary.word2idx[d]
+                durations.append(d_token)
+
+            for v in velocity:
+                v_token = self.velocity_dictionary.word2idx[v]
+                velocities.append(v_token)
+
+            for vv in voice:
+                vv_token = self.voice_dictionary.word2idx[vv]
+                voices.append(vv_token)
+
+        return pitches, durations, velocities, voices
 
 
 class MusicJSONCorpus(object):
@@ -830,7 +1061,7 @@ class MusicJSONRasterIterator(object):
             return raster_roll_voices, mask, [ac.astype(np.float32) * mask[..., None] for ac in all_clocks]
 
 
-def convert_voice_roll_to_pitch_duration(voice_roll, quantization_rate=.25, onsets_boundary=100):
+def convert_voice_roll_to_music_json(voice_roll, quantization_rate=.25, onsets_boundary=100):
     """
     take in voice roll and turn it into a pitch, duration thing again
 
@@ -876,6 +1107,53 @@ def convert_voice_roll_to_pitch_duration(voice_roll, quantization_rate=.25, onse
                 voice_data["parts"][v].append(note_held)
                 voice_data["parts_times"][v].append(ongoing_duration)
         voice_data["parts_cumulative_times"][v] = [e for e in np.cumsum(voice_data["parts_times"][v])]
+    spq = .5
+    ppq = 220
+    qbpm = 120
+    voice_data["seconds_per_quarter"] = spq
+    voice_data["quarter_beats_per_minute"] = qbpm
+    voice_data["pulses_per_quarter"] = ppq
+    voice_data["parts_names"] = ["Soprano", "Alto", "Tenor", "Bass"]
+    j = json.dumps(voice_data, indent=4)
+    return j
+
+
+def convert_voice_lists_to_music_json(pitch_lists, duration_lists, velocity_lists=None, voices_list=None,
+                                      default_velocity=120,
+                                      measure_value=99,
+                                      onsets_boundary=100):
+    """
+    can either work by providing a list of lists input for pitch_lists and duration_lists (optionally velocity lists)
+
+    or
+
+    1 long list for pitch, 1 long list for duration (optionally velocity), and the voices_list argument which has
+    indicators for each voice and how it maps
+    """
+    voice_data = {}
+    voice_data["parts"] = []
+    voice_data["parts_times"] = []
+    voice_data["parts_cumulative_times"] = []
+    if voices_list is not None:
+        assert len(pitch_lists) == len(duration_lists)
+        voices = sorted(list(set(voices_list)))
+        for v in voices:
+            selector = [v_i == v for v_i in voices_list]
+            parts = [pitch_lists[i] for i in range(len(pitch_lists)) if selector[i]]
+            parts_times = [duration_lists[i] for i in range(len(pitch_lists)) if selector[i]]
+            if velocity_lists is not None:
+                parts_velocities = [velocity_lists[i] for i in range(len(pitch_lists)) if selector[i]]
+            else:
+                parts_velocities = [default_velocity for i in range(len(pitch_lists)) if selector[i]]
+            # WE ASSUME MEASURE SELECTOR IS A unIQue ONE
+            if any([p == measure_value for p in parts]):
+                continue
+            else:
+                voice_data["parts"].append(parts)
+                voice_data["parts_times"].append(parts_times)
+                voice_data["parts_cumulative_times"].append([0.] + [e for e in np.cumsum(parts_times)])
+    else:
+        from IPython import embed; embed(); raise ValueError()
     spq = .5
     ppq = 220
     qbpm = 120

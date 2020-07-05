@@ -4,13 +4,13 @@ from .core import *
 from .hparams import HParams
 from .iterators import *
 from .datasets import fetch_jsb_chorales
-from .datasets import MusicJSONRasterIterator
-from .datasets import MusicJSONCorpus
 from .datasets import MusicJSONRasterCorpus
+from .datasets import MusicJSONFlatMeasureCorpus
 from .datasets import music_json_to_midi
 from .datasets import write_music_json
 from .datasets import piano_roll_from_music_json_file
-from .datasets import convert_voice_roll_to_pitch_duration
+from .datasets import convert_voice_lists_to_music_json
+from .datasets import convert_voice_roll_to_music_json
 from .datasets import midi_instruments_name_to_number
 from .datasets import midi_percussion_name_to_number
 from .checkers import *
