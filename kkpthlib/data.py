@@ -19,7 +19,7 @@ def batchify(data, bsz, args):
 """
 
 def make_batches_from_list(list_of_data, batch_size, sequence_length, overlap=0, cut_points=None,
-                            fill_value="auto"):
+                            fill_value=None):
     """
     this function truncates ragged batches
     """
@@ -33,7 +33,7 @@ def make_batches_from_list(list_of_data, batch_size, sequence_length, overlap=0,
     # one above the max should be guaranteed unique...
     if cut_points is not None:
         # TODO: handle non-integer case?
-        fill_value = max(list(set(list_of_data))) + 1
+        assert fill_value is not None
 
     # group into long chunks, total of batch_size
     rs = list(zip(*[iter(list_of_data)] * chunk_size))
@@ -41,6 +41,7 @@ def make_batches_from_list(list_of_data, batch_size, sequence_length, overlap=0,
         # group into long chunks, total of batch_size
         assert len(cut_points) == len(list_of_data)
         cuts = list(zip(*[iter(cut_points)] * chunk_size))
+
     assert len(rs) == batch_size
     assert overlap < sequence_length
     ro = []

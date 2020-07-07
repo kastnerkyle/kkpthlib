@@ -178,7 +178,6 @@ if __name__ == "__main__":
                                                      valid_data_file_paths=valid_files)
 
     # length of that list is the number of feature groups!
-
     train_batches = None
     valid_batches = None
     # we need to only cut sequences on "start points" where all 4 voices begin. Otherwise there are a lot of alignment issues in prediction
@@ -186,8 +185,8 @@ if __name__ == "__main__":
     valid_cut_points = [p == flat_measure_corpus.pitch_dictionary.word2idx[99] for p in flat_measure_corpus.valid[0]]
     for v in range(len(flat_measure_corpus.train)):
         # num_batch_steps, time_length_of_batch, batch_size
-        this_train_batches = make_batches_from_list(flat_measure_corpus.train[v], batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len, cut_points=train_cut_points)
-        this_valid_batches = make_batches_from_list(flat_measure_corpus.valid[v], batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len, cut_points=valid_cut_points)
+        this_train_batches = make_batches_from_list(flat_measure_corpus.train[v], batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len, cut_points=train_cut_points, fill_value=len(flat_measure_corpus.pitch_dictionary.idx2word))
+        this_valid_batches = make_batches_from_list(flat_measure_corpus.valid[v], batch_size=hp.batch_size, sequence_length=hp.max_sequence_length, overlap=hp.context_len, cut_points=valid_cut_points, fill_value=len(flat_measure_corpus.pitch_dictionary.idx2word))
         if train_batches is None:
             train_batches = this_train_batches[..., None]
             valid_batches = this_valid_batches[..., None]
