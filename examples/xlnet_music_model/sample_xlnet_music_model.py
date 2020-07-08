@@ -145,9 +145,6 @@ valid_itr = StepIterator([valid_batches], random_state=valid_random_state)
 sampling_random_state = np.random.RandomState(2123)
 
 np_data = next(valid_itr)
-quality_cut = hp.context_len + (len(np_data) - hp.context_len) // args.context_division
-np_data = np_data[:quality_cut]
-
 true_data = np_data.copy()
 
 midi_sample_dir = "midi_samples"
@@ -159,6 +156,12 @@ for i in range(true_data.shape[1]):
     pitches = [flat_measure_corpus.pitch_dictionary.idx2word[c] for n, c in enumerate(true_data[:, i, 0]) if non_pad[n]]
     durations = [flat_measure_corpus.duration_dictionary.idx2word[c] for n, c in enumerate(true_data[:, i, 1]) if non_pad[n]]
     voices = [vv for n, vv in enumerate(true_data[:, i, -1]) if non_pad[n]]
+    # let the end stay to "anchor" generation quality
+    quality_cut = hp.context_len + (len(pitches) - hp.context_len) // args.context_division
+
+    pitches = pitches[:quality_cut]
+    durations = durations[:quality_cut]
+    voices = voices[:quality_cut]
 
     data = convert_voice_lists_to_music_json(pitch_lists=pitches, duration_lists=durations, voices_list=voices)
 
@@ -176,10 +179,11 @@ for gibbs_iter in range(generative_rounds + 1):
         print("gibbs iter {}".format(gibbs_iter))
 
     np_pitch_data = np_data[..., 0]
-    # at sampling time, use contexts with roughly HALF the training maximum
+    sequential = True
+
     np_perm_masks, np_target_mappings, np_target_masks, _, _, _, np_perm_orders = model.transformer.make_inputs_targets_masks_and_mappings(
-        np_pitch_data, K=hp.mask_K, max_n_gram=hp.max_n_gram // args.context_division,
-        context_cut=hp.context_len, random_state=gen_random_state, sequential_order=True)
+        np_pitch_data, K=hp.mask_K, max_n_gram=1, #hp.max_n_gram,# // args.context_division,
+        context_cut=hp.context_len, random_state=gen_random_state, sequential_order=sequential)
 
     np_targets = np_pitch_data[:-1]
     # will have to split this up
@@ -228,9 +232,9 @@ for gibbs_iter in range(generative_rounds + 1):
         target_mappings = None
 
     # loop through and UNK out to be assured of no leaks
-    for k in range(np_data.shape[1]):
-        blank_spots = np.where(orig_np_target_masks[:, k])[0]
-        np_data[blank_spots, k, 0] = 67
+    #for k in range(np_data.shape[1]):
+        #blank_spots = np.where(orig_np_target_masks[:, k])[0]
+        #np_data[blank_spots, k, 0] = flat_measure_corpus.pitch_dictionary.word2idx[99]
 
     filled_sequences = [list() for i in range(np_data.shape[1])]
     finished_sampling = [False for i in range(np_data.shape[1])]
@@ -241,11 +245,8 @@ for gibbs_iter in range(generative_rounds + 1):
         else:
             print("initial sample step {} done".format(max(num_filled)))
 
-        np_targets = np_pitch_data[:-1]
-        # will have to split this up
         np_input_ks = np_data[:-1]
         np_input_qs = np_target_masks
-
         input_ks = torch.tensor(np_input_ks).to(hp.use_device)
 
         #input_qs = None
@@ -255,17 +256,33 @@ for gibbs_iter in range(generative_rounds + 1):
 
         out_h, out_g, out_mems = model(input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=in_mems)
         temp = .9
+        cutoff = .95
 
-        #unk_index = corpus.dictionary.word2idx["<unk>"]
-        # don't let it predict UNK
-        #out_g[:, :, unk_index] = -1E30
-
-        reduced = top_p_from_logits_np(out_g.cpu().data.numpy() / temp, .95)
-        # don't let it predict unk
-        reduced_probs = softmax_np(reduced)
+        orig_out_g = np.copy(out_g.cpu().data.numpy())
 
         for k in range(np_data.shape[1]):
+            out_g = np.copy(orig_out_g)
+
+            reduced = top_p_from_logits_np(out_g / temp, cutoff)
+            # for now we hack hard and only allow notes in the original data
+            for el in (set(range(out_g.shape[-1])) - set(true_data[:, k, 0])):
+                for s in range(len(out_g)):
+                    reduced[s, k, el] = np.min(reduced[s, k, :])
+            reduced_probs = softmax_np(reduced)
+
+            #for el in set(true_data[:, k, 0]):
+            #    reduced_probs[:, k, el] = 0.
+            #reduced_probs = reduced_probs / reduced_probs.sum(axis=-1)[..., None]
+
+            non_pad = [c < len(flat_measure_corpus.pitch_dictionary.idx2word) for c in true_data[:, k, 0]]
+            last_real = np.where(non_pad)[0][-1]
+            quality_cut = hp.context_len + (last_real - hp.context_len) // args.context_division
+
             blank_spots = np.where(orig_np_target_masks[:, k])[0]
+            perm_vals = np_perm_orders[:, k][np_perm_orders[:, k] > -1]
+            # inverse argsort
+            perm_index_vals = np.argsort(perm_vals)
+
             si = int(num_filled[k])
 
             if si >= len(blank_spots):
@@ -276,36 +293,49 @@ for gibbs_iter in range(generative_rounds + 1):
                 print("ARE WE HANDLING NP_TARGET_MAPPINGS CORRECTLY AND INDEXING APPROPRIATELY")
                 from IPython import embed; embed(); raise ValueError()
 
-            blank_spot = blank_spots[si]
+            # sample them from perm_vals low to high
+            # low values have the least allowed context
+            blank_spot = blank_spots[perm_index_vals[si]]
 
-            # blank out the mask? differs from training but still
-            perm_masks[:, blank_spot, k] = 0.
-            target_masks[blank_spot, k] = 0.
-            input_qs[blank_spot, k, 0] = 0.
+            # tweak mask as well, differs from training but still
+            #perm_masks[:, blank_spot, k] = 0.
+            #target_masks[blank_spot, k] = 0.
+            #input_qs[blank_spot, k, 0] = 0.
+            # cant edit this way without changing target mapping?
 
-            if len(filled_sequences[k]) == 0:
+            #if len(filled_sequences[k]) == 0:
+                # this is just for saving intermediates
                 # true data 0, blanked out data 1
-                filled_sequences[k].append([flat_measure_corpus.pitch_dictionary.idx2word[c] for n, c in enumerate(true_data[:, k, 0]) if non_pads[k][n]])
-                context_sequence = [flat_measure_corpus.pitch_dictionary.idx2word[c] for n, c in enumerate(np_data[:, k, 0]) if non_pads[k][n]]
-                filled_sequences[k].append(context_sequence)
+            #    filled_sequences[k].append([flat_measure_corpus.pitch_dictionary.idx2word[c] for n, c in enumerate(true_data[:, k, 0]) if non_pads[k][n]])
+            #    context_sequence = [flat_measure_corpus.pitch_dictionary.idx2word[c] for n, c in enumerate(np_data[:, k, 0]) if non_pads[k][n]]
+            #    filled_sequences[k].append(context_sequence)
 
             sampled_i = sampling_random_state.choice(np.arange(reduced_probs.shape[-1]), p=reduced_probs[si, k])
 
-            np_data[blank_spot, k, 0] = sampled_i
-            # nonpad
-            new_context_sequence = [flat_measure_corpus.pitch_dictionary.idx2word[c] for n, c in enumerate(np_data[:, k, 0]) if non_pads[k][n]]
-            filled_sequences[k].append(new_context_sequence)
+            if blank_spot < quality_cut:
+                np_data[blank_spot, k, 0] = sampled_i
+                # skip filling in if the blank spot was outside the middle-ish
+
+            # saving intermediates
+            #new_context_sequence = [flat_measure_corpus.pitch_dictionary.idx2word[c] for n, c in enumerate(np_data[:, k, 0]) if non_pads[k][n]]
+            #filled_sequences[k].append(new_context_sequence)
 
             num_filled[k] += 1
 
     for i in range(np_data.shape[1]):
         # use true data to make non_pad!
-        non_pad = [c < len(flat_measure_corpus.pitch_dictionary.idx2word) for c in true_data[:, i, 0]]
-        pitches = [flat_measure_corpus.pitch_dictionary.idx2word[c] for n, c in enumerate(np_data[:, i, 0]) if non_pads[i][n]]
-        durations = [flat_measure_corpus.duration_dictionary.idx2word[c] for n, c in enumerate(np_data[:, i, 1]) if non_pads[i][n]]
-        voices = [vv for n, vv in enumerate(true_data[:, i, -1]) if non_pad[n]]
+        last_real = np.where(non_pads[i])[0][-1]
+        pitches = [c if c >= len(flat_measure_corpus.pitch_dictionary.idx2word) else flat_measure_corpus.pitch_dictionary.idx2word[c]
+                   for n, c in enumerate(np_data[:, i, 0]) if non_pads[i][n]]
+        durations = [c if c >= len(flat_measure_corpus.duration_dictionary.idx2word) else flat_measure_corpus.duration_dictionary.idx2word[c]
+                     for n, c in enumerate(np_data[:, i, 1]) if non_pads[i][n]]
+        voices = [vv for n, vv in enumerate(true_data[:, i, -1]) if non_pads[i][n]]
 
-        quality_cut = hp.context_len + (len(pitches) - hp.context_len) // args.context_division
+        quality_cut = hp.context_len + (last_real - hp.context_len) // args.context_division
+        pitches = pitches[:quality_cut]
+        durations = durations[:quality_cut]
+        voices = voices[:quality_cut]
+
         data = convert_voice_lists_to_music_json(pitch_lists=pitches, duration_lists=durations, voices_list=voices)
 
         json_fpath = midi_sample_dir + os.sep + "sampled{}_step{}.json".format(i, gibbs_iter)
