@@ -854,31 +854,9 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
                 flat_key_durations_one.extend([key_durations_one for l in range(1, len(curr_pitch_set))])
                 flat_key_indicators.extend([key_counter for l in range(1, len(curr_pitch_set))])
 
-                if v == 0:
-                    # add valid cut point marker at the start
-                    # so insert(0)
-                    tmp = [flat_fingerprint_features_zero,
-                           flat_fingerprint_features_one,
-                           flat_duration_features_zero,
-                           flat_duration_features_mid,
-                           flat_duration_features_one,
-                           flat_voices,
-                           flat_centers,
-                           flat_key_zero,
-                           flat_key_durations_zero,
-                           flat_key_one,
-                           flat_key_durations_one,
-                           flat_key_indicators,
-                           flat_targets]
-
-                    for z, r in enumerate(tmp):
-                        fill = self.transition_value
-                        if hasattr(tmp[z][-1], "__len__"):
-                            tmp[z].insert(0, [fill for el in tmp[z][-1]])
-                        else:
-                            tmp[z].insert(0, fill)
-
-                # add valid cut point marker at the boundary
+            if i == 0:
+                # add valid cut point marker at the start
+                # so insert(0)
                 tmp = [flat_fingerprint_features_zero,
                        flat_fingerprint_features_one,
                        flat_duration_features_zero,
@@ -896,9 +874,31 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
                 for z, r in enumerate(tmp):
                     fill = self.transition_value
                     if hasattr(tmp[z][-1], "__len__"):
-                        tmp[z].append([fill for el in tmp[z][-1]])
+                        tmp[z].insert(0, [fill for el in tmp[z][-1]])
                     else:
-                        tmp[z].append(fill)
+                        tmp[z].insert(0, fill)
+
+            # add valid cut point marker at the boundary
+            tmp = [flat_fingerprint_features_zero,
+                   flat_fingerprint_features_one,
+                   flat_duration_features_zero,
+                   flat_duration_features_mid,
+                   flat_duration_features_one,
+                   flat_voices,
+                   flat_centers,
+                   flat_key_zero,
+                   flat_key_durations_zero,
+                   flat_key_one,
+                   flat_key_durations_one,
+                   flat_key_indicators,
+                   flat_targets]
+
+            for z, r in enumerate(tmp):
+                fill = self.transition_value
+                if hasattr(tmp[z][-1], "__len__"):
+                    tmp[z].append([fill for el in tmp[z][-1]])
+                else:
+                    tmp[z].append(fill)
             key_counter += 1
 
         ret = [flat_fingerprint_features_zero,
