@@ -19,7 +19,7 @@ def batchify(data, bsz, args):
 """
 
 def make_batches_from_list(list_of_data, batch_size, sequence_length, overlap=0, cut_points=None,
-                            fill_value=None):
+                           fill_value=None, remove_cuts=True):
     """
     this function truncates ragged batches
     """
@@ -56,12 +56,17 @@ def make_batches_from_list(list_of_data, batch_size, sequence_length, overlap=0,
                 candidates = [s for s in range(start, min(stop, len(cuts[j]))) if cuts[j][s]]
                 start = candidates[0]
                 stop = candidates[-1]
-                leftover = sequence_length - len(r[start:stop])
+                slice_values = [sl for sl in np.arange(start, stop)]
+                if remove_cuts:
+                    # remove the cut values from the actual subsequence - they were only for marking valid boundaries
+                    slice_values = [sl for sl in slice_values if sl not in candidates]
+                proposed_seq = [r[sli] for sli in slice_values]
+                leftover = sequence_length - len(proposed_seq)
                 if leftover > 0:
                     # now we are right back to padding / masking again...
-                    rj.append(list(r[start:stop]) + [fill_value for i in range(leftover)])
+                    rj.append(list(proposed_seq) + [fill_value for i in range(leftover)])
                 else:
-                    rj.append(r[start:stop])
+                    rj.append(proposed_seq)
             else:
                 rj.append(r[start:stop])
         if len(rj[0]) != len(rj[-1]):

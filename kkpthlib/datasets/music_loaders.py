@@ -651,6 +651,457 @@ class MusicJSONRasterCorpus(object):
         return ids
 
 
+class MusicJSONFlatKeyframeMeasureCorpus(object):
+    def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
+                 max_vocabulary_size=-1,
+                 add_measure_marks=True,
+                 tokenization_fn="measure_flatten",
+                 default_velocity=120, n_voices=4,
+                 measure_value=99,
+                 transition_value=9999,
+                 fill_value=-1,
+                 separate_onsets=True, onsets_boundary=100):
+        """
+        """
+        self._make_dictionaries()
+
+        self.max_vocabulary_size = max_vocabulary_size
+        self.default_velocity = default_velocity
+        self.n_voices = n_voices
+        self.measure_value = measure_value
+        self.fill_value = fill_value
+        self.separate_onsets = separate_onsets
+        self.onsets_boundary = onsets_boundary
+        self.add_measure_marks = add_measure_marks
+        self.transition_value = transition_value
+
+        if tokenization_fn != "measure_flatten":
+            raise ValueError("Only default tokenization_fn currently supported")
+
+        base = [fp for fp in train_data_file_paths]
+        if valid_data_file_paths is not None:
+            base = base + [fp for fp in valid_data_file_paths]
+        if test_data_file_paths is not None:
+            base = base + [fp for fp in test_data_file_paths]
+
+        self.build_vocabulary(base)
+
+        self.train = self.tokenize(train_data_file_paths)
+        if valid_data_file_paths is not None:
+            self.valid = self.tokenize(valid_data_file_paths)
+        if test_data_file_paths is not None:
+            self.test = self.tokenize(test_data_file_paths)
+
+    def _make_dictionaries(self):
+        self.fingerprint_features_zero_dictionary = LookupDictionary()
+        self.fingerprint_features_one_dictionary = LookupDictionary()
+        self.duration_features_zero_dictionary = LookupDictionary()
+        self.duration_features_mid_dictionary = LookupDictionary()
+        self.duration_features_one_dictionary = LookupDictionary()
+        self.voices_dictionary = LookupDictionary()
+
+        self.centers_0_dictionary = LookupDictionary()
+        self.centers_1_dictionary = LookupDictionary()
+        self.centers_2_dictionary = LookupDictionary()
+        self.centers_3_dictionary = LookupDictionary()
+
+        self.keypoint_dictionary = LookupDictionary()
+        self.keypoint_durations_dictionary = LookupDictionary()
+
+        self.target_0_dictionary = LookupDictionary()
+        self.target_1_dictionary = LookupDictionary()
+        self.target_2_dictionary = LookupDictionary()
+        self.target_3_dictionary = LookupDictionary()
+
+    def _process(self, path):
+        assert os.path.exists(path)
+        pitch, duration, velocity = pitch_duration_velocity_lists_from_music_json_file(path,
+                                                                                       default_velocity=self.default_velocity,
+                                                                                       n_voices=self.n_voices,
+                                                                                       measure_value=self.measure_value,
+                                                                                       fill_value=self.fill_value)
+
+        def isplit(iterable, splitters):
+            return [list(g) for k,g in itertools.groupby(iterable,lambda x:x in splitters) if not k]
+
+        group = []
+        for v in range(len(pitch)):
+            # per voice, do split and merge
+            s_p = isplit(pitch[v], [self.measure_value])
+            s_d = isplit(duration[v], [self.fill_value])
+            s_v = isplit(velocity[v], [self.fill_value])
+            group.append([s_p, s_d, s_v])
+
+        not_merged = True
+        # all should be the same length in terms of measures so we can merge
+        try:
+            assert len(group[0][0]) == len(group[1][0])
+            for g in group:
+                assert len(group[0][0]) == len(g[0])
+        except:
+            raise ValueError("Group check assertion failed in _process of MusicJSONFlatMeasureCorpus")
+
+        # just checked that all have the same number of measures, so now we combine them
+        flat_key_zero = []
+        flat_key_one = []
+        flat_rel_encoded_pitch = []
+        flat_lines_encoded = []
+
+        flat_fingerprint_features_zero = []
+        flat_fingerprint_features_one = []
+        flat_duration_features_zero = []
+        flat_duration_features_mid = []
+        flat_duration_features_one = []
+        flat_voices = []
+        flat_centers = []
+        flat_targets = []
+        flat_key_zero = []
+        flat_key_durations_zero = []
+        flat_key_one = []
+        flat_key_durations_one = []
+        flat_key_indicators = []
+
+        # key frame encoding
+        bottom_voice = len(group) - 1
+        key_counter = 0
+        for i in range(len(group[0][0]) - 1):
+            lines_offset_from_frame = []
+            centers = []
+
+            key_zero = []
+            key_durations_zero = []
+            key_one = []
+            key_durations_one = []
+
+            for v in range(len(group)):
+            # for now only top voice
+                curr_pitch_set = group[v][0][i]
+                curr_dur_set = group[v][1][i]
+                next_pitch_set = group[v][0][i + 1]
+                next_dur_set = group[v][1][i + 1]
+                if curr_pitch_set[0] == 0:
+                    # if currently resting, just use next
+                    center = next_pitch_set[0]
+                elif next_pitch_set[0] == 0:
+                    # if next is rest, just use current
+                    center = curr_pitch_set[0]
+                elif curr_pitch_set[0] == 0 and next_pitch_set[0] == 0:
+                    # both resting doesn't occur in jsb... for now
+                    print("both rest")
+                    from IPython import embed; embed(); raise ValueError()
+                    center = (next_pitch_set[0] + curr_pitch_set[0]) / 2.
+                else:
+                    # if both active, get the centerline between the two
+                    center = (next_pitch_set[0] + curr_pitch_set[0]) / 2.
+
+                line_offset_from_frame = center - group[bottom_voice][0][i][0]
+
+                key_zero.append(curr_pitch_set[0])
+                key_durations_zero.append(curr_dur_set[0])
+                key_one.append(next_pitch_set[0])
+                key_durations_one.append(next_dur_set[0])
+
+                lines_offset_from_frame.append(line_offset_from_frame)
+                centers.append(center)
+
+
+            for v in range(len(group)):
+                curr_pitch_set = group[v][0][i]
+                next_pitch_set = group[v][0][i + 1]
+                curr_dur_set = group[v][1][i]
+                cumulative_curr_dur_set = np.cumsum(curr_dur_set)
+
+                fingerprint_features_zero = []
+                fingerprint_features_one = []
+                duration_features_zero = []
+                duration_features_mid = []
+                duration_features_one = []
+                voices = []
+                these_centers = []
+
+                # create "fingerprint" features against left and right keyframes
+                # create duration offset features
+                # annotate with voices
+                for l in range(1, len(curr_pitch_set)):
+                    print_set_zero = [curr_pitch_set[l] - group[vv][0][i][0] for vv in range(len(group))]
+                    print_set_one = [curr_pitch_set[l] - group[vv][0][i + 1][0] for vv in range(len(group))]
+
+                    fingerprint_features_zero.append(print_set_zero)
+                    fingerprint_features_one.append(print_set_one)
+
+                    duration_features_zero.append(cumulative_curr_dur_set[l - 1])
+                    duration_features_one.append(cumulative_curr_dur_set[-1] - cumulative_curr_dur_set[l - 1])
+                    duration_features_mid.append(curr_dur_set[l])
+                    voices.append(v)
+                    these_centers.append(centers)
+
+                flat_voices.extend(voices)
+                flat_duration_features_zero.extend(duration_features_zero)
+                flat_duration_features_mid.extend(duration_features_mid)
+                flat_duration_features_one.extend(duration_features_one)
+                flat_fingerprint_features_zero.extend(fingerprint_features_zero)
+                flat_fingerprint_features_one.extend(fingerprint_features_one)
+                flat_centers.extend(these_centers)
+
+                # create prediction targets - distance from each "center" line
+                # assign unique code for rest
+                rel_encoded = [[csi - c if csi != 0 else 100 for c in centers] for csi in curr_pitch_set[1:]]
+                flat_targets.extend(rel_encoded)
+
+                flat_key_zero.extend([key_zero for l in range(1, len(curr_pitch_set))])
+                flat_key_durations_zero.extend([key_durations_zero for l in range(1, len(curr_pitch_set))])
+                flat_key_one.extend([key_one for l in range(1, len(curr_pitch_set))])
+                flat_key_durations_one.extend([key_durations_one for l in range(1, len(curr_pitch_set))])
+                flat_key_indicators.extend([key_counter for l in range(1, len(curr_pitch_set))])
+
+                if v == 0:
+                    # add valid cut point marker at the start
+                    # so insert(0)
+                    tmp = [flat_fingerprint_features_zero,
+                           flat_fingerprint_features_one,
+                           flat_duration_features_zero,
+                           flat_duration_features_mid,
+                           flat_duration_features_one,
+                           flat_voices,
+                           flat_centers,
+                           flat_key_zero,
+                           flat_key_durations_zero,
+                           flat_key_one,
+                           flat_key_durations_one,
+                           flat_key_indicators,
+                           flat_targets]
+
+                    for z, r in enumerate(tmp):
+                        fill = self.transition_value
+                        if hasattr(tmp[z][-1], "__len__"):
+                            tmp[z].insert(0, [fill for el in tmp[z][-1]])
+                        else:
+                            tmp[z].insert(0, fill)
+
+                # add valid cut point marker at the boundary
+                tmp = [flat_fingerprint_features_zero,
+                       flat_fingerprint_features_one,
+                       flat_duration_features_zero,
+                       flat_duration_features_mid,
+                       flat_duration_features_one,
+                       flat_voices,
+                       flat_centers,
+                       flat_key_zero,
+                       flat_key_durations_zero,
+                       flat_key_one,
+                       flat_key_durations_one,
+                       flat_key_indicators,
+                       flat_targets]
+
+                for z, r in enumerate(tmp):
+                    fill = self.transition_value
+                    if hasattr(tmp[z][-1], "__len__"):
+                        tmp[z].append([fill for el in tmp[z][-1]])
+                    else:
+                        tmp[z].append(fill)
+            key_counter += 1
+
+        ret = [flat_fingerprint_features_zero,
+               flat_fingerprint_features_one,
+               flat_duration_features_zero,
+               flat_duration_features_mid,
+               flat_duration_features_one,
+               flat_voices,
+               flat_centers,
+               flat_key_zero,
+               flat_key_durations_zero,
+               flat_key_one,
+               flat_key_durations_one,
+               flat_key_indicators,
+               flat_targets]
+        return ret
+
+
+    def build_vocabulary(self, json_file_paths):
+        """Tokenizes a text file."""
+        for path in json_file_paths:
+            ret = self._process(path)
+            (flat_fingerprint_features_zero,
+             flat_fingerprint_features_one,
+             flat_duration_features_zero,
+             flat_duration_features_mid,
+             flat_duration_features_one,
+             flat_voices,
+             flat_centers,
+             flat_key_zero,
+             flat_key_durations_zero,
+             flat_key_one,
+             flat_key_durations_one,
+             flat_key_indicators,
+             flat_targets) = ret
+
+            for fpz in flat_fingerprint_features_zero:
+                self.fingerprint_features_zero_dictionary.add_word(tuple(fpz))
+
+            for fpo in flat_fingerprint_features_one:
+                self.fingerprint_features_one_dictionary.add_word(tuple(fpo))
+
+            for durfz in flat_duration_features_zero:
+                self.duration_features_zero_dictionary.add_word(durfz)
+
+            for durfm in flat_duration_features_mid:
+                self.duration_features_mid_dictionary.add_word(durfm)
+
+            for durfo in flat_duration_features_one:
+                self.duration_features_one_dictionary.add_word(durfo)
+
+            for v in flat_voices:
+                self.voices_dictionary.add_word(v)
+
+            for c in flat_centers:
+                self.centers_0_dictionary.add_word(c[0])
+                self.centers_1_dictionary.add_word(c[1])
+                self.centers_2_dictionary.add_word(c[2])
+                self.centers_3_dictionary.add_word(c[3])
+
+            for kz in flat_key_zero:
+                self.keypoint_dictionary.add_word(tuple(kz))
+
+            for kdz in flat_key_durations_zero:
+                self.keypoint_durations_dictionary.add_word(tuple(kdz))
+
+            for ko in flat_key_one:
+                self.keypoint_dictionary.add_word(tuple(ko))
+
+            for kdo in flat_key_durations_one:
+                self.keypoint_durations_dictionary.add_word(tuple(kdo))
+
+            for t in flat_targets:
+                self.target_0_dictionary.add_word(t[0])
+                self.target_1_dictionary.add_word(t[1])
+                self.target_2_dictionary.add_word(t[2])
+                self.target_3_dictionary.add_word(t[3])
+
+    def tokenize(self, paths):
+        """Tokenizes
+
+        [fingerprint_features_zero,
+         fingerprint_features_one,
+         duration_features_zero,
+         duration_features_one,
+         voices,
+         centers,
+         key_zero,
+         key_durations_zero,
+         key_one,
+         key_durations_one,
+         targets]
+        """
+        fingerprint_features_zero = []
+        fingerprint_features_one = []
+        duration_features_zero = []
+        duration_features_mid = []
+        duration_features_one = []
+        voices = []
+        centers = []
+        key_zero = []
+        key_durations_zero = []
+        key_one = []
+        key_durations_one = []
+        key_indicators = []
+        targets = []
+
+        for path in paths:
+            ret = self._process(path)
+            (flat_fingerprint_features_zero,
+             flat_fingerprint_features_one,
+             flat_duration_features_zero,
+             flat_duration_features_mid,
+             flat_duration_features_one,
+             flat_voices,
+             flat_centers,
+             flat_key_zero,
+             flat_key_durations_zero,
+             flat_key_one,
+             flat_key_durations_one,
+             flat_key_indicators,
+             flat_targets) = ret
+
+            for fpz in flat_fingerprint_features_zero:
+                fpz_token = self.fingerprint_features_zero_dictionary.word2idx[tuple(fpz)]
+                fingerprint_features_zero.append(fpz_token)
+
+            for fpo in flat_fingerprint_features_one:
+                fpo_token = self.fingerprint_features_one_dictionary.word2idx[tuple(fpo)]
+                fingerprint_features_one.append(fpo_token)
+
+            for durfz in flat_duration_features_zero:
+                durfz_token = self.duration_features_zero_dictionary.word2idx[durfz]
+                duration_features_zero.append(durfz_token)
+
+            for durfm in flat_duration_features_mid:
+                durfm_token = self.duration_features_mid_dictionary.word2idx[durfm]
+                duration_features_mid.append(durfm_token)
+
+            for durfo in flat_duration_features_one:
+                durfo_token = self.duration_features_one_dictionary.word2idx[durfo]
+                duration_features_one.append(durfo_token)
+
+            for v in flat_voices:
+                 v_token = self.voices_dictionary.word2idx[v]
+                 voices.append(v_token)
+
+            for c in flat_centers:
+                center_0_token = self.centers_0_dictionary.word2idx[c[0]]
+                center_1_token = self.centers_1_dictionary.word2idx[c[1]]
+                center_2_token = self.centers_2_dictionary.word2idx[c[2]]
+                center_3_token = self.centers_3_dictionary.word2idx[c[3]]
+                centers.append([center_0_token,
+                                center_1_token,
+                                center_2_token,
+                                center_3_token])
+
+            for kz in flat_key_zero:
+                kz_token = self.keypoint_dictionary.word2idx[tuple(kz)]
+                key_zero.append(kz_token)
+
+            for kdz in flat_key_durations_zero:
+                kdz_token = self.keypoint_durations_dictionary.word2idx[tuple(kdz)]
+                key_durations_zero.append(kdz_token)
+
+            for ko in flat_key_one:
+                ko_token = self.keypoint_dictionary.word2idx[tuple(ko)]
+                key_one.append(ko_token)
+
+            for kdo in flat_key_durations_one:
+                kdo_token = self.keypoint_durations_dictionary.word2idx[tuple(kdo)]
+                key_durations_one.append(kdo_token)
+
+            for fki in flat_key_indicators:
+                key_indicators.append(fki)
+
+            for t in flat_targets:
+                target_0_token = self.target_0_dictionary.word2idx[t[0]]
+                target_1_token = self.target_1_dictionary.word2idx[t[1]]
+                target_2_token = self.target_2_dictionary.word2idx[t[2]]
+                target_3_token = self.target_3_dictionary.word2idx[t[3]]
+                targets.append([target_0_token, target_1_token, target_2_token, target_3_token])
+
+        outs = [fingerprint_features_zero,
+                fingerprint_features_one,
+                duration_features_zero,
+                duration_features_mid,
+                duration_features_one,
+                voices,
+                centers,
+                key_zero,
+                key_durations_zero,
+                key_one,
+                key_durations_one,
+                key_indicators,
+                targets]
+        assert len(outs[0]) == len(outs[1])
+        for i in range(2, len(outs)):
+            assert len(outs[0]) == len(outs[i])
+        return outs
+
+
+
 class MusicJSONFlatMeasureCorpus(object):
     def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
                  max_vocabulary_size=-1,

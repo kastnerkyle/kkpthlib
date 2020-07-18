@@ -6,6 +6,7 @@ from .iterators import *
 from .datasets import fetch_jsb_chorales
 from .datasets import MusicJSONRasterCorpus
 from .datasets import MusicJSONFlatMeasureCorpus
+from .datasets import MusicJSONFlatKeyframeMeasureCorpus
 from .datasets import music_json_to_midi
 from .datasets import write_music_json
 from .datasets import piano_roll_from_music_json_file
