@@ -225,11 +225,11 @@ if __name__ == "__main__":
             all_batches_masks.append(batch_mask)
         return all_batches, all_batches_masks
 
+    '''
     train_indices = next(train_itr)
     valid_indices = next(valid_itr)
     train_batches_list, train_batches_masks_list = make_batches_from_indices(flat_measure_corpus.train, train_indices)
     valid_batches_list, valid_batches_masks_list = make_batches_from_indices(flat_measure_corpus.valid, valid_indices)
-    # a few of the target values are... insanely far from the norm
     # ignore it for first pass but consider investigating
 
     # need to write code to put the audio back together again from given or predictable info
@@ -238,36 +238,45 @@ if __name__ == "__main__":
         os.mkdir(midi_sample_dir)
 
     """
-    [fingerprint_features_zero,
-    fingerprint_features_one,
-    duration_features_zero,
-    duration_features_mid,
-    duration_features_one,
-    voices,
-    centers,
-    key_zero,
-    key_durations_zero,
-    key_one,
-    key_durations_one,
-    key_indicators,
-    targets]
+    [fingerprint_features_zero, : 0
+    fingerprint_features_one, : 1
+    duration_features_zero, : 2
+    duration_features_mid, : 3
+    duration_features_one, : 4
+    voices, : 5
+    centers, : 6
+    key_zero_base, : 7
+    key_zero, : 8
+    key_durations_zero, : 9
+    key_one_base, : 10
+    key_one, : 11
+    key_durations_one, : 12
+    key_indicators, : 13
+    targets] : 14
     """
     # do we just make a function on the original data class?
     for i in range(train_batches_list[0].shape[1]):
         # first get back the "left" keypoint
         # as well as the duration
-        key_zero = train_batches_list[-6]
-        key_durations_zero = train_batches_list[-5]
-        key_one = train_batches_list[-4]
-        key_durations_one = train_batches_list[-3]
-        key_indicators = train_batches_list[-2]
+        key_zero_base = train_batches_list[7]
+        key_zero = train_batches_list[8]
+        key_durations_zero = train_batches_list[9]
+        
+        key_one_base = train_batches_list[10]
+        key_one = train_batches_list[11]
+        key_durations_one = train_batches_list[12]
+
+        key_indicators = train_batches_list[13]
 
         # same mask for all of em
         this_mask = train_batches_masks_list[0][:, i]
         f_m = np.where(this_mask)[0][0]
 
+        key_zero_base = key_zero_base[:f_m, i, 0]
         key_zero = key_zero[:f_m, i, 0]
         key_durations_zero = key_durations_zero[:f_m, i, 0]
+
+        key_one_base = key_one_base[:f_m, i, 0]
         key_one = key_one[:f_m, i, 0]
         key_durations_one = key_durations_one[:f_m, i, 0]
         key_indicators = key_indicators[:f_m, i, 0]
@@ -284,11 +293,16 @@ if __name__ == "__main__":
             this_key = key_zero[s:e]
             assert all([tk == this_key[0] for tk in this_key])
             this_key = flat_measure_corpus.keypoint_dictionary.idx2word[this_key[0]]
+
+            this_key_base = key_zero_base[s:e]
+            assert all([tkb == this_key_base[0] for tkb in this_key_base])
+            this_key = tuple([tk + flat_measure_corpus.keypoint_base_dictionary.idx2word[this_key_base[0]] for tk in this_key])
+
             this_key_durations = key_durations_zero[s:e]
             assert all([tkd == this_key_durations[0] for tkd in this_key_durations])
             this_key_durations = flat_measure_corpus.keypoint_durations_dictionary.idx2word[this_key_durations[0]]
 
-            centers = train_batches_list[-7]
+            centers = train_batches_list[6]
             centers = centers[s:e, i]
             center_0 = flat_measure_corpus.centers_0_dictionary.idx2word[centers[0][0]]
             center_1 = flat_measure_corpus.centers_1_dictionary.idx2word[centers[0][1]]
@@ -303,10 +317,10 @@ if __name__ == "__main__":
             target_3_values = [flat_measure_corpus.target_3_dictionary.idx2word[targets[z][3]] for z in range(len(targets))]
 
             # 100 was rest
-            remapped_0 = [center_0 + t_0 if t_0 != 100 else 0 for t_0 in target_0_values]
-            remapped_1 = [center_1 + t_1 if t_1 != 100 else 0 for t_1 in target_1_values]
-            remapped_2 = [center_2 + t_2 if t_2 != 100 else 0 for t_2 in target_2_values]
-            remapped_3 = [center_3 + t_3 if t_3 != 100 else 0 for t_3 in target_3_values]
+            remapped_0 = [this_key[0] + t_0 if t_0 != 100 else 0 for t_0 in target_0_values]
+            remapped_1 = [this_key[1] + t_1 if t_1 != 100 else 0 for t_1 in target_1_values]
+            remapped_2 = [this_key[2] + t_2 if t_2 != 100 else 0 for t_2 in target_2_values]
+            remapped_3 = [this_key[3] + t_3 if t_3 != 100 else 0 for t_3 in target_3_values]
 
             assert all([remapped_0[n] == remapped_1[n] for n in range(len(remapped_0))])
             assert all([remapped_0[n] == remapped_2[n] for n in range(len(remapped_0))])
@@ -351,8 +365,8 @@ if __name__ == "__main__":
         fpath = midi_sample_dir + os.sep + "true{}.midi".format(i)
         music_json_to_midi(data, fpath)
         print("Wrote out {}".format(fpath))
-
     from IPython import embed; embed(); raise ValueError()
+    '''
 
     model = build_model(hp)
     loss_fun = CategoricalCrossEntropyFromLogits()
@@ -365,42 +379,37 @@ if __name__ == "__main__":
     optimizer = get_std_ramp_opt(model)
 
     def loop(itr, extras, stateful_args):
-        np_data = next(itr)
-        # split it, use same mask for all. need to figure out ks, qs, etc
-        np_pitch_data = np_data[..., 0]
-        np_duration_data = np_data[..., 1]
-        np_velocity_data = np_data[..., 2]
-        np_voice_data = np_data[..., 3]
-
-        #np_perm_masks, np_target_mappings, np_target_masks, np_input_ks, np_input_qs, np_targets, np_perm_orders = model.transformer.make_inputs_targets_masks_and_mappings(np_pitch_data, K=6, context_cut=hp.context_len, random_state=gen_random_state)
-        np_perm_masks, np_target_mappings, np_target_masks, _, _, _, np_perm_orders = model.transformer.make_inputs_targets_masks_and_mappings(np_pitch_data, K=hp.mask_K, max_n_gram=hp.max_n_gram, context_cut=hp.context_len, random_state=gen_random_state)
-        #qs are target_mask
-        #ks are input data
-        np_targets = np_pitch_data[:-1]
-        # will have to split this up
-        np_input_ks = np_data[:-1]
-        np_input_qs = np_target_masks
-
-        # we don't use input ks and qs here, whatever masks and mappings we sample first (over the target domain, pitch) will be used for all
-        if hp.use_target_mappings:
-            old = np.copy(np_targets)
-            old_subs = [old[np.where(np_target_masks[:, i])[0], i][None] for i in range(hp.batch_size)]
-            np_targets = np.concatenate(old_subs).transpose(1, 0)
-            # all 1s mask
-            np_target_masks = 0. * np_targets + 1.
-
-            pad_l = np.zeros((hp.context_len, hp.batch_size))
-            np_targets = np.concatenate((pad_l, np_targets))
-            np_target_masks = np.concatenate((pad_l, np_target_masks))
-            # assume len(np_input_ks) == orig len(targets)
-            pad_r = np.zeros((len(np_input_ks) - len(np_targets), hp.batch_size))
-            np_targets = np.concatenate((np_targets, pad_r))
-            np_target_masks = np.concatenate((np_target_masks, pad_r))
+        indices = next(itr)
+        if extras["train"]:
+            batches_list, batches_masks_list = make_batches_from_indices(flat_measure_corpus.train, indices)
         else:
-            np_target_mappings = None
+            batches_list, batches_masks_list = make_batches_from_indices(flat_measure_corpus.valid, indices)
+        '''
+        [fingerprint_features_zero, : 0
+        fingerprint_features_one, : 1
+        duration_features_zero, : 2
+        duration_features_mid, : 3
+        duration_features_one, : 4
+        voices, : 5
+        centers, : 6
+        key_zero_base : 7
+        key_zero, : 8
+        key_durations_zero, : 9
+        key_one_base : 10
+        key_one, : 11
+        key_durations_one, : 12
+        key_indicators, : 13
+        targets : 14]
+        '''
+        # cut the features into chunks then feed without indicators
+        # this is ... messy but necessary
 
-        input_ks = torch.tensor(np_input_ks).to(hp.use_device)
-        input_qs = torch.tensor(np_input_qs).to(hp.use_device)
+        # 7680 keypoint tuple values
+        # 163 duration tuples
+        feature_batches_list = [torch.tensor(b).to(hp.use_device) for n, b in enumerate(batches_list[:-1])]
+        feature_batches_masks_list = [torch.tensor(mb).to(hp.use_device) for n, mb in enumerate(batches_masks_list[:-1])]
+        from IPython import embed; embed(); raise ValueError()
+
         targets = torch.tensor(np_targets).long().to(hp.use_device)
 
         #input_ks = input_ks[..., None]
@@ -442,7 +451,6 @@ if __name__ == "__main__":
             out_mems = in_mems
         return l, None, out_mems
 
-    """
     # the out-of-loop-check
     rs = []
     for i in range(5):
@@ -453,7 +461,6 @@ if __name__ == "__main__":
             r = loop(train_itr, {"train": True}, rs[-1][-1])
         rs.append(r)
     from IPython import embed; embed(); raise ValueError()
-    """
 
     s = {"model": model,
          "optimizer": optimizer,

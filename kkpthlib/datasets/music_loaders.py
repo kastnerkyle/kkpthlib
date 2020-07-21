@@ -706,6 +706,7 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
         self.centers_3_dictionary = LookupDictionary()
 
         self.keypoint_dictionary = LookupDictionary()
+        self.keypoint_base_dictionary = LookupDictionary()
         self.keypoint_durations_dictionary = LookupDictionary()
 
         self.target_0_dictionary = LookupDictionary()
@@ -755,9 +756,13 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
         flat_voices = []
         flat_centers = []
         flat_targets = []
+
         flat_key_zero = []
+        flat_key_zero_base = []
         flat_key_durations_zero = []
+
         flat_key_one = []
+        flat_key_one_base = []
         flat_key_durations_one = []
         flat_key_indicators = []
 
@@ -843,15 +848,20 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
                 flat_fingerprint_features_one.extend(fingerprint_features_one)
                 flat_centers.extend(these_centers)
 
-                # create prediction targets - distance from each "center" line
-                # assign unique code for rest
-                rel_encoded = [[csi - c if csi != 0 else 100 for c in centers] for csi in curr_pitch_set[1:]]
+                # create prediction targets - distance from each "left" keypoint entry
+                # 1: because we skip the keypoint itself
+                # key_zero is the UN centered values aka true pitches
+                rel_encoded = [[csi - kpz if csi != 0 else 100 for kpz in key_zero] for csi in curr_pitch_set[1:]]
                 flat_targets.extend(rel_encoded)
 
-                flat_key_zero.extend([key_zero for l in range(1, len(curr_pitch_set))])
+                flat_key_zero_base.extend([key_zero[-1] for l in range(1, len(curr_pitch_set))])
+                flat_key_zero.extend([[kz - key_zero[-1] for kz in key_zero] for l in range(1, len(curr_pitch_set))])
                 flat_key_durations_zero.extend([key_durations_zero for l in range(1, len(curr_pitch_set))])
-                flat_key_one.extend([key_one for l in range(1, len(curr_pitch_set))])
+
+                flat_key_one_base.extend([key_one[-1] for l in range(1, len(curr_pitch_set))])
+                flat_key_one.extend([[ko - key_one[-1] for ko in key_one] for l in range(1, len(curr_pitch_set))])
                 flat_key_durations_one.extend([key_durations_one for l in range(1, len(curr_pitch_set))])
+
                 flat_key_indicators.extend([key_counter for l in range(1, len(curr_pitch_set))])
 
             if i == 0:
@@ -864,8 +874,10 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
                        flat_duration_features_one,
                        flat_voices,
                        flat_centers,
+                       flat_key_zero_base,
                        flat_key_zero,
                        flat_key_durations_zero,
+                       flat_key_one_base,
                        flat_key_one,
                        flat_key_durations_one,
                        flat_key_indicators,
@@ -886,8 +898,10 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
                    flat_duration_features_one,
                    flat_voices,
                    flat_centers,
+                   flat_key_zero_base,
                    flat_key_zero,
                    flat_key_durations_zero,
+                   flat_key_one_base,
                    flat_key_one,
                    flat_key_durations_one,
                    flat_key_indicators,
@@ -908,8 +922,10 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
                flat_duration_features_one,
                flat_voices,
                flat_centers,
+               flat_key_zero_base,
                flat_key_zero,
                flat_key_durations_zero,
+               flat_key_one_base,
                flat_key_one,
                flat_key_durations_one,
                flat_key_indicators,
@@ -928,8 +944,10 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
              flat_duration_features_one,
              flat_voices,
              flat_centers,
+             flat_key_zero_base,
              flat_key_zero,
              flat_key_durations_zero,
+             flat_key_one_base,
              flat_key_one,
              flat_key_durations_one,
              flat_key_indicators,
@@ -959,11 +977,17 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
                 self.centers_2_dictionary.add_word(c[2])
                 self.centers_3_dictionary.add_word(c[3])
 
+            for kzb in flat_key_zero_base:
+                self.keypoint_base_dictionary.add_word(kzb)
+
             for kz in flat_key_zero:
                 self.keypoint_dictionary.add_word(tuple(kz))
 
             for kdz in flat_key_durations_zero:
                 self.keypoint_durations_dictionary.add_word(tuple(kdz))
+
+            for kob in flat_key_one_base:
+                self.keypoint_base_dictionary.add_word(kob)
 
             for ko in flat_key_one:
                 self.keypoint_dictionary.add_word(tuple(ko))
@@ -986,8 +1010,10 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
          duration_features_one,
          voices,
          centers,
+         key_zero_base,
          key_zero,
          key_durations_zero,
+         key_one_base,
          key_one,
          key_durations_one,
          targets]
@@ -999,8 +1025,10 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
         duration_features_one = []
         voices = []
         centers = []
+        key_zero_base = []
         key_zero = []
         key_durations_zero = []
+        key_one_base = []
         key_one = []
         key_durations_one = []
         key_indicators = []
@@ -1015,8 +1043,10 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
              flat_duration_features_one,
              flat_voices,
              flat_centers,
+             flat_key_zero_base,
              flat_key_zero,
              flat_key_durations_zero,
+             flat_key_one_base,
              flat_key_one,
              flat_key_durations_one,
              flat_key_indicators,
@@ -1056,6 +1086,10 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
                                 center_2_token,
                                 center_3_token])
 
+            for kzb in flat_key_zero_base:
+                kzb_token = self.keypoint_base_dictionary.word2idx[kzb]
+                key_zero_base.append(kzb_token)
+
             for kz in flat_key_zero:
                 kz_token = self.keypoint_dictionary.word2idx[tuple(kz)]
                 key_zero.append(kz_token)
@@ -1063,6 +1097,10 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
             for kdz in flat_key_durations_zero:
                 kdz_token = self.keypoint_durations_dictionary.word2idx[tuple(kdz)]
                 key_durations_zero.append(kdz_token)
+
+            for kob in flat_key_one_base:
+                kob_token = self.keypoint_base_dictionary.word2idx[kob]
+                key_one_base.append(kob_token)
 
             for ko in flat_key_one:
                 ko_token = self.keypoint_dictionary.word2idx[tuple(ko)]
@@ -1089,8 +1127,10 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
                 duration_features_one,
                 voices,
                 centers,
+                key_zero_base,
                 key_zero,
                 key_durations_zero,
+                key_one_base,
                 key_one,
                 key_durations_one,
                 key_indicators,
