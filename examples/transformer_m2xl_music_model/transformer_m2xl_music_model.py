@@ -7,9 +7,10 @@ import torch
 from torch import nn
 import torch.functional as F
 
-from kkpthlib import AWDXLNetDecoderBlock
+from kkpthlib import AWDTransformerXLDecoderBlock
 from kkpthlib import HParams
 from kkpthlib import Linear
+from kkpthlib import relu
 from kkpthlib import EmbeddingDropout
 from kkpthlib import WordCorpus
 from kkpthlib import make_batches_from_list
@@ -31,126 +32,162 @@ hp = HParams(memory_len=20,
              max_sequence_length=256,
              transformer_input_dim=380,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
-             learning_rate=1E-5,
-             min_learning_rate=1E-6,
+             learning_rate=3E-4,
+             min_learning_rate=1E-4,
              clip=.25,
              batch_size=12,
-             n_layers=24,
-             mask_K=6,
-             max_n_gram=24,
-             embedding_dropout_keep_prob=.9,
-             input_dropout_keep_prob=1.,
-             inner_dropout_keep_prob=1.,
-             hidden_dropout_keep_prob=1.,
-             attention_dropout_keep_prob=1.,
-             output_dropout_keep_prob=.9,
-
-             use_target_mappings=True,
-
-             #embedding_dropout_keep_prob=1.,
-             #input_dropout_keep_prob=1.,
-             #inner_dropout_keep_prob=1.,
-             #hidden_dropout_keep_prob=1.,
-             #attention_dropout_keep_prob=1.,
-             #output_dropout_keep_prob=1.,
-
-             data_storage_dir="kjv",
-             max_vocabulary_size=69,
+             n_layers=16,
+             embedding_dropout_keep_prob=0.8,
+             attention_dropout_keep_prob=0.8,
+             input_dropout_keep_prob=0.4,
+             inner_dropout_keep_prob=0.8,
+             hidden_dropout_keep_prob=1.0,
+             output_dropout_keep_prob=0.5,
              random_seed=2122)
 
 
 def get_hparams():
     return hp
 
-def build_model(hp):
+def build_model(hp, file_corpus):
     random_state = np.random.RandomState(hp.random_seed)
     class Model(nn.Module):
-        def __init__(self):
+        def __init__(self, hp, this_file_corpus):
             super(Model, self).__init__()
-            self.embedding_pitch_k = EmbeddingDropout(hp.max_vocabulary_size,
-                                                      hp.transformer_input_dim,
-                                                      dropout_keep_prob=hp.embedding_dropout_keep_prob,
-                                                      random_state=random_state,
-                                                      device=hp.use_device,
-                                                      name="embed_pitch")
-            self.embedding_duration_k = EmbeddingDropout(hp.max_vocabulary_size,
-                                                         hp.transformer_input_dim,
-                                                         dropout_keep_prob=hp.embedding_dropout_keep_prob,
-                                                         random_state=random_state,
-                                                         device=hp.use_device,
-                                                         name="embed_duration")
-            self.embedding_voice_k = EmbeddingDropout(hp.max_vocabulary_size,
-                                                      hp.transformer_input_dim,
-                                                      dropout_keep_prob=hp.embedding_dropout_keep_prob,
-                                                      random_state=random_state,
-                                                      device=hp.use_device,
-                                                      name="embed_voice")
-            l = np.sqrt(6. / (hp.transformer_input_dim))
-            self.embedding_q = nn.Parameter(torch.tensor(random_state.uniform(-l, l, size=(hp.transformer_input_dim,))))
-            self.transformer = AWDXLNetDecoderBlock([hp.transformer_input_dim],
-                                                     name="xlnet_block",
-                                                     input_dropout_keep_prob=hp.input_dropout_keep_prob,
-                                                     attention_dropout_keep_prob=hp.attention_dropout_keep_prob,
-                                                     inner_dropout_keep_prob=hp.inner_dropout_keep_prob,
-                                                     hidden_dropout_keep_prob=hp.hidden_dropout_keep_prob,
-                                                     output_dropout_keep_prob=hp.output_dropout_keep_prob,
-                                                     random_state=random_state,
-                                                     memory_len=hp.memory_len,
-                                                     context_len=hp.context_len,
-                                                     n_layers=hp.n_layers,
-                                                     init="normal",
-                                                     scale=0.02,
-                                                     device=hp.use_device)
 
-            self.out_proj = Linear([hp.transformer_input_dim],
-                                    hp.max_vocabulary_size,
+            '''
+            [fingerprint_features_zero, : 0
+            fingerprint_features_one, : 1
+            duration_features_zero, : 2
+            duration_features_mid, : 3
+            duration_features_one, : 4
+            voices, : 5
+            centers, : 6
+            key_zero_base : 7
+            key_zero, : 8
+            key_durations_zero, : 9
+            key_one_base : 10
+            key_one, : 11
+            key_durations_one, : 12
+            key_indicators, : 13
+            targets : 14]
+            '''
+            # cut the features into chunks then feed without indicators
+            # this is ... messy but necessary
+
+            # probably a better way than handcoding the relationships here but w/e
+            used_features = [0, 1, 2, 3, 4, 5, 7, 8, 9, "target0", "target1", "target2", "target3"]
+            self.used_features = used_features
+            self.embeddings = nn.ModuleList()
+            for _n, elem in enumerate(used_features):
+                inp = 128 #3 * hp.transformer_input_dim // len(used_features)
+                # just project down to transformer_input_dim size
+                #if _n == len(used_features) - 1:
+                #    used_dim = inp * (len(used_features) - 1)
+                #    leftover_dim = hp.transformer_input_dim - used_dim
+                #    inp = leftover_dim
+
+                if elem == 0:
+                    vocab_size = len(this_file_corpus.fingerprint_features_zero_dictionary.idx2word)
+                elif elem == 1:
+                    vocab_size = len(this_file_corpus.fingerprint_features_one_dictionary.idx2word)
+                elif elem == 2:
+                    vocab_size = len(this_file_corpus.duration_features_zero_dictionary.idx2word)
+                elif elem == 3:
+                    vocab_size = len(this_file_corpus.duration_features_mid_dictionary.idx2word)
+                elif elem == 4:
+                    vocab_size = len(this_file_corpus.duration_features_one_dictionary.idx2word)
+                elif elem == 5:
+                    vocab_size = len(this_file_corpus.voices_dictionary.idx2word)
+                elif elem == 7:
+                    vocab_size = len(this_file_corpus.keypoint_base_dictionary.idx2word)
+                elif elem == 8:
+                    vocab_size = len(this_file_corpus.keypoint_dictionary.idx2word)
+                elif elem == 9:
+                    vocab_size = len(this_file_corpus.keypoint_durations_dictionary.idx2word)
+                elif elem == "target0":
+                    vocab_size = len(this_file_corpus.target_0_dictionary.idx2word)
+                elif elem == "target1":
+                    vocab_size = len(this_file_corpus.target_1_dictionary.idx2word)
+                elif elem == "target2":
+                    vocab_size = len(this_file_corpus.target_2_dictionary.idx2word)
+                elif elem == "target3":
+                    vocab_size = len(this_file_corpus.target_3_dictionary.idx2word)
+                else:
+                    raise ValueError("Unhandled embedding element {}".format(elem))
+                emb = EmbeddingDropout(vocab_size,
+                                       inp,
+                                       dropout_keep_prob=hp.embedding_dropout_keep_prob,
+                                       random_state=random_state,
+                                       device=hp.use_device,
+                                       name="embed_{}".format(elem))
+                self.embeddings.append(emb)
+            self.in_proj = Linear([inp] * len(used_features),
+                                   hp.transformer_input_dim,
+                                   random_state=random_state,
+                                   device=hp.use_device,
+                                   init="normal",
+                                   scale=0.02,
+                                   name="model_in")
+
+            self.transformer = AWDTransformerXLDecoderBlock([hp.transformer_input_dim],
+                                                            name="transformer_block",
+                                                            random_state=random_state,
+                                                            memory_len=hp.memory_len,
+                                                            context_len=hp.context_len,
+                                                            n_layers=hp.n_layers,
+                                                            input_dropout_keep_prob=hp.input_dropout_keep_prob,
+                                                            attention_dropout_keep_prob=hp.attention_dropout_keep_prob,
+                                                            inner_dropout_keep_prob=hp.inner_dropout_keep_prob,
+                                                            hidden_dropout_keep_prob=hp.hidden_dropout_keep_prob,
+                                                            output_dropout_keep_prob=hp.output_dropout_keep_prob,
+                                                            init="normal",
+                                                            scale=0.02,
+                                                            device=hp.use_device)
+
+            self.out_proj0 = Linear([hp.transformer_input_dim],
+                                    len(this_file_corpus.target_0_dictionary.idx2word),
                                     random_state=random_state,
                                     device=hp.use_device,
                                     init="normal",
                                     scale=0.02,
-                                    name="model_out")
+                                    name="model_out0")
+            self.out_proj1 = Linear([hp.transformer_input_dim],
+                                    len(this_file_corpus.target_1_dictionary.idx2word),
+                                    random_state=random_state,
+                                    device=hp.use_device,
+                                    init="normal",
+                                    scale=0.02,
+                                    name="model_out1")
+            self.out_proj2 = Linear([hp.transformer_input_dim],
+                                    len(this_file_corpus.target_2_dictionary.idx2word),
+                                    random_state=random_state,
+                                    device=hp.use_device,
+                                    init="normal",
+                                    scale=0.02,
+                                    name="model_out2")
+            self.out_proj3 = Linear([hp.transformer_input_dim],
+                                    len(this_file_corpus.target_3_dictionary.idx2word),
+                                    random_state=random_state,
+                                    device=hp.use_device,
+                                    init="normal",
+                                    scale=0.02,
+                                    name="model_out3")
 
-        def forward(self, input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=None):
-            xe_pitch_k, de_pitch_k = self.embedding_pitch_k(input_ks[..., 0][..., None])
-            xe_duration_k, de_duration_k = self.embedding_duration_k(input_ks[..., 1][..., None])
-            xe_voice_k, de_voice_k = self.embedding_voice_k(input_ks[..., -1][..., None])
-
-            xe_base_k = xe_duration_k + xe_voice_k
-
-            xe_full_k = xe_base_k + xe_pitch_k
-
-            if target_mappings == None:
-                # use xe_k for size broadcasting
-                _q = xe_base_k + self.embedding_q[None, None]
-
-                # everywhere there is a target, blank out the standard embedding and replace with the learned mask emb
-                # inside transformer if target_mappings is provided this gets sliced down
-                xe_q = target_masks[..., None] * _q + (1. - target_masks[..., None]) * xe_full_k
-            else:
-                xe_q = torch.einsum("ibf,jib->jbf", xe_base_k, target_mappings) + self.embedding_q[None, None]
-
-            xe_k = xe_full_k
-
-            # debug hooks for grad checks
-            #xe_k = xe_k.detach()
-            #xe_q = xe_q.detach()
-
-            #self.tmp_k = xe_k
-            #self.tmp_k.requires_grad = True
-            #self.tmp_q = xe_q
-            #self.tmp_q.requires_grad = True
-
-            #xe_k.detach()
-
-            out_h, out_g, l_o_m = self.transformer(xe_k, xe_q,
-                                                   perm_masks,
-                                                   target_mappings,
-                                                   target_masks,
-                                                   list_of_mems=list_of_mems)
-            p_h = self.out_proj([out_h])
-            p_g = self.out_proj([out_g])
-            return p_h, p_g, l_o_m
-    return Model().to(hp.use_device)
+        def forward(self, list_of_input_batches, list_of_input_batch_masks, list_of_mems=None):
+            all_e = []
+            for _i in range(len(list_of_input_batches)):
+                e, d_e = self.embeddings[_i](list_of_input_batches[_i])
+                all_e.append(e)
+            x1 = relu(self.in_proj(all_e))
+            # right now assume all batch masks are the same...
+            out, l_o_m = self.transformer(x1, list_of_input_batch_masks[0], list_of_mems=list_of_mems)
+            p0 = self.out_proj0([out])
+            p1 = self.out_proj1([out])
+            p2 = self.out_proj2([out])
+            p3 = self.out_proj3([out])
+            return p0, p1, p2, p3, l_o_m
+    return Model(hp, file_corpus).to(hp.use_device)
 
 if __name__ == "__main__":
     jsb = fetch_jsb_chorales()
@@ -368,7 +405,7 @@ if __name__ == "__main__":
     from IPython import embed; embed(); raise ValueError()
     '''
 
-    model = build_model(hp)
+    model = build_model(hp, flat_measure_corpus)
     loss_fun = CategoricalCrossEntropyFromLogits()
 
     def get_std_ramp_opt(model):
@@ -404,41 +441,47 @@ if __name__ == "__main__":
         # cut the features into chunks then feed without indicators
         # this is ... messy but necessary
 
-        # 7680 keypoint tuple values
-        # 163 duration tuples
-        feature_batches_list = [torch.tensor(b).to(hp.use_device) for n, b in enumerate(batches_list[:-1])]
-        feature_batches_masks_list = [torch.tensor(mb).to(hp.use_device) for n, mb in enumerate(batches_masks_list[:-1])]
-        from IPython import embed; embed(); raise ValueError()
+        used_features = [0, 1, 2, 3, 4, 5, 7, 8, 9]
+        feature_batches_list = [torch.tensor(b).to(hp.use_device) for n, b in enumerate(batches_list) if n in used_features]
+        feature_batches_masks_list = [torch.tensor(mb).to(hp.use_device) for n, mb in enumerate(batches_masks_list) if n in used_features]
+        # AFTER SANITY CHECK, SHIFTED TARGETS BECOME INPUTS TOO
+        # 4 sets of targets, alternate definiteions of the same value
+        # distance from kp0_0 etc
+        np_targets = batches_list[-1]
 
+        list_of_inputs = feature_batches_list
+        list_of_input_masks = feature_batches_masks_list
         targets = torch.tensor(np_targets).long().to(hp.use_device)
+        # shift ALL targets by 2...
+        # flat_measure_corpus.target_0_dictionary.word2idx[9999] = 0 , same for all targets 
+        shifted_targets = torch.cat((targets[:2] * 0 + 0, targets), 0)
+        # re-adjust to be sure they are the same length
+        targets = shifted_targets[1:-1]
+        shifted_targets = shifted_targets[:-2]
 
-        #input_ks = input_ks[..., None]
-        input_qs = input_qs[..., None]
-        targets = targets[..., None]
-
-        perm_masks = torch.tensor(np_perm_masks).to(hp.use_device)
-        target_masks = torch.tensor(np_target_masks).to(hp.use_device)
-
-        if np_target_mappings is not None:
-            target_mappings = torch.tensor(np_target_mappings).to(hp.use_device)
-        else:
-            target_mappings = None
+        list_of_inputs.extend([shifted_targets[:, :, 0][..., None],
+                               shifted_targets[:, :, 1][..., None],
+                               shifted_targets[:, :, 2][..., None],
+                               shifted_targets[:, :, 3][..., None]])
 
         in_mems = stateful_args
         if extras["train"]:
-            out_h, out_g, out_mems = model(input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=in_mems)
+            # TODO: ADD MASKING INTO MODEL
+            out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=in_mems)
         else:
-            out_h, out_g, out_mems = model(input_ks, input_qs, perm_masks, target_mappings, target_masks, list_of_mems=None)
+            out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=None)
 
-        if target_mappings is None:
-            loss = loss_fun(out_g, targets)
-            loss = target_masks * loss
-            loss = loss.sum() / target_masks.sum()
-        else:
-            loss = loss_fun(out_g, targets[hp.context_len:(hp.context_len + out_g.shape[0])])
-            #loss = target_masks * loss
-            loss = loss.sum() / target_masks.sum()
-            #loss = loss.mean()
+
+        # inputs have already been cut to context length inside transformer
+        loss0 = loss_fun(out0, targets[hp.context_len:, :, 0][..., None])
+        loss1 = loss_fun(out1, targets[hp.context_len:, :, 1][..., None])
+        loss2 = loss_fun(out2, targets[hp.context_len:, :, 2][..., None])
+        loss3 = loss_fun(out3, targets[hp.context_len:, :, 3][..., None])
+        loss = (loss0 + loss1 + loss2 + loss3) / 4.
+        target_masks = feature_batches_masks_list[0][hp.context_len:]
+        # masks use transformer convention 0 if valid, 1 if invalid
+        loss = loss * (1. - target_masks)
+        loss = loss.sum() / target_masks.sum()
 
         l = loss.cpu().data.numpy()
         optimizer.zero_grad()
@@ -451,6 +494,7 @@ if __name__ == "__main__":
             out_mems = in_mems
         return l, None, out_mems
 
+    """
     # the out-of-loop-check
     rs = []
     for i in range(5):
@@ -461,6 +505,7 @@ if __name__ == "__main__":
             r = loop(train_itr, {"train": True}, rs[-1][-1])
         rs.append(r)
     from IPython import embed; embed(); raise ValueError()
+    """
 
     s = {"model": model,
          "optimizer": optimizer,

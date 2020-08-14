@@ -2259,7 +2259,7 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         return new_mems
 
 
-    def forward(self, input_tensor, list_of_mems=None):
+    def forward(self, input_tensor, input_mask_tensor=None, list_of_mems=None):
         if not list_of_mems:
             list_of_mems = self.init_list_of_mems()
 
@@ -2270,6 +2270,7 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         klen = mlen + qlen
         # masking works internally by setting 1s to neg inf, 0s are left alone! This is slightly different than expected
         attn_mask = torch.triu(input_tensor.new_ones(qlen, klen), diagonal=1 + mlen).bool()[:, :, None]
+        attn_mask = (attn_mask.type(input_mask_tensor.dtype) + input_mask_tensor[:, None, :] > 0).bool()
 
         # relative positional embedding
         pos_seq = torch.arange(klen, -1, -1.0, device=input_tensor.device)
@@ -2283,7 +2284,7 @@ class AWDTransformerXLDecoderBlock(nn.Module):
             hids.append(core_out)
             mems_i = list_of_mems[i] if list_of_mems is not None else None
             core_out = this_layer(core_out, pe,
-                                  local_bias_ac=self.local_bias_ac[None, None], 
+                                  local_bias_ac=self.local_bias_ac[None, None],
                                   local_bias_bd=self.local_bias_bd[None, None],
                                   decoder_attention_mask=attn_mask, memory=mems_i)
             if i < len(self.layers) - 1:
