@@ -32,11 +32,11 @@ hp = HParams(memory_len=20,
              max_sequence_length=256,
              transformer_input_dim=380,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
-             learning_rate=3E-4,
-             min_learning_rate=1E-4,
+             learning_rate=1E-5,
+             min_learning_rate=1E-6,
              clip=.25,
              batch_size=12,
-             n_layers=16,
+             n_layers=24,
              embedding_dropout_keep_prob=0.8,
              attention_dropout_keep_prob=0.8,
              input_dropout_keep_prob=0.4,
@@ -415,7 +415,11 @@ if __name__ == "__main__":
 
     optimizer = get_std_ramp_opt(model)
 
+    first_valid = True
+    first_train = True
     def loop(itr, extras, stateful_args):
+        global first_valid
+        global first_train
         indices = next(itr)
         if extras["train"]:
             batches_list, batches_masks_list = make_batches_from_indices(flat_measure_corpus.train, indices)
@@ -467,9 +471,19 @@ if __name__ == "__main__":
         in_mems = stateful_args
         if extras["train"]:
             # TODO: ADD MASKING INTO MODEL
-            out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=in_mems)
+            if first_train:
+                out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=None)
+                first_train = False
+                first_valid = True
+            else:
+                out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=in_mems)
         else:
-            out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=None)
+            if first_valid:
+                out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=None)
+                first_valid = False
+                first_train = True
+            else:
+                out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=in_mems)
 
 
         # inputs have already been cut to context length inside transformer
@@ -477,7 +491,8 @@ if __name__ == "__main__":
         loss1 = loss_fun(out1, targets[hp.context_len:, :, 1][..., None])
         loss2 = loss_fun(out2, targets[hp.context_len:, :, 2][..., None])
         loss3 = loss_fun(out3, targets[hp.context_len:, :, 3][..., None])
-        loss = (loss0 + loss1 + loss2 + loss3) / 4.
+        #loss = (loss0 + loss1 + loss2 + loss3) / 4.
+        loss = loss0 + 0. * loss1 + 0. * loss2 + 0. * loss3
         target_masks = feature_batches_masks_list[0][hp.context_len:]
         # masks use transformer convention 0 if valid, 1 if invalid
         loss = loss * (1. - target_masks)
@@ -490,8 +505,9 @@ if __name__ == "__main__":
             clipping_grad_norm_(model.parameters(), hp.clip)
             optimizer.step()
         else:
+            pass
             # don't carry over valid memories into train, just copy the train ones over
-            out_mems = in_mems
+            #out_mems = in_mems
         return l, None, out_mems
 
     """

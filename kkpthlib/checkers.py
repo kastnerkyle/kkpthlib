@@ -7,7 +7,10 @@ import json
 import shutil
 from operator import itemgetter
 from itertools import groupby
-import cPickle as pickle
+try:
+    import cPickle as pickle
+except ImportError:
+    import _pickle as pickle
 import gc
 import time
 from collections import OrderedDict

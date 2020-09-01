@@ -15,13 +15,22 @@ from scipy import linalg
 from scipy.io import wavfile
 from scipy import fftpack
 from functools import wraps
-import exceptions
+
+try:
+    import exceptions
+except ImportError:
+    import builtins as exceptions
+
 import subprocess
 import copy
 import shutil
 import xml
 import xml.etree.cElementTree as ElementTree
-import HTMLParser
+try:
+    import HTMLParser
+except ImportError:
+   from html.parser import HTMLParser
+
 import functools
 import operator
 import gzip
