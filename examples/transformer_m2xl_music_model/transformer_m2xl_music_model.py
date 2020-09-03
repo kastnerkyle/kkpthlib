@@ -487,6 +487,7 @@ if __name__ == "__main__":
 
 
         # inputs have already been cut to context length inside transformer
+        from IPython import embed; embed(); raise ValueError()
         loss0 = loss_fun(out0, targets[hp.context_len:, :, 0][..., None])
         loss1 = loss_fun(out1, targets[hp.context_len:, :, 1][..., None])
         loss2 = loss_fun(out2, targets[hp.context_len:, :, 2][..., None])
