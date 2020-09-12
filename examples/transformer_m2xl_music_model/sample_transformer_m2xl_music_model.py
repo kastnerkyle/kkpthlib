@@ -7,6 +7,8 @@ from torch import nn
 import torch.functional as F
 import copy
 import sys
+import shutil
+import time
 
 import json
 import os
@@ -126,6 +128,7 @@ from kkpthlib import MusicJSONRasterCorpus
 from kkpthlib import convert_voice_lists_to_music_json
 from kkpthlib import music_json_to_midi
 from kkpthlib import write_music_json
+from kkpthlib import pitch_duration_velocity_lists_from_music_json_file
 
 # COPY PASTA FROM TRAIN FILE
 # need this for now
@@ -233,167 +236,211 @@ reduced = top_p_from_logits_np(out0.cpu().data.numpy() / temperature, p_cutoff)
 reduced_probs = softmax_np(reduced)
 preds = reduced_probs.argmax(axis=-1)
 
+'''
+path = train_files[0]
+pitches, durations, velocities = pitch_duration_velocity_lists_from_music_json_file(path,
+                                                                               default_velocity=flat_measure_corpus.default_velocity,
+                                                                               n_voices=flat_measure_corpus.n_voices,
+                                                                               measure_value=flat_measure_corpus.measure_value,
+                                                                               fill_value=flat_measure_corpus.fill_value)
+feats = flat_measure_corpus._features_from_lists(pitches, durations, velocities)
+tokens = flat_measure_corpus._tokenize_features(feats)
+'''
+
 # need to write code to put the audio back together again from given or predictable info
 midi_sample_dir = "midi_samples"
+
+if os.path.exists(midi_sample_dir):
+    print("Previous midi_samples folder found, removing...")
+    shutil.rmtree(midi_sample_dir)
+
+# this should ALWAYS happen
 if not os.path.exists(midi_sample_dir):
     os.mkdir(midi_sample_dir)
 
-"""
-[fingerprint_features_zero, : 0
-fingerprint_features_one, : 1
-duration_features_zero, : 2
-duration_features_mid, : 3
-duration_features_one, : 4
-voices, : 5
-centers, : 6
-key_zero_base, : 7
-key_zero, : 8
-key_durations_zero, : 9
-key_one_base, : 10
-key_one, : 11
-key_durations_one, : 12
-key_indicators, : 13
-targets] : 14
-"""
+'''
+def lists_from_preds(preds, features):
+    """
+    preds: (len, batch)
+    features: list of length 14
+               each feature batch is (len, batch, feature_dim)
 
-# do we just make a function on the original data class?
-for i in range(preds.shape[1]):
-    # first get back the "left" keypoint
-    # as well as the duration
-    key_zero_base = batches_list[7]
-    key_zero = batches_list[8]
-    key_durations_zero = batches_list[9]
-    
-    key_one_base = batches_list[10]
-    key_one = batches_list[11]
-    key_durations_one = batches_list[12]
+    [fingerprint_features_zero, : 0
+    fingerprint_features_one, : 1
+    duration_features_zero, : 2
+    duration_features_mid, : 3
+    duration_features_one, : 4
+    voices, : 5
+    centers, : 6
+    key_zero_base, : 7
+    key_zero, : 8
+    key_durations_zero, : 9
+    key_one_base, : 10
+    key_one, : 11
+    key_durations_one, : 12
+    key_indicators, : 13
+    targets] : 14
+    """
+    batches_list = features
+    all_pitches_list = []
+    all_durations_list = []
+    all_voices_list = []
+    all_marked_quarters_context_boundary = []
 
-    key_indicators = batches_list[13]
+    # do we just make a function on the original data class?
+    for i in range(preds.shape[1]):
+        # first get back the "left" keypoint
+        # as well as the duration
+        key_zero_base = batches_list[7]
+        key_zero = batches_list[8]
+        key_durations_zero = batches_list[9]
+        
+        key_one_base = batches_list[10]
+        key_one = batches_list[11]
+        key_durations_one = batches_list[12]
 
-    # same mask for all of em
-    this_mask = batches_masks_list[0][:, i]
-    f_m = np.where(this_mask)[0][0]
+        key_indicators = batches_list[13]
 
-    key_zero_base = key_zero_base[:f_m, i, 0]
-    key_zero = key_zero[:f_m, i, 0]
-    key_durations_zero = key_durations_zero[:f_m, i, 0]
+        # same mask for all of em
+        this_mask = batches_masks_list[0][:, i]
+        f_m = np.where(this_mask)[0][0]
 
-    key_one_base = key_one_base[:f_m, i, 0]
-    key_one = key_one[:f_m, i, 0]
-    key_durations_one = key_durations_one[:f_m, i, 0]
-    key_indicators = key_indicators[:f_m, i, 0]
+        key_zero_base = key_zero_base[:f_m, i, 0]
+        key_zero = key_zero[:f_m, i, 0]
+        key_durations_zero = key_durations_zero[:f_m, i, 0]
 
-    boundary_points = np.concatenate((np.array([-1]), key_indicators))[:-1] != key_indicators
-    s_s = np.concatenate((np.where(boundary_points)[0], np.array([len(key_indicators)])))
-    boundary_pairs = list(zip(s_s[:-1], s_s[1:]))
+        key_one_base = key_one_base[:f_m, i, 0]
+        key_one = key_one[:f_m, i, 0]
+        key_durations_one = key_durations_one[:f_m, i, 0]
+        key_indicators = key_indicators[:f_m, i, 0]
 
-    pitches_list = []
-    durations_list = []
-    voices_list = []
-    voice_step_in_quarters = [0, 0, 0, 0]
-    voice_step_in_pred = [0, 0, 0, 0]
-    marked_quarters_context_boundary = [-1, -1, -1, -1]
-    for s, e in boundary_pairs:
-        # in each chunk, do keypoint vector, then rest
-        this_key = key_zero[s:e]
-        assert all([tk == this_key[0] for tk in this_key])
-        this_key = flat_measure_corpus.keypoint_dictionary.idx2word[this_key[0]]
+        boundary_points = np.concatenate((np.array([-1]), key_indicators))[:-1] != key_indicators
+        s_s = np.concatenate((np.where(boundary_points)[0], np.array([len(key_indicators)])))
+        boundary_pairs = list(zip(s_s[:-1], s_s[1:]))
 
-        this_key_base = key_zero_base[s:e]
-        assert all([tkb == this_key_base[0] for tkb in this_key_base])
-        this_key = tuple([tk + flat_measure_corpus.keypoint_base_dictionary.idx2word[this_key_base[0]] for tk in this_key])
+        pitches_list = []
+        durations_list = []
+        voices_list = []
+        voice_step_in_quarters = [0, 0, 0, 0]
+        voice_step_in_pred = [0, 0, 0, 0]
+        marked_quarters_context_boundary = [-1, -1, -1, -1]
+        for s, e in boundary_pairs:
+            # in each chunk, do keypoint vector, then rest
+            this_key = key_zero[s:e]
+            assert all([tk == this_key[0] for tk in this_key])
+            this_key = flat_measure_corpus.keypoint_dictionary.idx2word[this_key[0]]
 
-        this_key_durations = key_durations_zero[s:e]
-        assert all([tkd == this_key_durations[0] for tkd in this_key_durations])
-        this_key_durations = flat_measure_corpus.keypoint_durations_dictionary.idx2word[this_key_durations[0]]
+            this_key_base = key_zero_base[s:e]
+            assert all([tkb == this_key_base[0] for tkb in this_key_base])
+            this_key = tuple([tk + flat_measure_corpus.keypoint_base_dictionary.idx2word[this_key_base[0]] for tk in this_key])
 
-        centers = batches_list[6]
-        centers = centers[s:e, i]
-        center_0 = flat_measure_corpus.centers_0_dictionary.idx2word[centers[0][0]]
-        center_1 = flat_measure_corpus.centers_1_dictionary.idx2word[centers[0][1]]
-        center_2 = flat_measure_corpus.centers_2_dictionary.idx2word[centers[0][2]]
-        center_3 = flat_measure_corpus.centers_3_dictionary.idx2word[centers[0][3]]
+            this_key_durations = key_durations_zero[s:e]
+            assert all([tkd == this_key_durations[0] for tkd in this_key_durations])
+            this_key_durations = flat_measure_corpus.keypoint_durations_dictionary.idx2word[this_key_durations[0]]
 
-        targets = copy.deepcopy(batches_list[-1])
-        # rewrite targets with preds at the correct point
-        # originally shifted by 2 then moved back 1
-        # preds are one step "ahead" of this target
-        # preds[0] = targets[hp.context_len - 1]?
+            centers = batches_list[6]
+            centers = centers[s:e, i]
+            center_0 = flat_measure_corpus.centers_0_dictionary.idx2word[centers[0][0]]
+            center_1 = flat_measure_corpus.centers_1_dictionary.idx2word[centers[0][1]]
+            center_2 = flat_measure_corpus.centers_2_dictionary.idx2word[centers[0][2]]
+            center_3 = flat_measure_corpus.centers_3_dictionary.idx2word[centers[0][3]]
 
-        targets[hp.context_len - 1:-1, :, 0] = preds
-        targets_chunk = targets[s:e, i]
+            targets = copy.deepcopy(batches_list[-1])
+            # rewrite targets with preds at the correct point
+            # originally shifted by 2 then moved back 1
+            # preds are one step "ahead" of this target
+            # preds[0] = targets[hp.context_len - 1]?
 
-        target_0_values = [flat_measure_corpus.target_0_dictionary.idx2word[targets_chunk[z][0]] for z in range(len(targets_chunk))]
-        target_1_values = [flat_measure_corpus.target_1_dictionary.idx2word[targets_chunk[z][1]] for z in range(len(targets_chunk))]
-        target_2_values = [flat_measure_corpus.target_2_dictionary.idx2word[targets_chunk[z][2]] for z in range(len(targets_chunk))]
-        target_3_values = [flat_measure_corpus.target_3_dictionary.idx2word[targets_chunk[z][3]] for z in range(len(targets_chunk))]
+            targets[hp.context_len - 1:-1, :, 0] = preds
+            targets_chunk = targets[s:e, i]
+
+            target_0_values = [flat_measure_corpus.target_0_dictionary.idx2word[targets_chunk[z][0]] for z in range(len(targets_chunk))]
+            target_1_values = [flat_measure_corpus.target_1_dictionary.idx2word[targets_chunk[z][1]] for z in range(len(targets_chunk))]
+            target_2_values = [flat_measure_corpus.target_2_dictionary.idx2word[targets_chunk[z][2]] for z in range(len(targets_chunk))]
+            target_3_values = [flat_measure_corpus.target_3_dictionary.idx2word[targets_chunk[z][3]] for z in range(len(targets_chunk))]
 
 
-        # 100 was rest
-        remapped_0 = [this_key[0] + t_0 if t_0 != 100 else 0 for t_0 in target_0_values]
-        remapped_1 = [this_key[1] + t_1 if t_1 != 100 else 0 for t_1 in target_1_values]
-        remapped_2 = [this_key[2] + t_2 if t_2 != 100 else 0 for t_2 in target_2_values]
-        remapped_3 = [this_key[3] + t_3 if t_3 != 100 else 0 for t_3 in target_3_values]
+            # 100 was rest
+            remapped_0 = [this_key[0] + t_0 if t_0 != 100 else 0 for t_0 in target_0_values]
+            remapped_1 = [this_key[1] + t_1 if t_1 != 100 else 0 for t_1 in target_1_values]
+            remapped_2 = [this_key[2] + t_2 if t_2 != 100 else 0 for t_2 in target_2_values]
+            remapped_3 = [this_key[3] + t_3 if t_3 != 100 else 0 for t_3 in target_3_values]
 
-        # remapped will come from predictions now
-        # drop this assert!
-        #assert all([remapped_0[n] == remapped_1[n] for n in range(len(remapped_0))])
-        #assert all([remapped_0[n] == remapped_2[n] for n in range(len(remapped_0))])
-        #assert all([remapped_0[n] == remapped_3[n] for n in range(len(remapped_0))])
+            # remapped will come from predictions now
+            # drop this assert!
+            #assert all([remapped_0[n] == remapped_1[n] for n in range(len(remapped_0))])
+            #assert all([remapped_0[n] == remapped_2[n] for n in range(len(remapped_0))])
+            #assert all([remapped_0[n] == remapped_3[n] for n in range(len(remapped_0))])
 
-        durations = batches_list[3]
-        durations = durations[s:e, i, 0]
-        duration_values = [flat_measure_corpus.duration_features_mid_dictionary.idx2word[d_el] for d_el in durations]
+            durations = batches_list[3]
+            durations = durations[s:e, i, 0]
+            duration_values = [flat_measure_corpus.duration_features_mid_dictionary.idx2word[d_el] for d_el in durations]
 
-        voices = batches_list[5]
-        voices = voices[s:e, i, 0]
-        voice_values = [flat_measure_corpus.voices_dictionary.idx2word[v_el] for v_el in voices]
+            voices = batches_list[5]
+            voices = voices[s:e, i, 0]
+            voice_values = [flat_measure_corpus.voices_dictionary.idx2word[v_el] for v_el in voices]
 
-        final_pitch_chunk = []
-        final_duration_chunk = []
-        final_voice_chunk = []
-        key_itr = 0
-        last_v = -1
-        for n, v in enumerate(voice_values):
+            final_pitch_chunk = []
+            final_duration_chunk = []
+            final_voice_chunk = []
+            key_itr = 0
+            last_v = -1
+            for n, v in enumerate(voice_values):
+                # we assume it is SSSSSSAAAAAAAAAAAATTTTTTTBB
+                # style format
+                # need to insert key values at the right spot
+                if v != last_v:
+                    final_pitch_chunk.append(this_key[key_itr])
+                    final_duration_chunk.append(this_key_durations[key_itr])
+                    final_voice_chunk.append(key_itr)
+
+                    voice_step_in_quarters[v] += this_key_durations[key_itr]
+                    # we don't predict this one
+                    #voice_step_in_pred[v] += 1
+                    key_itr += 1
+                    last_v = v
+
+                final_pitch_chunk.append(int(remapped_0[n]))
+                final_duration_chunk.append(duration_values[n])
+                final_voice_chunk.append(v)
+                voice_step_in_quarters[v] += duration_values[n]
+                voice_step_in_pred[v] += 1
             # we assume it is SSSSSSAAAAAAAAAAAATTTTTTTBB
-            # style format
-            # need to insert key values at the right spot
-            if v != last_v:
-                final_pitch_chunk.append(this_key[key_itr])
-                final_duration_chunk.append(this_key_durations[key_itr])
-                final_voice_chunk.append(key_itr)
+            current_aggregate_pred_step = sum(voice_step_in_pred)
+            if current_aggregate_pred_step >= hp.context_len:
+                # find voice / index where we cross the context boundary
+                # only mark the first time
+                if all([marked_quarters_context_boundary[_] < 0 for _ in range(len(marked_quarters_context_boundary))]):
+                    _ind = np.where((np.cumsum(voice_step_in_pred) >= hp.context_len) == True)[0][0]
+                    for _ in range(len(marked_quarters_context_boundary)):
+                        marked_quarters_context_boundary[_] = int(voice_step_in_quarters[_ind])
+            pitches_list.extend(final_pitch_chunk)
+            durations_list.extend(final_duration_chunk)
+            voices_list.extend(final_voice_chunk)
 
-                voice_step_in_quarters[v] += this_key_durations[key_itr]
-                # we don't predict this one
-                #voice_step_in_pred[v] += 1
-                key_itr += 1
-                last_v = v
+        all_marked_quarters_context_boundary.append(marked_quarters_context_boundary)
+        all_pitches_list.append(pitches_list)
+        all_durations_list.append(durations_list)
+        all_voices_list.append(voices_list)
+    return all_pitches_list, all_durations_list, all_voices_list, all_marked_quarters_context_boundary
+'''
 
-            final_pitch_chunk.append(int(remapped_0[n]))
-            final_duration_chunk.append(duration_values[n])
-            final_voice_chunk.append(v)
-            voice_step_in_quarters[v] += duration_values[n]
-            voice_step_in_pred[v] += 1
-        # we assume it is SSSSSSAAAAAAAAAAAATTTTTTTBB
-        current_aggregate_pred_step = sum(voice_step_in_pred)
-        if current_aggregate_pred_step >= hp.context_len:
-            # find voice / index where we cross the context boundary
-            # only mark the first time
-            if all([marked_quarters_context_boundary[_] < 0 for _ in range(len(marked_quarters_context_boundary))]):
-                _ind = np.where((np.cumsum(voice_step_in_pred) >= hp.context_len) == True)[0][0]
-                for _ in range(len(marked_quarters_context_boundary)):
-                    marked_quarters_context_boundary[_] = int(voice_step_in_quarters[_ind])
-        pitches_list.extend(final_pitch_chunk)
-        durations_list.extend(final_duration_chunk)
-        voices_list.extend(final_voice_chunk)
+targets = copy.deepcopy(batches_list[-1])
+all_pitches_list, all_durations_list, all_voices_list, all_marked_quarters_context_boundary = flat_measure_corpus.pitch_duration_voice_lists_from_preds_and_features(preds, batches_list, batches_masks_list, context_len=hp.context_len)
+for i in range(len(all_pitches_list)):
+    pitches_list = all_pitches_list[i]
+    durations_list = all_durations_list[i]
+    voices_list = all_voices_list[i]
+    marked_quarters_context_boundary = all_marked_quarters_context_boundary[i]
 
     data = convert_voice_lists_to_music_json(pitch_lists=pitches_list, duration_lists=durations_list, voices_list=voices_list)
-    json_fpath = midi_sample_dir + os.sep + "true{}.json".format(i)
+    tstamp = int(time.time())
+    json_fpath = midi_sample_dir + os.sep + "true{}_{}.json".format(i, tstamp)
     write_music_json(data, json_fpath)
 
-    fpath = midi_sample_dir + os.sep + "true{}.midi".format(i)
+    fpath = midi_sample_dir + os.sep + "true{}_{}.midi".format(i, tstamp)
     a = "harpsichord_preset"
-    b = "grand_piano_preset"
+    b = "woodwind_preset"
     m = {0: [(a, 0), (b, marked_quarters_context_boundary[0])],
          1: [(a, 0), (b, marked_quarters_context_boundary[1])],
          2: [(a, 0), (b, marked_quarters_context_boundary[2])],

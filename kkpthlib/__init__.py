@@ -14,6 +14,7 @@ from .datasets import convert_voice_lists_to_music_json
 from .datasets import convert_voice_roll_to_music_json
 from .datasets import midi_instruments_name_to_number
 from .datasets import midi_percussion_name_to_number
+from .datasets import pitch_duration_velocity_lists_from_music_json_file
 from .checkers import *
 from .sample import *
 from .plotters import *

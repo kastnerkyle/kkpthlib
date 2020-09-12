@@ -7,6 +7,7 @@ import time
 import struct
 import numpy as np
 import itertools
+import copy
 from ..core import get_logger
 from ..data import LookupDictionary
 from .loaders import get_kkpthlib_dataset_dir
@@ -721,7 +722,9 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
                                                                                        n_voices=self.n_voices,
                                                                                        measure_value=self.measure_value,
                                                                                        fill_value=self.fill_value)
+        return self._features_from_lists(pitch, duration, velocity)
 
+    def _features_from_lists(self, pitch, duration, velocity):
         def isplit(iterable, splitters):
             return [list(g) for k,g in itertools.groupby(iterable,lambda x:x in splitters) if not k]
 
@@ -1018,6 +1021,91 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
          key_durations_one,
          targets]
         """
+        all_fingerprint_features_zero = []
+        all_fingerprint_features_one = []
+        all_duration_features_zero = []
+        all_duration_features_mid = []
+        all_duration_features_one = []
+        all_voices = []
+        all_centers = []
+        all_key_zero_base = []
+        all_key_zero = []
+        all_key_durations_zero = []
+        all_key_one_base = []
+        all_key_one = []
+        all_key_durations_one = []
+        all_key_indicators = []
+        all_targets = []
+
+        for path in paths:
+            ret = self._process(path)
+            tokens = self._tokenize_features(ret)
+            (fingerprint_features_zero,
+             fingerprint_features_one,
+             duration_features_zero,
+             duration_features_mid,
+             duration_features_one,
+             voices,
+             centers,
+             key_zero_base,
+             key_zero,
+             key_durations_zero,
+             key_one_base,
+             key_one,
+             key_durations_one,
+             key_indicators,
+             targets) = tokens
+            all_fingerprint_features_zero.extend(fingerprint_features_zero)
+            all_fingerprint_features_one.extend(fingerprint_features_one)
+            all_duration_features_zero.extend(duration_features_zero)
+            all_duration_features_mid.extend(duration_features_mid)
+            all_duration_features_one.extend(duration_features_one)
+            all_voices.extend(voices)
+            all_centers.extend(centers)
+            all_key_zero_base.extend(key_zero_base)
+            all_key_zero.extend(key_zero)
+            all_key_durations_zero.extend(key_durations_zero)
+            all_key_one_base.extend(key_one_base)
+            all_key_one.extend(key_one)
+            all_key_durations_one.extend(key_durations_one)
+            all_key_indicators.extend(key_indicators)
+            all_targets.extend(targets)
+
+        all_tokens = (all_fingerprint_features_zero,
+                      all_fingerprint_features_one,
+                      all_duration_features_zero,
+                      all_duration_features_mid,
+                      all_duration_features_one,
+                      all_voices,
+                      all_centers,
+                      all_key_zero_base,
+                      all_key_zero,
+                      all_key_durations_zero,
+                      all_key_one_base,
+                      all_key_one,
+                      all_key_durations_one,
+                      all_key_indicators,
+                      all_targets)
+        return all_tokens
+
+    def _tokenize_features(self, features):
+        """
+            (flat_fingerprint_features_zero,
+             flat_fingerprint_features_one,
+             flat_duration_features_zero,
+             flat_duration_features_mid,
+             flat_duration_features_one,
+             flat_voices,
+             flat_centers,
+             flat_key_zero_base,
+             flat_key_zero,
+             flat_key_durations_zero,
+             flat_key_one_base,
+             flat_key_one,
+             flat_key_durations_one,
+             flat_key_indicators,
+             flat_targets) = features
+        """
         fingerprint_features_zero = []
         fingerprint_features_one = []
         duration_features_zero = []
@@ -1034,91 +1122,89 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
         key_indicators = []
         targets = []
 
-        for path in paths:
-            ret = self._process(path)
-            (flat_fingerprint_features_zero,
-             flat_fingerprint_features_one,
-             flat_duration_features_zero,
-             flat_duration_features_mid,
-             flat_duration_features_one,
-             flat_voices,
-             flat_centers,
-             flat_key_zero_base,
-             flat_key_zero,
-             flat_key_durations_zero,
-             flat_key_one_base,
-             flat_key_one,
-             flat_key_durations_one,
-             flat_key_indicators,
-             flat_targets) = ret
+        (flat_fingerprint_features_zero,
+         flat_fingerprint_features_one,
+         flat_duration_features_zero,
+         flat_duration_features_mid,
+         flat_duration_features_one,
+         flat_voices,
+         flat_centers,
+         flat_key_zero_base,
+         flat_key_zero,
+         flat_key_durations_zero,
+         flat_key_one_base,
+         flat_key_one,
+         flat_key_durations_one,
+         flat_key_indicators,
+         flat_targets) = features
 
-            for fpz in flat_fingerprint_features_zero:
-                fpz_token = self.fingerprint_features_zero_dictionary.word2idx[tuple(fpz)]
-                fingerprint_features_zero.append(fpz_token)
+        for fpz in flat_fingerprint_features_zero:
+            fpz_token = self.fingerprint_features_zero_dictionary.word2idx[tuple(fpz)]
+            fingerprint_features_zero.append(fpz_token)
 
-            for fpo in flat_fingerprint_features_one:
-                fpo_token = self.fingerprint_features_one_dictionary.word2idx[tuple(fpo)]
-                fingerprint_features_one.append(fpo_token)
+        for fpo in flat_fingerprint_features_one:
+            fpo_token = self.fingerprint_features_one_dictionary.word2idx[tuple(fpo)]
+            fingerprint_features_one.append(fpo_token)
 
-            for durfz in flat_duration_features_zero:
-                durfz_token = self.duration_features_zero_dictionary.word2idx[durfz]
-                duration_features_zero.append(durfz_token)
+        for durfz in flat_duration_features_zero:
+            durfz_token = self.duration_features_zero_dictionary.word2idx[durfz]
+            duration_features_zero.append(durfz_token)
 
-            for durfm in flat_duration_features_mid:
-                durfm_token = self.duration_features_mid_dictionary.word2idx[durfm]
-                duration_features_mid.append(durfm_token)
+        for durfm in flat_duration_features_mid:
+            durfm_token = self.duration_features_mid_dictionary.word2idx[durfm]
+            duration_features_mid.append(durfm_token)
 
-            for durfo in flat_duration_features_one:
-                durfo_token = self.duration_features_one_dictionary.word2idx[durfo]
-                duration_features_one.append(durfo_token)
+        for durfo in flat_duration_features_one:
+            durfo_token = self.duration_features_one_dictionary.word2idx[durfo]
+            duration_features_one.append(durfo_token)
 
-            for v in flat_voices:
-                 v_token = self.voices_dictionary.word2idx[v]
-                 voices.append(v_token)
+        for v in flat_voices:
+             v_token = self.voices_dictionary.word2idx[v]
+             voices.append(v_token)
 
-            for c in flat_centers:
-                center_0_token = self.centers_0_dictionary.word2idx[c[0]]
-                center_1_token = self.centers_1_dictionary.word2idx[c[1]]
-                center_2_token = self.centers_2_dictionary.word2idx[c[2]]
-                center_3_token = self.centers_3_dictionary.word2idx[c[3]]
-                centers.append([center_0_token,
-                                center_1_token,
-                                center_2_token,
-                                center_3_token])
+        for c in flat_centers:
+            center_0_token = self.centers_0_dictionary.word2idx[c[0]]
+            center_1_token = self.centers_1_dictionary.word2idx[c[1]]
+            center_2_token = self.centers_2_dictionary.word2idx[c[2]]
+            center_3_token = self.centers_3_dictionary.word2idx[c[3]]
+            centers.append([center_0_token,
+                            center_1_token,
+                            center_2_token,
+                            center_3_token])
 
-            for kzb in flat_key_zero_base:
-                kzb_token = self.keypoint_base_dictionary.word2idx[kzb]
-                key_zero_base.append(kzb_token)
+        for kzb in flat_key_zero_base:
+            kzb_token = self.keypoint_base_dictionary.word2idx[kzb]
+            key_zero_base.append(kzb_token)
 
-            for kz in flat_key_zero:
-                kz_token = self.keypoint_dictionary.word2idx[tuple(kz)]
-                key_zero.append(kz_token)
+        for kz in flat_key_zero:
+            kz_token = self.keypoint_dictionary.word2idx[tuple(kz)]
+            key_zero.append(kz_token)
 
-            for kdz in flat_key_durations_zero:
-                kdz_token = self.keypoint_durations_dictionary.word2idx[tuple(kdz)]
-                key_durations_zero.append(kdz_token)
+        for kdz in flat_key_durations_zero:
+            kdz_token = self.keypoint_durations_dictionary.word2idx[tuple(kdz)]
+            key_durations_zero.append(kdz_token)
 
-            for kob in flat_key_one_base:
-                kob_token = self.keypoint_base_dictionary.word2idx[kob]
-                key_one_base.append(kob_token)
+        for kob in flat_key_one_base:
+            kob_token = self.keypoint_base_dictionary.word2idx[kob]
+            key_one_base.append(kob_token)
 
-            for ko in flat_key_one:
-                ko_token = self.keypoint_dictionary.word2idx[tuple(ko)]
-                key_one.append(ko_token)
+        for ko in flat_key_one:
+            ko_token = self.keypoint_dictionary.word2idx[tuple(ko)]
+            key_one.append(ko_token)
 
-            for kdo in flat_key_durations_one:
-                kdo_token = self.keypoint_durations_dictionary.word2idx[tuple(kdo)]
-                key_durations_one.append(kdo_token)
+        for kdo in flat_key_durations_one:
+            kdo_token = self.keypoint_durations_dictionary.word2idx[tuple(kdo)]
+            key_durations_one.append(kdo_token)
 
-            for fki in flat_key_indicators:
-                key_indicators.append(fki)
+        for fki in flat_key_indicators:
+            key_indicators.append(fki)
 
-            for t in flat_targets:
-                target_0_token = self.target_0_dictionary.word2idx[t[0]]
-                target_1_token = self.target_1_dictionary.word2idx[t[1]]
-                target_2_token = self.target_2_dictionary.word2idx[t[2]]
-                target_3_token = self.target_3_dictionary.word2idx[t[3]]
-                targets.append([target_0_token, target_1_token, target_2_token, target_3_token])
+        for t in flat_targets:
+            target_0_token = self.target_0_dictionary.word2idx[t[0]]
+            target_1_token = self.target_1_dictionary.word2idx[t[1]]
+            target_2_token = self.target_2_dictionary.word2idx[t[2]]
+            target_3_token = self.target_3_dictionary.word2idx[t[3]]
+            targets.append([target_0_token, target_1_token, target_2_token, target_3_token])
 
         outs = [fingerprint_features_zero,
                 fingerprint_features_one,
@@ -1139,6 +1225,172 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
         for i in range(2, len(outs)):
             assert len(outs[0]) == len(outs[i])
         return outs
+
+    def pitch_duration_voice_lists_from_preds_and_features(self, preds, features, features_masks, context_len):
+        """
+        preds: (len, batch)
+        features: list of length 14
+                   each feature batch is (len, batch, feature_dim)
+
+        [fingerprint_features_zero, : 0
+        fingerprint_features_one, : 1
+        duration_features_zero, : 2
+        duration_features_mid, : 3
+        duration_features_one, : 4
+        voices, : 5
+        centers, : 6
+        key_zero_base, : 7
+        key_zero, : 8
+        key_durations_zero, : 9
+        key_one_base, : 10
+        key_one, : 11
+        key_durations_one, : 12
+        key_indicators, : 13
+        targets] : 14
+        """
+        batches_list = features
+        batches_masks_list = features_masks
+        all_pitches_list = []
+        all_durations_list = []
+        all_voices_list = []
+        all_marked_quarters_context_boundary = []
+
+        # do we just make a function on the original data class?
+        for i in range(preds.shape[1]):
+            # first get back the "left" keypoint
+            # as well as the duration
+            key_zero_base = batches_list[7]
+            key_zero = batches_list[8]
+            key_durations_zero = batches_list[9]
+            
+            key_one_base = batches_list[10]
+            key_one = batches_list[11]
+            key_durations_one = batches_list[12]
+
+            key_indicators = batches_list[13]
+
+            # same mask for all of em
+            this_mask = batches_masks_list[0][:, i]
+            f_m = np.where(this_mask)[0][0]
+
+            key_zero_base = key_zero_base[:f_m, i, 0]
+            key_zero = key_zero[:f_m, i, 0]
+            key_durations_zero = key_durations_zero[:f_m, i, 0]
+
+            key_one_base = key_one_base[:f_m, i, 0]
+            key_one = key_one[:f_m, i, 0]
+            key_durations_one = key_durations_one[:f_m, i, 0]
+            key_indicators = key_indicators[:f_m, i, 0]
+
+            boundary_points = np.concatenate((np.array([-1]), key_indicators))[:-1] != key_indicators
+            s_s = np.concatenate((np.where(boundary_points)[0], np.array([len(key_indicators)])))
+            boundary_pairs = list(zip(s_s[:-1], s_s[1:]))
+
+            pitches_list = []
+            durations_list = []
+            voices_list = []
+            voice_step_in_quarters = [0, 0, 0, 0]
+            voice_step_in_pred = [0, 0, 0, 0]
+            marked_quarters_context_boundary = [-1, -1, -1, -1]
+            for s, e in boundary_pairs:
+                # in each chunk, do keypoint vector, then rest
+                this_key = key_zero[s:e]
+                assert all([tk == this_key[0] for tk in this_key])
+                this_key = self.keypoint_dictionary.idx2word[this_key[0]]
+
+                this_key_base = key_zero_base[s:e]
+                assert all([tkb == this_key_base[0] for tkb in this_key_base])
+                this_key = tuple([tk + self.keypoint_base_dictionary.idx2word[this_key_base[0]] for tk in this_key])
+
+                this_key_durations = key_durations_zero[s:e]
+                assert all([tkd == this_key_durations[0] for tkd in this_key_durations])
+                this_key_durations = self.keypoint_durations_dictionary.idx2word[this_key_durations[0]]
+
+                centers = batches_list[6]
+                centers = centers[s:e, i]
+                center_0 = self.centers_0_dictionary.idx2word[centers[0][0]]
+                center_1 = self.centers_1_dictionary.idx2word[centers[0][1]]
+                center_2 = self.centers_2_dictionary.idx2word[centers[0][2]]
+                center_3 = self.centers_3_dictionary.idx2word[centers[0][3]]
+
+                targets = copy.deepcopy(batches_list[-1])
+                # rewrite targets with preds at the correct point
+                # originally shifted by 2 then moved back 1
+                # preds are one step "ahead" of this target
+                # preds[0] = targets[context_len - 1]?
+
+                targets[context_len - 1:-1, :, 0] = preds
+                targets_chunk = targets[s:e, i]
+
+                target_0_values = [self.target_0_dictionary.idx2word[targets_chunk[z][0]] for z in range(len(targets_chunk))]
+                target_1_values = [self.target_1_dictionary.idx2word[targets_chunk[z][1]] for z in range(len(targets_chunk))]
+                target_2_values = [self.target_2_dictionary.idx2word[targets_chunk[z][2]] for z in range(len(targets_chunk))]
+                target_3_values = [self.target_3_dictionary.idx2word[targets_chunk[z][3]] for z in range(len(targets_chunk))]
+
+
+                # 100 was rest
+                remapped_0 = [this_key[0] + t_0 if t_0 != 100 else 0 for t_0 in target_0_values]
+                remapped_1 = [this_key[1] + t_1 if t_1 != 100 else 0 for t_1 in target_1_values]
+                remapped_2 = [this_key[2] + t_2 if t_2 != 100 else 0 for t_2 in target_2_values]
+                remapped_3 = [this_key[3] + t_3 if t_3 != 100 else 0 for t_3 in target_3_values]
+
+                # remapped will come from predictions now
+                # drop this assert!
+                #assert all([remapped_0[n] == remapped_1[n] for n in range(len(remapped_0))])
+                #assert all([remapped_0[n] == remapped_2[n] for n in range(len(remapped_0))])
+                #assert all([remapped_0[n] == remapped_3[n] for n in range(len(remapped_0))])
+
+                durations = batches_list[3]
+                durations = durations[s:e, i, 0]
+                duration_values = [self.duration_features_mid_dictionary.idx2word[d_el] for d_el in durations]
+
+                voices = batches_list[5]
+                voices = voices[s:e, i, 0]
+                voice_values = [self.voices_dictionary.idx2word[v_el] for v_el in voices]
+
+                final_pitch_chunk = []
+                final_duration_chunk = []
+                final_voice_chunk = []
+                key_itr = 0
+                last_v = -1
+                for n, v in enumerate(voice_values):
+                    # we assume it is SSSSSSAAAAAAAAAAAATTTTTTTBB
+                    # style format
+                    # need to insert key values at the right spot
+                    if v != last_v:
+                        final_pitch_chunk.append(this_key[key_itr])
+                        final_duration_chunk.append(this_key_durations[key_itr])
+                        final_voice_chunk.append(key_itr)
+
+                        voice_step_in_quarters[v] += this_key_durations[key_itr]
+                        # we don't predict this one
+                        #voice_step_in_pred[v] += 1
+                        key_itr += 1
+                        last_v = v
+
+                    final_pitch_chunk.append(int(remapped_0[n]))
+                    final_duration_chunk.append(duration_values[n])
+                    final_voice_chunk.append(v)
+                    voice_step_in_quarters[v] += duration_values[n]
+                    voice_step_in_pred[v] += 1
+                # we assume it is SSSSSSAAAAAAAAAAAATTTTTTTBB
+                current_aggregate_pred_step = sum(voice_step_in_pred)
+                if current_aggregate_pred_step >= context_len:
+                    # find voice / index where we cross the context boundary
+                    # only mark the first time
+                    if all([marked_quarters_context_boundary[_] < 0 for _ in range(len(marked_quarters_context_boundary))]):
+                        _ind = np.where((np.cumsum(voice_step_in_pred) >= context_len) == True)[0][0]
+                        for _ in range(len(marked_quarters_context_boundary)):
+                            marked_quarters_context_boundary[_] = int(voice_step_in_quarters[_ind])
+                pitches_list.extend(final_pitch_chunk)
+                durations_list.extend(final_duration_chunk)
+                voices_list.extend(final_voice_chunk)
+
+            all_marked_quarters_context_boundary.append(marked_quarters_context_boundary)
+            all_pitches_list.append(pitches_list)
+            all_durations_list.append(durations_list)
+            all_voices_list.append(voices_list)
+        return all_pitches_list, all_durations_list, all_voices_list, all_marked_quarters_context_boundary
 
 
 
