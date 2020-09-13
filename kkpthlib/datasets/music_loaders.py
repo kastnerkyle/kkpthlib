@@ -1232,6 +1232,8 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
         features: list of length 14
                    each feature batch is (len, batch, feature_dim)
 
+        ideal r
+
         [fingerprint_features_zero, : 0
         fingerprint_features_one, : 1
         duration_features_zero, : 2
@@ -1247,6 +1249,10 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
         key_durations_one, : 12
         key_indicators, : 13
         targets] : 14
+
+        an ideal reconstruction is
+        preds = targets[..., 0]
+        preds = preds[hp.context_len-1:-1] ?
         """
         batches_list = features
         batches_masks_list = features_masks
@@ -1315,11 +1321,15 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
 
                 targets = copy.deepcopy(batches_list[-1])
                 # rewrite targets with preds at the correct point
-                # originally shifted by 2 then moved back 1
-                # preds are one step "ahead" of this target
-                # preds[0] = targets[context_len - 1]?
+                # originally shifted by 1 then moved back 1
 
-                targets[context_len - 1:-1, :, 0] = preds
+                # currently writing into 0th entry will need to generalize this
+                if len(preds) == len(targets):
+                    targets[:, :, 0] = preds
+                else:
+                    # try to offset by context length
+                    targets[context_len:context_len + len(preds), :, 0] = preds
+
                 targets_chunk = targets[s:e, i]
 
                 target_0_values = [self.target_0_dictionary.idx2word[targets_chunk[z][0]] for z in range(len(targets_chunk))]

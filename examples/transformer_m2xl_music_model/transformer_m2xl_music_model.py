@@ -32,7 +32,7 @@ hp = HParams(memory_len=20,
              max_sequence_length=256,
              transformer_input_dim=380,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
-             learning_rate=1E-5,
+             learning_rate=1E-4,
              min_learning_rate=1E-6,
              clip=.25,
              batch_size=12,
@@ -76,7 +76,7 @@ def build_model(hp, file_corpus):
             # this is ... messy but necessary
 
             # probably a better way than handcoding the relationships here but w/e
-            used_features = [0, 1, 2, 3, 4, 5, 7, 8, 9, "target0", "target1", "target2", "target3"]
+            used_features = [0, 2, 3, 4, 5, 7, 8, 9, "target0", "target1", "target2", "target3"]
             self.used_features = used_features
             self.embeddings = nn.ModuleList()
             for _n, elem in enumerate(used_features):
@@ -133,10 +133,7 @@ def build_model(hp, file_corpus):
             self.transformer = AWDTransformerXLDecoderBlock([hp.transformer_input_dim],
                                                             name="transformer_block",
                                                             random_state=random_state,
-                                                            memory_len=hp.memory_len,
-                                                            context_len=hp.context_len,
-                                                            n_layers=hp.n_layers,
-                                                            input_dropout_keep_prob=hp.input_dropout_keep_prob,
+                                                            memory_len=hp.memory_len, context_len=hp.context_len, n_layers=hp.n_layers, input_dropout_keep_prob=hp.input_dropout_keep_prob,
                                                             attention_dropout_keep_prob=hp.attention_dropout_keep_prob,
                                                             inner_dropout_keep_prob=hp.inner_dropout_keep_prob,
                                                             hidden_dropout_keep_prob=hp.hidden_dropout_keep_prob,
@@ -445,7 +442,7 @@ if __name__ == "__main__":
         # cut the features into chunks then feed without indicators
         # this is ... messy but necessary
 
-        used_features = [0, 1, 2, 3, 4, 5, 7, 8, 9]
+        used_features = [0, 2, 3, 4, 5, 7, 8, 9]
         feature_batches_list = [torch.tensor(b).to(hp.use_device) for n, b in enumerate(batches_list) if n in used_features]
         feature_batches_masks_list = [torch.tensor(mb).to(hp.use_device) for n, mb in enumerate(batches_masks_list) if n in used_features]
         # AFTER SANITY CHECK, SHIFTED TARGETS BECOME INPUTS TOO
@@ -456,12 +453,10 @@ if __name__ == "__main__":
         list_of_inputs = feature_batches_list
         list_of_input_masks = feature_batches_masks_list
         targets = torch.tensor(np_targets).long().to(hp.use_device)
-        # shift ALL targets by 2...
-        # flat_measure_corpus.target_0_dictionary.word2idx[9999] = 0 , same for all targets 
-        shifted_targets = torch.cat((targets[:2] * 0 + 0, targets), 0)
+        targets = torch.cat((targets[:1] * 0 + 0, targets), 0)
         # re-adjust to be sure they are the same length
-        targets = shifted_targets[1:-1]
-        shifted_targets = shifted_targets[:-2]
+        shifted_targets = targets[:-1]
+        targets = targets[1:]
 
         list_of_inputs.extend([shifted_targets[:, :, 0][..., None],
                                shifted_targets[:, :, 1][..., None],
@@ -472,6 +467,7 @@ if __name__ == "__main__":
         if extras["train"]:
             # TODO: ADD MASKING INTO MODEL
             if first_train:
+                model.train()
                 out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=None)
                 first_train = False
                 first_valid = True
@@ -479,6 +475,7 @@ if __name__ == "__main__":
                 out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=in_mems)
         else:
             if first_valid:
+                #model.eval()
                 out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=None)
                 first_valid = False
                 first_train = True
@@ -487,14 +484,13 @@ if __name__ == "__main__":
 
 
         # inputs have already been cut to context length inside transformer
-        from IPython import embed; embed(); raise ValueError()
-        loss0 = loss_fun(out0, targets[hp.context_len:, :, 0][..., None])
-        loss1 = loss_fun(out1, targets[hp.context_len:, :, 1][..., None])
-        loss2 = loss_fun(out2, targets[hp.context_len:, :, 2][..., None])
-        loss3 = loss_fun(out3, targets[hp.context_len:, :, 3][..., None])
+        loss0 = loss_fun(out0, targets[..., :, 0][..., None])
+        loss1 = loss_fun(out1, targets[..., :, 1][..., None])
+        loss2 = loss_fun(out2, targets[..., :, 2][..., None])
+        loss3 = loss_fun(out3, targets[..., :, 3][..., None])
         #loss = (loss0 + loss1 + loss2 + loss3) / 4.
         loss = loss0 + 0. * loss1 + 0. * loss2 + 0. * loss3
-        target_masks = feature_batches_masks_list[0][hp.context_len:]
+        target_masks = feature_batches_masks_list[0]
         # masks use transformer convention 0 if valid, 1 if invalid
         loss = loss * (1. - target_masks)
         loss = loss.sum() / target_masks.sum()
@@ -508,6 +504,8 @@ if __name__ == "__main__":
         else:
             pass
             # don't carry over valid memories into train, just copy the train ones over
+            # this means our validation score in training will be a bit off, but the memory
+            # during training should be OK
             #out_mems = in_mems
         return l, None, out_mems
 

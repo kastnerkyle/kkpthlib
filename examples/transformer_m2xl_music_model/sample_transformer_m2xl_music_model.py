@@ -205,7 +205,7 @@ targets : 14]
 # cut the features into chunks then feed without indicators
 # this is ... messy but necessary
 
-used_features = [0, 1, 2, 3, 4, 5, 7, 8, 9]
+used_features = [0, 2, 3, 4, 5, 7, 8, 9]
 feature_batches_list = [torch.tensor(b).to(hp.use_device) for n, b in enumerate(batches_list) if n in used_features]
 feature_batches_masks_list = [torch.tensor(mb).to(hp.use_device) for n, mb in enumerate(batches_masks_list) if n in used_features]
 # AFTER SANITY CHECK, SHIFTED TARGETS BECOME INPUTS TOO
@@ -216,12 +216,12 @@ np_targets = batches_list[-1]
 list_of_inputs = feature_batches_list
 list_of_input_masks = feature_batches_masks_list
 targets = torch.tensor(np_targets).long().to(hp.use_device)
-# shift ALL targets by 2...
-# flat_measure_corpus.target_0_dictionary.word2idx[9999] = 0 , same for all targets 
-shifted_targets = torch.cat((targets[:2] * 0 + 0, targets), 0)
+
+targets = torch.tensor(np_targets).long().to(hp.use_device)
+targets = torch.cat((targets[:1] * 0 + 0, targets), 0)
 # re-adjust to be sure they are the same length
-targets = shifted_targets[1:-1]
-shifted_targets = shifted_targets[:-2]
+shifted_targets = targets[:-1]
+targets = targets[1:]
 
 list_of_inputs.extend([shifted_targets[:, :, 0][..., None],
                        shifted_targets[:, :, 1][..., None],
@@ -425,12 +425,24 @@ def lists_from_preds(preds, features):
     return all_pitches_list, all_durations_list, all_voices_list, all_marked_quarters_context_boundary
 '''
 
-targets = copy.deepcopy(batches_list[-1])
+targets2 = copy.deepcopy(targets.cpu().data.numpy())
+preds[:hp.context_len] = targets2[:hp.context_len, :, 0]
+
+#shuf_i = np.arange(len(preds))
+#np.random.RandomState(2122).shuffle(shuf_i)
+#preds = preds[shuf_i]
+
+#preds = targets[..., 0]
+#preds = preds[hp.context_len-1:]
+
+#all_pitches_list, all_durations_list, all_voices_list, all_marked_quarters_context_boundary = flat_measure_corpus.pitch_duration_voice_lists_from_preds_and_features(preds, batches_list, batches_masks_list, context_len=hp.context_len)
 all_pitches_list, all_durations_list, all_voices_list, all_marked_quarters_context_boundary = flat_measure_corpus.pitch_duration_voice_lists_from_preds_and_features(preds, batches_list, batches_masks_list, context_len=hp.context_len)
+
 for i in range(len(all_pitches_list)):
-    pitches_list = all_pitches_list[i]
-    durations_list = all_durations_list[i]
-    voices_list = all_voices_list[i]
+    # handle whatever is giving last entry value of 10000
+    pitches_list = all_pitches_list[i][:-1]
+    durations_list = all_durations_list[i][:-1]
+    voices_list = all_voices_list[i][:-1]
     marked_quarters_context_boundary = all_marked_quarters_context_boundary[i]
 
     data = convert_voice_lists_to_music_json(pitch_lists=pitches_list, duration_lists=durations_list, voices_list=voices_list)

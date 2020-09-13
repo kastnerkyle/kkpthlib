@@ -2129,6 +2129,7 @@ class RelativeDecoderLayer(nn.Module):
 class AWDTransformerXLDecoderBlock(nn.Module):
     def __init__(self,
                  list_of_input_dims,
+                 remove_context=False,
                  n_layers=16, n_heads=10, head_dim=38, model_dim=380, inner_dim=900,
                  input_dropout_keep_prob=0.4,
                  attention_dropout_keep_prob=0.8,
@@ -2145,6 +2146,8 @@ class AWDTransformerXLDecoderBlock(nn.Module):
                  device="default",
                  dtype="default"):
         super(AWDTransformerXLDecoderBlock, self).__init__()
+
+        self.remove_context = remove_context
 
         if name is None:
             name = _get_name()
@@ -2299,7 +2302,8 @@ class AWDTransformerXLDecoderBlock(nn.Module):
 
         # slice according to context_len, normally set to 0
         # in original code they do this via target size, but we don't have that information
-        core_out = core_out[self.context_len:]
+        if self.remove_context == True:
+            core_out = core_out[self.context_len:]
         core_out = self.locked_drop_o(core_out)
         return core_out, new_mems
 
