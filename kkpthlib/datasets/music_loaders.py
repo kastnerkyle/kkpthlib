@@ -1372,7 +1372,10 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
                         final_duration_chunk.append(this_key_durations[key_itr])
                         final_voice_chunk.append(key_itr)
 
-                        voice_step_in_quarters[v] += this_key_durations[key_itr]
+                        try:
+                            voice_step_in_quarters[v] += this_key_durations[key_itr]
+                        except:
+                            from IPython import embed; embed(); raise ValueError()
                         # we don't predict this one
                         #voice_step_in_pred[v] += 1
                         key_itr += 1
