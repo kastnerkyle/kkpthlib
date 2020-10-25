@@ -43,7 +43,7 @@ def music21_parse_and_save_json(p, fpath, tempo_factor=1):
             if n.isRest:
                 part.append(0)
             else:
-                part.append(n.midi)
+                part.append(n.pitch.midi)
             part_time.append(n.duration.quarterLength * tempo_factor)
         piece_container["parts"][i] += part
         piece_container["parts_times"][i] += part_time
@@ -210,7 +210,7 @@ def _populate_track_from_data(data, index, program_changes=None):
 
     me = MidiEvent(mt)
     me.type = "END_OF_TRACK"
-    me.channel = index 
+    me.channel = index
     me.data = '' # must set data to empty string
     mt.events.append(me)
     return mt
@@ -459,13 +459,19 @@ def piano_roll_from_music_json_file(json_file, default_velocity=120, quantizatio
     for c in clock:
         # voice
         for v in range(len(parts)):
-            current_note = parts[v][p_i[v]]
+            if p_i[v] >= len(parts[v]):
+                continue
+            else:
+                current_note = parts[v][p_i[v]]
             next_change_time = parts_cumulative_times[v][p_i[v]]
             new_onset = False
             if c >= next_change_time:
                 # we hit a boundary, swap notes
                 p_i[v] += 1
-                current_note = parts[v][p_i[v]]
+                if p_i[v] >= len(parts[v]):
+                    continue
+                else:
+                    current_note = parts[v][p_i[v]]
                 next_change_time = parts_cumulative_times[v][p_i[v]]
                 new_onset = True
             if c == 0. or new_onset:
@@ -479,7 +485,13 @@ def piano_roll_from_music_json_file(json_file, default_velocity=120, quantizatio
                     roll_voices[v].append(current_note)
             else:
                roll_voices[v].append(current_note)
+    if any([len(rv) == 0 for rv in roll_voices]):
+        # print a warning here?
+        roll_voices = [rv for rv in roll_voices if len(rv) > 0]
     if as_numpy:
+        # truncate to shortest if ragged and needs to be numpy
+        min_len = min([len(rv) for rv in roll_voices])
+        roll_voices = [rv[:min_len] for rv in roll_voices]
         roll_voices = np.array(roll_voices).T
     return roll_voices
 
@@ -563,6 +575,559 @@ def pitch_duration_velocity_lists_from_music_json_file(json_file, default_veloci
 
             last_vs[v] = cmi[0]
     return new_parts, new_parts_times, new_parts_velocities
+
+
+class MusicJSONPitchDurationCorpus(object):
+    def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
+                 max_vocabulary_size=-1,
+                 voices=[0,1,2,3],
+                 raster_scan=False):
+        """
+        """
+        self.dictionary = LookupDictionary()
+        self.max_vocabulary_size = max_vocabulary_size
+        self.voices = voices
+        self.fill_symbol = (-1, -1)
+        self.dictionary.add_word(self.fill_symbol)
+        self.raster_scan = raster_scan
+
+        self.train_data_file_paths = train_data_file_paths
+        self.valid_data_file_paths = valid_data_file_paths
+
+        train_pitches, train_durations, train_voices = self._load_music_json(train_data_file_paths)
+
+        self.build_vocabulary(train_data_file_paths)
+        if valid_data_file_paths != None:
+            valid_pitches, valid_durations, valid_voices = self._load_music_json(valid_data_file_paths)
+            self.build_vocabulary(valid_data_file_paths)
+        if test_data_file_paths != None:
+            test_pitches, test_durations, test_voices = self._load_music_json(test_data_file_paths)
+
+        self.train, self.train_offsets = self.pre_tokenize(train_data_file_paths)
+        if valid_data_file_paths is not None:
+            self.valid, self.valid_offsets = self.pre_tokenize(valid_data_file_paths)
+        if test_data_file_paths is not None:
+            self.test, self.test_offsets = self.pre_tokenize(test_data_file_paths)
+
+    def _load_music_json(self, json_file_paths):
+        all_pitches = []
+        all_durations = []
+        all_voices = []
+        for path in json_file_paths:
+            pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
+            all_pitches.append([p for n, p in enumerate(pitches) if n in self.voices])
+            all_durations.append([d for n, d in enumerate(durations) if n in self.voices])
+            all_voices.append([v for n, v in enumerate(voices) if n in self.voices])
+        return all_pitches, all_durations, all_voices
+
+    def build_vocabulary(self, json_file_paths):
+        for path in json_file_paths:
+            pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
+            all_pitches = []
+            all_durations = []
+            if self.raster_scan:
+                joint = []
+                v = 0
+                voice_counter = [0, 0, 0, 0]
+                while True:
+                    if voice_counter[v] < len(pitches[v]):
+                        if all([voice_counter[i] >= len(pitches[i]) for i in range(len(voice_counter))]):
+                            break
+                        all_pitches.append(pitches[voice_counter[v]])
+                        all_durations.append(durations[voice_counter[v]])
+                    v = v + 1
+                    v = v % len(pitches)
+                for p, d in zip(all_pitches, all_durations):
+                    if d == -1:
+                        continue
+                    else:
+                        joint.append((p, d))
+
+                for j in joint:
+                    if j not in self.dictionary.word2idx:
+                        self.dictionary.add_word(j)
+            else:
+                for v in self.voices:
+                    _pitches = [p for n, p in enumerate(pitches) if n == v]
+                    _durations = [d for n, d in enumerate(durations) if n == v]
+                    _pitches = _pitches[0]
+                    _durations = _durations[0]
+                    assert len(_pitches) == len(_durations)
+                    joint = []
+                    for p, d in zip(_pitches, _durations):
+                        if d == -1:
+                            continue
+                        else:
+                            joint.append((p, d))
+                    for j in joint:
+                        if j not in self.dictionary.word2idx:
+                            self.dictionary.add_word(j)
+
+    def pre_tokenize(self, json_file_paths):
+        joints = []
+        joints_offsets = []
+        print("NYI handle joint offsets")
+        from IPython import embed; embed(); raise ValueError()
+        for path in json_file_paths:
+            pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
+            all_pitches = []
+            all_durations = []
+            if self.raster_scan:
+                joint = []
+                v = 0
+                voice_counter = [0, 0, 0, 0]
+                while True:
+                    if voice_counter[v] < len(pitches[v]):
+                        if all([voice_counter[i] >= len(pitches[i]) for i in range(len(voice_counter))]):
+                            break
+                        all_pitches.append(pitches[voice_counter[v]])
+                        all_durations.append(durations[voice_counter[v]])
+                    v = v + 1
+                    v = v % len(pitches)
+                for p, d in zip(all_pitches, all_durations):
+                    if d == -1:
+                        continue
+                    else:
+                        joint.append((p, d))
+                joints.extend(joint)
+            else:
+                for v in self.voices:
+                    _pitches = [p for n, p in enumerate(pitches) if n == v]
+                    _durations = [d for n, d in enumerate(durations) if n == v]
+                    _pitches = _pitches[0]
+                    _durations = _durations[0]
+                    assert len(_pitches) == len(_durations)
+                    joint = []
+                    for p, d in zip(_pitches, _durations):
+                        if d == -1:
+                            continue
+                        else:
+                            joint.append((p, d))
+                    joints.extend(joint)
+        return joints, joints_offsets
+
+    def get_iterator(self, batch_size, random_seed, sequence_len=64, context_len=32, sample_percent=.15,
+                     max_n_gram=8, _type="train"):
+        random_state = np.random.RandomState(random_seed)
+        if _type == "train":
+            content = self.train
+            offsets = self.train_offsets
+        elif _type == "valid":
+            content = self.valid
+            offsets = self.valid_offsets
+        elif _type == "test":
+            content = self.test
+            offsets = self.test_offsets
+
+        fill_symbol = self.fill_symbol
+
+        def sample_minibatch(batch_size=batch_size, content=content, random_state=random_state,
+                             sequence_len=sequence_len,
+                             context_len=context_len,
+                             fill_symbol=fill_symbol,
+                             sample_percent=sample_percent,
+                             max_n_gram=max_n_gram):
+            while True:
+                cur_batch = []
+                for i in range(batch_size):
+                    # sample place to start element from the dataset
+                    el = random_state.choice(len(content) - sequence_len - 1)
+                    cur = content[el:el + sequence_len]
+                    cur_batch.append(cur)
+                # make transformer masks for constructed batch
+                max_len = max([len(b) for b in cur_batch])
+                cur_batch_masks = [[0] * len(b) + [1] * (max_len - len(b)) for b in cur_batch]
+                cur_batch = [b + [fill_symbol] * (max_len - len(b)) for b in cur_batch]
+                token_batch = [[self.dictionary.word2idx[bi] for bi in b] for b in cur_batch]
+                yield np.array(token_batch).T[..., None], np.array(cur_batch_masks).T
+        return sample_minibatch()
+
+
+class MusicJSONInfillCorpus(object):
+    def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
+                 max_vocabulary_size=-1,
+                 voices=[0,1,2,3],
+                 raster_scan=True):
+        """
+        """
+        self.dictionary = LookupDictionary()
+        self.max_vocabulary_size = max_vocabulary_size
+        self.voices = voices
+        self.mask_symbol = (-1, -1)
+        self.answer_symbol = (-2, -2)
+        self.end_context_symbol = (-3, -3)
+        self.file_separator_symbol = (-4, -4)
+        self.fill_symbol = (-5, -5)
+        self.raster_scan = raster_scan
+
+        self.train_data_file_paths = train_data_file_paths
+        self.valid_data_file_paths = valid_data_file_paths
+
+        train_pitches, train_durations, train_voices = self._load_music_json(train_data_file_paths)
+
+        self.dictionary.add_word(self.mask_symbol)
+        self.dictionary.add_word(self.answer_symbol)
+        self.dictionary.add_word(self.end_context_symbol)
+        self.dictionary.add_word(self.file_separator_symbol)
+        self.dictionary.add_word(self.fill_symbol)
+
+        self.build_vocabulary(train_data_file_paths)
+        if valid_data_file_paths != None:
+            valid_pitches, valid_durations, valid_voices = self._load_music_json(valid_data_file_paths)
+            self.build_vocabulary(valid_data_file_paths)
+        if test_data_file_paths != None:
+            test_pitches, test_durations, test_voices = self._load_music_json(test_data_file_paths)
+
+        self.train, self.train_offsets = self.pre_tokenize(train_data_file_paths)
+        if valid_data_file_paths is not None:
+            self.valid, self.valid_offsets = self.pre_tokenize(valid_data_file_paths)
+        if test_data_file_paths is not None:
+            self.test, self.test_offsets = self.pre_tokenize(test_data_file_paths)
+
+    def _load_music_json(self, json_file_paths):
+        all_pitches = []
+        all_durations = []
+        all_voices = []
+        for path in json_file_paths:
+            pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
+            all_pitches.append([p for n, p in enumerate(pitches) if n in self.voices])
+            all_durations.append([d for n, d in enumerate(durations) if n in self.voices])
+            all_voices.append([v for n, v in enumerate(voices) if n in self.voices])
+        return all_pitches, all_durations, all_voices
+
+    def build_vocabulary(self, json_file_paths):
+        for path in json_file_paths:
+            all_pitches = []
+            all_durations = []
+            pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
+            if self.raster_scan:
+                joint = []
+                v = 0
+                voice_counter = [0, 0, 0, 0]
+                while True:
+                    if voice_counter[v] >= len(pitches[v]):
+                        if all([voice_counter[i] >= len(pitches[i]) for i in range(len(voice_counter))]):
+                            break
+                    else:
+                        all_pitches.append(pitches[v][voice_counter[v]])
+                        all_durations.append(durations[v][voice_counter[v]])
+                    voice_counter[v] += 1
+                    v = v + 1
+                    v = v % len(pitches)
+                for p, d in zip(all_pitches, all_durations):
+                    if d == -1:
+                        continue
+                    else:
+                        joint.append((p, d))
+
+                for j in joint:
+                    if j not in self.dictionary.word2idx:
+                        self.dictionary.add_word(j)
+            else:
+                for v in self.voices:
+                    _pitches = [p for n, p in enumerate(pitches) if n == v]
+                    _durations = [d for n, d in enumerate(durations) if n == v]
+                    _pitches = _pitches[0]
+                    _durations = _durations[0]
+                    assert len(_pitches) == len(_durations)
+                    joint = []
+                    for p, d in zip(_pitches, _durations):
+                        if d == -1:
+                            continue
+                        else:
+                            joint.append((p, d))
+
+                    for j in joint:
+                        if j not in self.dictionary.word2idx:
+                            self.dictionary.add_word(j)
+
+    def pre_tokenize(self, json_file_paths):
+        joints = []
+        joints_offsets = []
+        for path in json_file_paths:
+            pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
+            all_pitches = []
+            all_durations = []
+            all_voice_offsets = []
+            if self.raster_scan:
+                joint = []
+                joint_offsets = []
+                v = 0
+                voice_counter = [0, 0, 0, 0]
+                voice_offsets = [0, 0, 0, 0]
+                while True:
+                    if voice_counter[v] >= len(pitches[v]):
+                        if all([voice_counter[i] >= len(pitches[i]) for i in range(len(voice_counter))]):
+                            break
+                    else:
+                        all_pitches.append(pitches[v][voice_counter[v]])
+                        all_durations.append(durations[v][voice_counter[v]])
+                        all_voice_offsets.append((v, voice_offsets[v]))
+                        voice_offsets[v] += durations[v][voice_counter[v]] if durations[v][voice_counter[v]] >= 0 else 0
+                        voice_counter[v] += 1
+
+                    v = v + 1
+                    v = v % len(pitches)
+                    # need per-voice offsets... oof
+                assert len(all_pitches) == len(all_durations)
+                assert len(all_pitches) == len(all_voice_offsets)
+                for p, d, o in zip(all_pitches, all_durations, all_voice_offsets):
+                    # special symbols and measure markers
+                    if d == -1:
+                        continue
+                    else:
+                        joint.append((p, d))
+                        joint_offsets.append(o + (d,))
+                # per voice offsets from the left, starts at 0
+                joints_offsets.extend(joint_offsets)
+                joints.extend(joint)
+                joints.append(self.file_separator_symbol)
+                # file separator is -1 voice, 0 offset, 0 duration
+                joints_offsets.append((-1, 0, 0))
+            else:
+                # treat each voice as a separate "file" for now
+                for v in self.voices:
+                    _pitches = [p for n, p in enumerate(pitches) if n == v]
+                    _durations = [d for n, d in enumerate(durations) if n == v]
+                    _pitches = _pitches[0]
+                    _durations = _durations[0]
+                    assert len(_pitches) == len(_durations)
+                    joint = []
+                    for p, d in zip(_pitches, _durations):
+                        if d == -1:
+                            continue
+                        else:
+                            joint.append((p, d))
+                    # include last for file separator symbol...
+                    joints_offsets.extend([jo for jo in np.cumsum([0] + [j[1] for j in joint])[:-1]] + [0])
+                    joint.append(self.file_separator_symbol)
+                    joints.extend(joint)
+                print("NYI: fix joint_offsets")
+        assert len(joints) == len(joints_offsets)
+        return joints, joints_offsets
+
+    def get_iterator(self, batch_size, random_seed, sequence_len=64, context_len=32, sample_percent=.15,
+                     max_n_gram=8, _type="train"):
+        # TODO: SIMPLIFY ARGS
+        random_state = np.random.RandomState(random_seed)
+        if _type == "train":
+            content = self.train
+            offsets = self.train_offsets
+        elif _type == "valid":
+            content = self.valid
+            offsets = self.valid_offsets
+        elif _type == "test":
+            content = self.test
+            offsets = self.test_offsets
+
+        mask_symbol = self.mask_symbol
+        answer_symbol = self.answer_symbol
+        end_context_symbol = self.end_context_symbol
+        file_separator_symbol = self.file_separator_symbol
+        fill_symbol = self.fill_symbol
+        fill_offset = (-1, 0, 0)
+        def sample_minibatch(batch_size=batch_size, content=content, offsets=offsets,
+                             random_state=random_state,
+                             sequence_len=sequence_len,
+                             context_len=context_len,
+                             sample_percent=sample_percent,
+                             max_n_gram=max_n_gram,
+                             mask_symbol=mask_symbol,
+                             answer_symbol=answer_symbol,
+                             end_context_symbol=end_context_symbol,
+                             file_separator_symbol=file_separator_symbol,
+                             fill_offset=fill_offset,
+                             fill_symbol=fill_symbol):
+            while True:
+                cur_batch = []
+                cur_batch_offsets = []
+                for i in range(batch_size):
+                    # sample place to start element from the dataset
+                    el = random_state.choice(len(content) - sequence_len - 1)
+
+                    cur_masked = content[el:el + sequence_len + context_len]
+                    cur_offsets = offsets[el:el + sequence_len + context_len]
+
+                    # change logic here, use bit mask instead, 2 loops 
+                    cur_percent = .0
+                    cur_bitmask = [0 for _ in range(len(cur_masked))]
+                    n_steps = 0
+                    n_steps_limit = 10 * sequence_len
+                    while cur_percent < (sample_percent - .01 * sample_percent):
+                        n_steps += 1
+                        if n_steps >= n_steps_limit:
+                            print("WARNING: more than (10 * the number of chunk elements) steps taken during masking/sampling")
+                        # sample whether single word chunk or multiple
+                        n_gram_type = random_state.choice(2)
+                        if n_gram_type == 0:
+                            # if it was 0, just mask a single word
+                            mask_out_sz = 1
+                        else:
+                            mask_out_sz = random_state.choice(np.arange(2, max_n_gram + 1))
+
+                        # start point for slice
+                        mask_out_start = random_state.choice(np.arange(context_len, sequence_len - mask_out_sz))
+                        mask_range = list(range(mask_out_start, mask_out_start + mask_out_sz))
+                        cur_bitmask = [cb if n not in mask_range else 1 for n, cb in enumerate(cur_bitmask)]
+                        cur_percent = sum(cur_bitmask) / float(len(cur_bitmask))
+
+                    # make sure offset durations match data duration values
+                    assert len(cur_masked) == len(cur_offsets)
+                    for cm, co in zip(cur_masked, cur_offsets):
+                        if cm[1] >= 0:
+                            assert cm[1] == co[2]
+                            # offsets and data do not match!
+                            #print("INSPECT: offsets and data do not match")
+                            #from IPython import embed; embed(); raise ValueError()
+
+                    # now that we have a bitmask, loop over and grab answers, mark chunk boundaries
+                    up_flag = False
+                    starts = []
+                    stops = []
+                    for _pos in range(len(cur_bitmask)):
+                        if cur_bitmask[_pos] == 1:
+                            if up_flag == False:
+                                starts.append(_pos)
+                            up_flag = True
+                        else:
+                            if up_flag == True:
+                                stops.append(_pos)
+                            up_flag = False
+
+                    # if loop ends and we are still "up", close it off
+                    if up_flag == True:
+                        up_flag = False
+                        # slices don't include the step itself
+                        stops.append(len(cur_bitmask))
+                    assert len(starts) == len(stops)
+
+                    tmp_masked = (-9999, -9999)
+                    tmp_offset = (-7777, -7777, -7777)
+                    cur_answer_groups = []
+                    cur_offset_groups = []
+                    # create new answer for masked elements, fill with tmp token
+                    for sta, sto in zip(starts, stops):
+                        _a = copy.deepcopy([cur_masked[_i] for _i in range(sta, sto)])
+                        _o = copy.deepcopy([cur_offsets[_i] for _i in range(sta, sto)])
+                        cur_answer_groups.append(_a)
+                        cur_offset_groups.append(_o)
+                        cur_masked = [cur_masked[_i] if _i not in list(range(sta, sto)) else tmp_masked for _i in range(len(cur_masked))]
+                        cur_offsets = [cur_offsets[_i] if _i not in list(range(sta, sto)) else tmp_offset for _i in range(len(cur_offsets))]
+
+                    assert len(cur_answer_groups) == len(cur_offset_groups)
+                    for cag, cog in zip(cur_answer_groups, cur_offset_groups):
+                        assert len(cag) == len(cog)
+                        # voice < 0 means it is a fill token
+                        # assert that all fill tokens have 0 duration marks (-1, 0, 0)
+                        assert all([cag[_i][1] == cog[_i][2] if cag[_i][0] >= 0 else cog[_i] == fill_offset for _i in range(len(cag))])
+
+                    # check that everything is still aligned
+                    for cm, co in zip(cur_masked, cur_offsets):
+                        if cm[0] >= 0:
+                            assert cm[1] == co[2]
+                        else:
+                            assert co[0] < 0
+
+                    # now collapse the tmp token chunks to a single value, then replace that single value with single mask token
+                    tmp_cur_masked = []
+                    tmp_cur_offsets = []
+                    assert len(cur_masked) == len(cur_offsets)
+                    for _ii in range(len(cur_masked)):
+                        if cur_masked[_ii] == tmp_masked:
+                            if len(tmp_cur_masked) == 0:
+                                tmp_cur_masked.append(tmp_masked)
+                                tmp_cur_offsets.append(tmp_offset)
+                            elif tmp_cur_masked[-1] != tmp_masked:
+                                tmp_cur_masked.append(tmp_masked)
+                                tmp_cur_offsets.append(tmp_offset)
+                        else:
+                            tmp_cur_masked.append(cur_masked[_ii])
+                            tmp_cur_offsets.append(cur_offsets[_ii])
+
+                    # check that everything is still aligned after reduction
+                    for tcm, tco in zip(tmp_cur_masked, tmp_cur_offsets):
+                        if tcm[0] >= 0:
+                            assert tcm[1] == tco[2]
+                        else:
+                            assert tco[0] < 0
+
+                    # check they have the same non-blank values
+                    non_blank_offsets_a = [tco for tco in tmp_cur_offsets if tco[0] >= 0]
+                    non_blank_offsets_b = [co for co in cur_offsets if co[0] >= 0]
+                    assert len(non_blank_offsets_a) == len(non_blank_offsets_b)
+                    assert all([a == b for a,b in zip(non_blank_offsets_a, non_blank_offsets_b)])
+
+                    # check that chunk sizes match
+                    sum_at_blanks_a = []
+                    running_sum_a = 0
+                    for _i in range(len(tmp_cur_offsets)):
+                        if tmp_cur_offsets[_i][0] < 0:
+                            if len(sum_at_blanks_a) >0 and running_sum_a != sum_at_blanks_a[-1]:
+                                sum_at_blanks_a.append(running_sum_a)
+                            elif len(sum_at_blanks_a) == 0:
+                                sum_at_blanks_a.append(running_sum_a)
+                        else:
+                            running_sum_a += 1
+
+                    sum_at_blanks_b = []
+                    running_sum_b = 0
+                    for _i in range(len(cur_offsets)):
+                        if cur_offsets[_i][0] < 0:
+                            if len(sum_at_blanks_b) > 0 and running_sum_b != sum_at_blanks_b[-1]:
+                                sum_at_blanks_b.append(running_sum_b)
+                            elif len(sum_at_blanks_b) == 0:
+                                sum_at_blanks_b.append(running_sum_b)
+                        else:
+                            running_sum_b += 1
+
+                    # check all chunk lengths are the same, via the cumulative sum over non-blanks
+                    assert len(sum_at_blanks_a) == len(sum_at_blanks_b)
+                    for a, b in zip(sum_at_blanks_a, sum_at_blanks_b):
+                        assert a == b
+
+                    cur_masked = tmp_cur_masked
+                    cur_offsets = tmp_cur_offsets
+                    special_symbols = [mask_symbol,
+                                       answer_symbol,
+                                       end_context_symbol,
+                                       file_separator_symbol,
+                                       tmp_masked]
+                    # now loop through and replace the tmp values with the correct "fill" values
+                    for _ii in range(len(cur_masked)):
+                        # check that offsets and masked are aligned
+                        if cur_offsets[_ii] == fill_offset:
+                            assert cur_masked[_ii] in special_symbols
+
+                        if cur_masked[_ii] == tmp_masked:
+                            assert cur_offsets[_ii] == tmp_offset
+                            cur_masked[_ii] = mask_symbol
+                            cur_offsets[_ii] = fill_offset
+
+                    # finally, append on the answers and offsets, separating with the answer separator and the offset fill value
+                    cur_answer = [end_context_symbol]
+                    cur_answer_offsets = [fill_offset]
+                    for _ii in range(len(cur_answer_groups)):
+                        cur_answer.extend(cur_answer_groups[_ii])
+                        cur_answer.append(answer_symbol)
+                        cur_answer_offsets.extend(cur_offset_groups[_ii])
+                        cur_answer_offsets.append(fill_offset)
+
+                    cur_batch.append(cur_masked + cur_answer)
+                    cur_batch_offsets.append(cur_offsets + cur_answer_offsets)
+                    assert len(cur_batch[-1]) == len(cur_batch_offsets[-1])
+
+                max_len = max([len(b) for b in cur_batch])
+                cur_batch_masks = [[0] * len(b) + [1] * (max_len - len(b)) for b in cur_batch]
+                cur_batch = [b + [fill_symbol] * (max_len - len(b)) for b in cur_batch]
+
+                token_batch = [[self.dictionary.word2idx[bi] for bi in b] for b in cur_batch]
+                cur_batch_offsets = [b + [fill_offset] * (max_len - len(b)) for b in cur_batch_offsets]
+                token_batch = np.array(token_batch).T[..., None]
+                cur_batch_masks = np.array(cur_batch_masks).T
+                cur_batch_offsets = np.array(cur_batch_offsets).transpose(1, 0, 2)
+                yield token_batch, cur_batch_masks, cur_batch_offsets
+                #yield np.array(token_batch).T[..., None], np.array(cur_batch_masks).T, np.array(cur_batch_offsets).transpose(1, 0, 2)
+        return sample_minibatch()
 
 
 class MusicJSONRasterCorpus(object):
@@ -1406,7 +1971,6 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
         return all_pitches_list, all_durations_list, all_voices_list, all_marked_quarters_context_boundary
 
 
-
 class MusicJSONFlatMeasureCorpus(object):
     def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
                  max_vocabulary_size=-1,
@@ -1901,7 +2465,7 @@ def convert_voice_lists_to_music_json(pitch_lists, duration_lists, velocity_list
                 parts_velocities = [velocity_lists[i] for i in range(len(pitch_lists)) if selector[i]]
             else:
                 parts_velocities = [default_velocity for i in range(len(pitch_lists)) if selector[i]]
-            # WE ASSUME MEASURE SELECTOR IS A unIQue ONE
+            # WE ASSUME MEASURE SELECTOR IS A UNIQue ONE
             if any([p == measure_value for p in parts]):
                 continue
             else:

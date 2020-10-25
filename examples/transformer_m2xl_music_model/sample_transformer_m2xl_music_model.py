@@ -31,10 +31,10 @@ parser.add_argument('--batch_size', '-b', type=int, default=10,
                     help='batch size for sample (default 10)')
 parser.add_argument('--sample_len', '-s', type=int, default=1024,
                     help='how long of a sequence to sample (default 1024)')
-parser.add_argument('--temperature', '-t', type=float, default=.9,
-                    help='sampling temperature to use (default .9)')
-parser.add_argument('--p_cutoff', '-p', type=float, default=.95,
-                    help='cutoff to use in top p sampling (default .95)')
+parser.add_argument('--temperature', '-t', type=float, default=1.0,
+                    help='sampling temperature to use (default 1.0)')
+parser.add_argument('--p_cutoff', '-p', type=float, default=.5,
+                    help='cutoff to use in top p sampling (default .5)')
 
 args = parser.parse_args()
 if len(args.saved_model_path) < 1:
@@ -107,6 +107,16 @@ train_files = [f for f in all_transposed if all([vn not in f for vn in valid_nam
 valid_files = [f for f in all_transposed if any([vn in f for vn in valid_names])]
 assert all([vf not in train_files for vf in valid_files])
 
+filepath = "sampled_trainfiles.txt"
+with open(filepath, 'w') as file_handler:
+    for item in sorted(train_files):
+        file_handler.write("{}\n".format(item))
+
+filepath = "sampled_validfiles.txt"
+with open(filepath, 'w') as file_handler:
+    for item in sorted(valid_files):
+        file_handler.write("{}\n".format(item))
+
 # shuffle the train and valid files before we make the flat_measure_corpus
 vrng.shuffle(train_files)
 vrng.shuffle(valid_files)
@@ -117,7 +127,7 @@ model = build_model(hp, flat_measure_corpus)
 
 model_dict = torch.load(saved_model_path, map_location=hp.use_device)
 model.load_state_dict(model_dict)
-#model.eval()
+model.eval()
 
 from kkpthlib import softmax_np
 from kkpthlib import top_k_from_logits_np
@@ -207,7 +217,7 @@ targets : 14]
 # cut the features into chunks then feed without indicators
 # this is ... messy but necessary
 
-used_features = [0, 2, 3, 4, 5, 7, 8, 9]
+used_features = [0, 1, 2, 3, 4, 5, 7, 8, 9]
 
 #feature_batches_list = [torch.tensor(b).to(hp.use_device) for n, b in enumerate(batches_list) if n in used_features]
 #feature_batches_masks_list = [torch.tensor(mb).to(hp.use_device) for n, mb in enumerate(batches_masks_list) if n in used_features]
@@ -222,13 +232,17 @@ if os.path.exists(midi_sample_dir):
 if not os.path.exists(midi_sample_dir):
     os.mkdir(midi_sample_dir)
 
+tstamp = int(time.time())
 file_indices = list(range(30))
+
+used_files = []
 for fi in file_indices:
     errored = False
     random_seed = args.random_seed
     sampling_random_state = np.random.RandomState(random_seed)
 
     path = valid_files[fi]
+    used_files.append(path)
     pitches, durations, velocities = pitch_duration_velocity_lists_from_music_json_file(path,
                                                                                         default_velocity=flat_measure_corpus.default_velocity,
                                                                                         n_voices=flat_measure_corpus.n_voices,
@@ -238,6 +252,13 @@ for fi in file_indices:
     final_all_durations_list = None
     final_all_voices_list = None
     final_all_marked_quarters_context_boundary = None
+
+    true_all_pitches_list = None
+    true_all_durations_list = None
+    true_all_voices_list = None
+    true_all_marked_quarters_context_boundary = None
+
+    last_voice = -1
 
     all_pitch_take_index = 0
     pitches_indexes = [0, 0, 0, 0]
@@ -289,10 +310,26 @@ for fi in file_indices:
         list_of_inputs = feature_batches_list
         list_of_input_masks = feature_batches_masks_list
         targets = torch.tensor(np_targets).long().to(hp.use_device)
-        targets = torch.cat((targets[:1] * 0 + 0, targets), 0)
-        # re-adjust to be sure they are the same length
-        shifted_targets = targets[:-1]
-        targets = targets[1:]
+
+        # shift by one to account for the fact that keypoint features and targets are identical
+        for _i in range(len(list_of_inputs)):
+             list_of_inputs[_i] = torch.cat((list_of_inputs[_i][:1] * 0 + 0, list_of_inputs[_i]), 0)
+             list_of_input_masks[_i] = torch.cat((list_of_input_masks[_i][:1] * 0 + 0, list_of_input_masks[_i]), 0)
+
+        # shift targets by 1 and pass as inputs as well
+        shifted_targets = torch.cat((targets[:1] * 0 + 0, targets), 0)
+        # pad by 1 at the back to make targets match
+        targets = torch.cat((targets, targets[:1] * 0 + 0), 0)
+
+        if true_all_pitches_list == None:
+            # get GT values to write out
+            preds = targets[:-1, :, 0].cpu().data.numpy()
+            all_pitches_list, all_durations_list, all_voices_list, all_marked_quarters_context_boundary = flat_measure_corpus.pitch_duration_voice_lists_from_preds_and_features(preds, batches_list, batches_masks_list, context_len=hp.context_len)
+
+            true_all_pitches_list = copy.deepcopy(all_pitches_list)
+            true_all_durations_list = copy.deepcopy(all_durations_list)
+            true_all_voices_list = copy.deepcopy(all_voices_list)
+            true_all_marked_quarters_context_boundary = copy.deepcopy(all_marked_quarters_context_boundary)
 
         list_of_inputs.extend([shifted_targets[:, :, 0][..., None],
                                shifted_targets[:, :, 1][..., None],
@@ -314,6 +351,7 @@ for fi in file_indices:
         #preds = preds[shuf_i]
 
         #preds = targets[..., 0]
+        preds = preds[:-1]
         #preds = preds[hp.context_len-1:]
 
         all_pitches_list, all_durations_list, all_voices_list, all_marked_quarters_context_boundary = flat_measure_corpus.pitch_duration_voice_lists_from_preds_and_features(preds, batches_list, batches_masks_list, context_len=hp.context_len)
@@ -325,22 +363,26 @@ for fi in file_indices:
         vv = all_voices_list[0][all_pitch_take_index]
         pp = all_pitches_list[0][all_pitch_take_index]
 
-        # figure out how to skip keypoints?
         if durations[vv][pitches_indexes[vv]] == -1:
             # skip the blanks that denote phrase boundary
             pitches_indexes[vv] += 1
 
+        if last_voice != vv:
+            # fill in GT values for notes that are keypoints
+            pp = pitches[vv][pitches_indexes[vv]]
+            last_voice = vv
+
         if final_all_pitches_list is None:
-            final_all_pitches_list = all_pitches_list
-            final_all_durations_list = all_durations_list
-            final_all_voices_list = all_voices_list
-            final_all_marked_quarters_context_boundary = all_marked_quarters_context_boundary
+            final_all_pitches_list = copy.deepcopy(all_pitches_list)
+            final_all_durations_list = copy.deepcopy(all_durations_list)
+            final_all_voices_list = copy.deepcopy(all_voices_list)
+            final_all_marked_quarters_context_boundary = copy.deepcopy(all_marked_quarters_context_boundary)
 
         marks = all_marked_quarters_context_boundary[0]
         cur_dur = np.sum([d for d in durations[vv][:pitches_indexes[vv] + 1] if d > 0] + [0])
-        #if cur_dur >= marks[vv]:
-        pitches[vv][pitches_indexes[vv]] = pp
-        final_all_pitches_list[0][all_pitch_take_index] = pp
+        if cur_dur >= marks[vv]:
+            pitches[vv][pitches_indexes[vv]] = pp
+            final_all_pitches_list[0][all_pitch_take_index] = pp
 
         pitches_indexes[vv] += 1
         all_pitch_take_index += 1
@@ -356,7 +398,8 @@ for fi in file_indices:
     i = 0
     lim = -1
     if errored:
-        lim = all_pitch_take_index
+        # take a few steps off because errors tend to happen because of "bad choices" in notes before
+        lim = all_pitch_take_index - int(.1 * all_pitch_take_index)
         if lim >= 0 and lim < 100:
             print("SKIPPED {}".format(fi))
             continue
@@ -368,7 +411,6 @@ for fi in file_indices:
     marked_quarters_context_boundary = final_all_marked_quarters_context_boundary[i]
 
     data = convert_voice_lists_to_music_json(pitch_lists=pitches_list, duration_lists=durations_list, voices_list=voices_list)
-    tstamp = int(time.time())
     json_fpath = midi_sample_dir + os.sep + "sampled{}_{}.json".format(fi, tstamp)
     write_music_json(data, json_fpath)
 
@@ -387,3 +429,23 @@ for fi in file_indices:
          3: [(a, 0),]}
     music_json_to_midi(data, fpath, voice_program_map=m)
     print("Wrote out {}".format(fpath))
+
+    pitches_list = true_all_pitches_list[i][:lim]
+    durations_list = true_all_durations_list[i][:lim]
+    voices_list = true_all_voices_list[i][:lim]
+    marked_quarters_context_boundary = true_all_marked_quarters_context_boundary[i]
+
+    data = convert_voice_lists_to_music_json(pitch_lists=pitches_list, duration_lists=durations_list, voices_list=voices_list)
+    json_fpath = midi_sample_dir + os.sep + "true{}_{}.json".format(fi, tstamp)
+    write_music_json(data, json_fpath)
+
+    fpath = midi_sample_dir + os.sep + "true{}_{}.midi".format(fi, tstamp)
+    music_json_to_midi(data, fpath, voice_program_map=m)
+    print("Wrote out {}".format(fpath))
+
+filepath = "used_files.txt"
+with open(filepath, 'w') as file_handler:
+    for item in sorted(used_files):
+        file_handler.write("{}\n".format(item))
+
+print("Total sampling time: {} seconds".format(time.time() - tstamp))

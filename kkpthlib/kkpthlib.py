@@ -2035,22 +2035,32 @@ class RelativeMultiHeadAttention(nn.Module):
          # [qlen x klen x bsz x n_head]
          attention_score *= self.scale
 
+         #need to find and do something about rows with all masked
          if attention_mask is not None and attention_mask.any().item():
              # fill 1s with neg ing, leave 0s alone!
              if attention_mask.dim() == 2:
                  attention_score.masked_fill_(attention_mask[None, :, :, None], -float('inf'))
              # can define either 2d or 3d mask here, but will need to be very careful about what is 0 and what is 1
              elif attention_mask.dim() == 3:
+                 row_mask = (attention_mask.sum(axis=1) == attention_mask.shape[1])
                  attention_score.masked_fill_(attention_mask[:, :, :, None], -float('inf'))
+                 if row_mask.sum() > 0:
+                     #logger.info("WARNING: Found 3D mask containing rows with all masked values! Filling blank rows with -1E9")
+                     # do it in two steps, fill all with -inf then the blank ones with -1E9
+                     attention_score.masked_fill_(row_mask[:, None, :, None], -1E9)
              else:
                  raise ValueError("Attention_mask dim not handled in relative multihead attention!")
 
          faker = 0. * attention_score + 1.
          faker_mask = self.drop(faker)
+         # find rows with all -inf
          # can't fill with neginf since could all be 0 - hence all neginf, leading to nan in softmax
          attention_score.masked_fill_(faker_mask == 0, -1E9)
          attention_prob = F.softmax(attention_score, dim=1)
-         # this is how it is done in the PTB code but... not normalized anymore!
+
+         # technically it's not a prob distribution if I force a completely blanked out row to be all 0
+
+         # as for dropout, this is how it is done in the PTB code but... not normalized anymore!
          # question is, will other method freak out at test time? whereas this is more "normal" - basically same as dropping pieces of i_head_v
          #attention_prob = self.drop(attention_prob)
          # isn't this just dropout on the thing you are attending, in disguise?

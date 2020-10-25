@@ -76,7 +76,7 @@ def build_model(hp, file_corpus):
             # this is ... messy but necessary
 
             # probably a better way than handcoding the relationships here but w/e
-            used_features = [0, 2, 3, 4, 5, 7, 8, 9, "target0", "target1", "target2", "target3"]
+            used_features = [0, 1, 2, 3, 4, 5, 7, 8, 9, "target0", "target1", "target2", "target3"]
             self.used_features = used_features
             self.embeddings = nn.ModuleList()
             for _n, elem in enumerate(used_features):
@@ -204,6 +204,16 @@ if __name__ == "__main__":
     train_files = [f for f in all_transposed if all([vn not in f for vn in valid_names])]
     valid_files = [f for f in all_transposed if any([vn in f for vn in valid_names])]
     assert all([vf not in train_files for vf in valid_files])
+
+    filepath = "train_trainfiles.txt"
+    with open(filepath, 'w') as file_handler:
+        for item in sorted(train_files):
+            file_handler.write("{}\n".format(item))
+
+    filepath = "train_validfiles.txt"
+    with open(filepath, 'w') as file_handler:
+        for item in sorted(valid_files):
+            file_handler.write("{}\n".format(item))
 
     # shuffle the train and valid files before we make the flat_measure_corpus
     vrng.shuffle(train_files)
@@ -414,6 +424,7 @@ if __name__ == "__main__":
 
     first_valid = True
     first_train = True
+
     def loop(itr, extras, stateful_args):
         global first_valid
         global first_train
@@ -442,7 +453,7 @@ if __name__ == "__main__":
         # cut the features into chunks then feed without indicators
         # this is ... messy but necessary
 
-        used_features = [0, 2, 3, 4, 5, 7, 8, 9]
+        used_features = [0, 1, 2, 3, 4, 5, 7, 8, 9]
         feature_batches_list = [torch.tensor(b).to(hp.use_device) for n, b in enumerate(batches_list) if n in used_features]
         feature_batches_masks_list = [torch.tensor(mb).to(hp.use_device) for n, mb in enumerate(batches_masks_list) if n in used_features]
         # AFTER SANITY CHECK, SHIFTED TARGETS BECOME INPUTS TOO
@@ -453,10 +464,16 @@ if __name__ == "__main__":
         list_of_inputs = feature_batches_list
         list_of_input_masks = feature_batches_masks_list
         targets = torch.tensor(np_targets).long().to(hp.use_device)
-        targets = torch.cat((targets[:1] * 0 + 0, targets), 0)
-        # re-adjust to be sure they are the same length
-        shifted_targets = targets[:-1]
-        targets = targets[1:]
+
+        # shift by one to account for the fact that keypoint features and targets are identical
+        for _i in range(len(list_of_inputs)):
+             list_of_inputs[_i] = torch.cat((list_of_inputs[_i][:1] * 0 + 0, list_of_inputs[_i]), 0)
+             list_of_input_masks[_i] = torch.cat((list_of_input_masks[_i][:1] * 0 + 0, list_of_input_masks[_i]), 0)
+
+        # shift targets by 1 and pass as inputs as well
+        shifted_targets = torch.cat((targets[:1] * 0 + 0, targets), 0)
+        # pad by 1 at the back to make targets match
+        targets = torch.cat((targets, targets[:1] * 0 + 0), 0)
 
         list_of_inputs.extend([shifted_targets[:, :, 0][..., None],
                                shifted_targets[:, :, 1][..., None],
@@ -465,21 +482,22 @@ if __name__ == "__main__":
 
         in_mems = stateful_args
         if extras["train"]:
-            # TODO: ADD MASKING INTO MODEL
             if first_train:
                 model.train()
                 out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=None)
                 first_train = False
                 first_valid = True
             else:
+                model.train()
                 out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=in_mems)
         else:
             if first_valid:
-                #model.eval()
+                model.eval()
                 out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=None)
                 first_valid = False
                 first_train = True
             else:
+                model.eval()
                 out0, out1, out2, out3, out_mems = model(list_of_inputs, list_of_input_masks, list_of_mems=in_mems)
 
 

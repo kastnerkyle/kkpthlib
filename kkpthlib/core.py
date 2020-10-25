@@ -1037,7 +1037,6 @@ def run_loop(train_loop_function, train_itr,
             # so 15 * 60 = desired num seconds
             # sec / sec per step = step
             tmp_save_every_n_steps = (15. * 60) / np.mean(minibatch_train_time)
-            tmp_save_every_n_steps = 1
             logger.info("Using save_every_n_steps='default', permanent saver with training speed {} seconds per training minibatch, desired 15 min average save, saving every {} steps".format(np.mean(minibatch_train_time), tmp_save_every_n_steps))
 
         if np.isinf(n_steps):
