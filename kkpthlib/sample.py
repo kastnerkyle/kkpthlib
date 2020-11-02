@@ -2,7 +2,7 @@ from .kkpthlib import softmax_np
 import copy
 import numpy as np
 
-def top_p_from_logits_np(logits, p=.9, fill_value=-np.inf):
+def top_p_from_logits_np(logits, p=.9, fill_value=-np.inf, return_indices=False):
     """
     temperature can be applied beforehand, simply by sending in logits / temperature rather than logits
     """
@@ -28,8 +28,11 @@ def top_p_from_logits_np(logits, p=.9, fill_value=-np.inf):
     for i in range(rlen):
         logits_sqr[i][sorted_indices_sqr[i][~mask[i]]] = fill_value
     logits_reduced = logits_sqr.transpose(1, 0).reshape(shp[2], shp[0], shp[1]).transpose(1, 2, 0)
-    return logits_reduced
+    if return_indices:
+        return logits_reduced, mask
+    else:
+        return logits_reduced
 
 def top_k_from_logits_np(logits, k=1):
-    print("top_k")
+    print("top_k NYI")
     from IPython import embed; embed(); raise ValueError()
