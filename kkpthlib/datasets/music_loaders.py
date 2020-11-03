@@ -758,6 +758,7 @@ class MusicJSONInfillCorpus(object):
         self.end_context_symbol = (-3, -3)
         self.file_separator_symbol = (-4, -4)
         self.fill_symbol = (-5, -5)
+        self.special_symbols = [self.mask_symbol, self.answer_symbol, self.end_context_symbol, self.file_separator_symbol, self.fill_symbol]
         self.raster_scan = raster_scan
 
         self.train_data_file_paths = train_data_file_paths

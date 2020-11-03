@@ -382,7 +382,7 @@ for t in range(batch_np.shape[1]):
                 return current_batch, solution, depth
 
         # TODO: un hard code, get from corpus max ngram value
-        if depth > 8:
+        if depth >= 7:
             return None
             #return current_batch
 
@@ -395,8 +395,15 @@ for t in range(batch_np.shape[1]):
         sumlogprob_ordered_indices = np.argsort(sumlogprob[0, :])[::-1]
 
         # TODO: batch this in chunks of batch_size!
+        print("depth")
+        print(depth)
+        # do the 10x speedup here?
         for el in sumlogprob_ordered_indices:
             symbol = infill_corpus.dictionary.idx2word[el]
+            if symbol in infill_corpus.special_symbols:
+                # skip special tokens...
+                continue
+
             min_check = sumlogprob[0, el] < -1E9
             if min_check:
                 print("min prob occured at depth {}".format(depth))
@@ -452,6 +459,8 @@ for t in range(batch_np.shape[1]):
 
             if sub_res is not None:
                 return sub_res
+        print("failed subset search")
+        from IPython import embed; embed(); raise ValueError()
         raise ValueError("No solutions found in recusive sub_search...")
 
 
@@ -463,6 +472,8 @@ for t in range(batch_np.shape[1]):
         all_answers = []
         all_answers_durations = []
         all_answers_voices = []
+        all_answers_voices = []
+        all_res = []
         for list_pos, mask_pos in enumerate(mask_positions):
             # set of voices used in this subproblem
             active_voice_set = [int(v) for v in list(set(gt_offsets[list_pos][:, 0]))]
@@ -517,6 +528,7 @@ for t in range(batch_np.shape[1]):
 
             this_answer = []
             this_answer_durations = []
+            this_answer_voices = []
 
             reset_current_boundary = current_boundary
             n_resets = 0
@@ -527,176 +539,96 @@ for t in range(batch_np.shape[1]):
             # we just ignore the answer token altogether here
             # not ideal but we know enough to start/stop 
 
-            for _ in range(100000):
-                out, out_mems = model(input_batch[:current_boundary], batch_masks[:current_boundary], list_of_mems=None)
-                temperature = args.temperature
-                p_cutoff = args.p_cutoff
-                # *must* duration constrain and voice assign these
-                # can either force same amount of notes, and thus identical durations for each
-                # or just force the overall answer to be the same total duration
-                # would do greedy same durations for now, but need to move to constrained beam search
+            out, out_mems = model(input_batch[:current_boundary], batch_masks[:current_boundary], list_of_mems=None)
+            temperature = args.temperature
+            p_cutoff = args.p_cutoff
+            # *must* duration constrain and voice assign these
+            # can either force same amount of notes, and thus identical durations for each
+            # or just force the overall answer to be the same total duration
+            # would do greedy same durations for now, but need to move to constrained beam search
 
-                # first, set probability of any predictions > total_duration_constraint to -inf
-                log_p = out.cpu().data.numpy()
+            # first, set probability of any predictions > total_duration_constraint to -inf
+            log_p = out.cpu().data.numpy()
 
-                # apply temperature here to avoid numerical trouble dividing neginf
-                log_p_t = log_p
+            # apply temperature here to avoid numerical trouble dividing neginf
+            log_p_t = log_p
 
-                current_log_probs = copy.deepcopy(log_p)
+            current_log_probs = copy.deepcopy(log_p)
 
-                # create set of all possible durations left in possibles...
-                #duration_constraint_set = functools.reduce(lambda a,b: a | b, [set([eli for el in voice_possibility_map[v_i] for eli in el]) for v_i in voice_possibility_map.keys()])
+            # create set of all possible durations left in possibles...
+            #duration_constraint_set = functools.reduce(lambda a,b: a | b, [set([eli for el in voice_possibility_map[v_i] for eli in el]) for v_i in voice_possibility_map.keys()])
 
-                #invalid_indices = [_s for _s in range(len(infill_corpus.dictionary.idx2word))
-                                   #if infill_corpus.dictionary.idx2word[_s][1] not in duration_constraint_set]
-                # also block answer token?
-                #log_p_t[:, :, invalid_indices] = np.min(log_p_t)
-                #
-                # top_p reduction as normal, but we cannot do top_p if we catch a loop where answer is way more probable
-                # than continuation
-                # long term mebbe switch from top_p to top_k for this case
-                # top p is eliminating everything but 1 element
-                #reduced, reduced_mask = top_p_from_logits_np(log_p_t, 0.00001, return_indices=True)
+            #invalid_indices = [_s for _s in range(len(infill_corpus.dictionary.idx2word))
+                               #if infill_corpus.dictionary.idx2word[_s][1] not in duration_constraint_set]
+            # also block answer token?
+            #log_p_t[:, :, invalid_indices] = np.min(log_p_t)
+            #
+            # top_p reduction as normal, but we cannot do top_p if we catch a loop where answer is way more probable
+            # than continuation
+            # long term mebbe switch from top_p to top_k for this case
+            # top p is eliminating everything but 1 element
+            #reduced, reduced_mask = top_p_from_logits_np(log_p_t, 0.00001, return_indices=True)
 
-                reduced = log_p_t * (1. / temperature)
-                reduced_probs = softmax_np(reduced)
-                reduced_probs = reduced_probs[:, batch_index:batch_index+1]
+            reduced = log_p_t * (1. / temperature)
+            reduced_probs = softmax_np(reduced)
+            reduced_probs = reduced_probs[:, batch_index:batch_index+1]
 
-                # take in 
-                current_corpus = infill_corpus
-                current_batch = copy.deepcopy(input_batch)
-                current_batch_masks = copy.deepcopy(batch_masks)
+            # take in 
+            current_corpus = infill_corpus
+            current_batch = copy.deepcopy(input_batch)
+            current_batch_masks = copy.deepcopy(batch_masks)
 
-                # the possible voice mappings
-                current_voice_possibility_map = copy.deepcopy(voice_possibility_map)
-                res = sub_search(infill_corpus,
-                                 current_batch[:current_boundary], current_batch_masks[:current_boundary],
-                                 current_log_probs,
-                                 current_voice_possibility_map,
-                                 total_duration_constraint_per_voice,
-                                 context_boundary,
-                                 gt_offsets,
-                                 gt_answers,
-                                 list_pos,
-                                 mask_pos,
-                                 temperature,
-                                 p_cutoff,
-                                 depth=0)
-                print("sub search terminates")
+            # the possible voice mappings
+            current_voice_possibility_map = copy.deepcopy(voice_possibility_map)
+            res = sub_search(infill_corpus,
+                             current_batch[:current_boundary], current_batch_masks[:current_boundary],
+                             current_log_probs,
+                             current_voice_possibility_map,
+                             total_duration_constraint_per_voice,
+                             context_boundary,
+                             gt_offsets,
+                             gt_answers,
+                             list_pos,
+                             mask_pos,
+                             temperature,
+                             p_cutoff,
+                             depth=0)
+
+            if res is None:
+                print("got no result for sub_search! debug this")
                 from IPython import embed; embed(); raise ValueError()
 
-                if sampled == answer_token:
-                    # don't let answers be predicted, handle manually
-                    pass
-                else:
-                    # a real beam search  or smarter thing would resample the next token til at least one solution exists?
-                    # resetting if sampled many times with no luck
-                    sampled = sampling_random_state.choice(np.arange(reduced_probs.shape[-1]), p=reduced_probs[-1, 0])
-                    sampled_duration = infill_corpus.dictionary.idx2word[sampled][1]
-
-
-                    this_answer.append(sampled)
-                    this_answer_durations.append(sampled_duration)
-                    input_batch[current_boundary, t, 0] = sampled
-                    current_boundary += 1
-
-                    # reduce the voice possibility map based on the sampled item
-                    for _v_i in voice_possibility_map.keys():
-                        new_el = []
-                        for el in voice_possibility_map[_v_i]:
-                            if sampled_duration in el:
-                                this_el = list(copy.deepcopy(el))
-                                this_el.remove(sampled_duration)
-                                new_el.append(tuple(this_el))
-                        voice_possibility_map[_v_i] = new_el
-
-                # after proposal, look at tentative greedy voice assignment
-                if len(this_answer) >= len(voice_possibility_map.keys()):
-                    # look at tentative voice assignment to get duration constraint
-                    active_voice_set = [int(v) for v in list(set(gt_offsets[list_pos][:, 0]))]
-
-                    # note index as a unique entity, note tuple of pitch, duration
-                    variables = [(_n, infill_corpus.dictionary.idx2word[t_a]) for _n, t_a in enumerate(this_answer)]
-                    domains = {}
-                    for variable in variables:
-                        domains[variable] = copy.deepcopy(active_voice_set)
-
-                    class VoiceConstraint(Constraint):
-                        def __init__(self, notes, total_duration_per_voice) -> None:
-                            super().__init__(notes)
-                            self.notes = notes
-                            self.total_duration_per_voice = total_duration_per_voice
-
-                        def satisfied(self, assignment: Dict[tuple, int]) -> bool:
-                            # have to assign at least 1 note to each voice...
-                            if len(set(assignment.values())) != len(active_voice_set):
-                                return False
-                            voice_sums = [-1 for v in range(len(self.total_duration_per_voice))]
-                            voice_sums_before_last = [-1 for v in range(len(self.total_duration_per_voice))]
-                            for v in sorted(list(set(assignment.values()))):
-                                # for every voice which has been assigned notes, be sure the duration constraint per voice 
-                                # can be satisfied using the 'cutoff trick'
-                                # has not yet been violated
-                                # use order of notes in assignment
-                                subset = {k: v_i for k, v_i in assignment.items() if v_i == v}
-                                ordered_subset_keys = sorted(subset.keys(), key=lambda x: x[0])
-
-                                voice_sum = 0
-                                for k in ordered_subset_keys:
-                                    voice_sum += k[1][1]
-                                voice_sums[v] = voice_sum
-                                voice_sums_before_last[v] = voice_sum - ordered_subset_keys[-1][1][1]
-
-                            for v in sorted(list(set(assignment.values()))):
-                                # make sure one more note could fit, even if it has to be cut by hand
-                                # -1 denotes a non used voice, skip it
-                                if voice_sums_before_last[v] > -1 and voice_sums_before_last[v] > (self.total_duration_per_voice[v] - min(durations)):
-                                    return False
-                            return True
-
-                    partial_csp = CSP(variables, domains)
-                    partial_csp.add_constraint(VoiceConstraint(variables, total_duration_constraint_per_voice))
-
-                    from IPython import embed; embed(); raise ValueError()
-                    partial_solution = partial_csp.backtracking_search()
-                    # need to get exact check back!!!
-                    if partial_solution is not None:
-                        print("what")
-                        from IPython import embed; embed(); raise ValueError()
-
-                    if partial_solution is None:
-                        print("No partial solutions at try {}, resetting!".format(n_resets))
-                        this_answer = []
-                        this_answer_durations = []
-                        voice_possibility_map = copy.deepcopy(reset_voice_possibility_map)
-                        current_boundary = reset_current_boundary
-
-                        if n_resets > reset_limit:
-                            print("too many resets need to think on this")
-                            from IPython import embed; embed(); raise ValueError()
-                        n_resets += 1
-                        continue
-
-                if current_boundary >= (len(input_batch) - 5):
-                    # extend input batch with some zeros if we are close to the end
-                    input_batch = torch.cat((input_batch, 0 * input_batch[:10]), axis=0)
+            print("broke the loop")
+            this_answer = [ta for ta in res[0][-res[2]:, 0, 0].cpu().data.numpy()]
+            this_answer_tokens = [(_n, infill_corpus.dictionary.idx2word[ta]) for _n, ta in enumerate(this_answer)]
+            this_answer_durations = [tat[1][1] for tat in this_answer_tokens]
+            this_answer_voices = []
+            for tat in this_answer_tokens:
+                for _k, _assigned in res[1].items():
+                    if tat in _assigned:
+                        this_answer_voices.append(_k)
+            assert len(this_answer_voices)
 
             all_answers.append(this_answer)
             all_answers_durations.append(this_answer_durations)
+            all_answers_voices.append(this_answer_voices)
+            all_res.append(res)
+
+            current_batch = res[0]
+            current_boundary = len(current_batch)
             print("partial answer {} of {} completed".format(len(all_answers), len(mask_positions)))
-            print("shouldnt get here befor 'what'")
-            from IPython import embed; embed(); raise ValueError()
-            #????
-            # need to reconstruct the batch per answer autoregressively? or do all at once...
-            #all_answers_voices.append(this_answer_voices)
+        print("end")
+        from IPython import embed; embed(); raise ValueError()
+        return all_answers, all_answers_durations, all_answers_voices, all_res
 
     # only send the minibatch element in question to the search procedure
     batch_index = t
     input_batch = input_batch[:1] * 0 + input_batch[:, t:t+1]
     batch_masks = batch_masks[:1] * 0 + batch_masks[:, t:t+1]
-    res = full_search(infill_corpus, input_batch, batch_masks,
+    returned = full_search(infill_corpus, input_batch, batch_masks,
                       batch_index, context_boundary,
                       mask_positions, gt_offsets, gt_answers)
+    print("returned")
     from IPython import embed; embed(); raise ValueError()
     pred_durs = [sum(aad) for aad in all_answers_durations]
     gt_durs = [gto.sum(axis=0)[-1] for gto in gt_offsets]
