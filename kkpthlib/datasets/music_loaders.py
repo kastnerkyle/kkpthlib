@@ -779,11 +779,11 @@ class MusicJSONInfillCorpus(object):
         if test_data_file_paths != None:
             test_pitches, test_durations, test_voices = self._load_music_json(test_data_file_paths)
 
-        self.train, self.train_offsets = self.pre_tokenize(train_data_file_paths)
+        self.train, self.train_offsets, self.train_files_attribution = self.pre_tokenize(train_data_file_paths)
         if valid_data_file_paths is not None:
-            self.valid, self.valid_offsets = self.pre_tokenize(valid_data_file_paths)
+            self.valid, self.valid_offsets, self.valid_files_attribution = self.pre_tokenize(valid_data_file_paths)
         if test_data_file_paths is not None:
-            self.test, self.test_offsets = self.pre_tokenize(test_data_file_paths)
+            self.test, self.test_offsets, self.test_files_attribution = self.pre_tokenize(test_data_file_paths)
 
     def _load_music_json(self, json_file_paths):
         all_pitches = []
@@ -845,6 +845,7 @@ class MusicJSONInfillCorpus(object):
     def pre_tokenize(self, json_file_paths):
         joints = []
         joints_offsets = []
+        joints_files = []
         for path in json_file_paths:
             pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
             all_pitches = []
@@ -882,9 +883,11 @@ class MusicJSONInfillCorpus(object):
                 # per voice offsets from the left, starts at 0
                 joints_offsets.extend(joint_offsets)
                 joints.extend(joint)
+                joints_files.extend([(path, _n) for _n, j in enumerate(joint)])
                 joints.append(self.file_separator_symbol)
                 # file separator is -1 voice, 0 offset, 0 duration
                 joints_offsets.append((-1, 0, 0))
+                joints_files.append((path, len(joint)))
             else:
                 # treat each voice as a separate "file" for now
                 for v in self.voices:
@@ -903,9 +906,10 @@ class MusicJSONInfillCorpus(object):
                     joints_offsets.extend([jo for jo in np.cumsum([0] + [j[1] for j in joint])[:-1]] + [0])
                     joint.append(self.file_separator_symbol)
                     joints.extend(joint)
+                    joints_files.extend([(path, _n) for _n, j in enumerate(joint)])
                 print("NYI: fix joint_offsets")
         assert len(joints) == len(joints_offsets)
-        return joints, joints_offsets
+        return joints, joints_offsets, joints_files
 
     def get_iterator(self, batch_size, random_seed, sequence_len=64, context_len=32, sample_percent=.15,
                      max_n_gram=8, _type="train"):
@@ -942,9 +946,11 @@ class MusicJSONInfillCorpus(object):
             while True:
                 cur_batch = []
                 cur_batch_offsets = []
+                cur_batch_indices = []
                 for i in range(batch_size):
                     # sample place to start element from the dataset
                     el = random_state.choice(len(content) - sequence_len - 1)
+                    cur_batch_indices.append(el)
 
                     cur_masked = content[el:el + sequence_len + context_len]
                     cur_offsets = offsets[el:el + sequence_len + context_len]
@@ -1126,7 +1132,7 @@ class MusicJSONInfillCorpus(object):
                 token_batch = np.array(token_batch).T[..., None]
                 cur_batch_masks = np.array(cur_batch_masks).T
                 cur_batch_offsets = np.array(cur_batch_offsets).transpose(1, 0, 2)
-                yield token_batch, cur_batch_masks, cur_batch_offsets
+                yield token_batch, cur_batch_masks, cur_batch_offsets, cur_batch_indices
                 #yield np.array(token_batch).T[..., None], np.array(cur_batch_masks).T, np.array(cur_batch_offsets).transpose(1, 0, 2)
         return sample_minibatch()
 
