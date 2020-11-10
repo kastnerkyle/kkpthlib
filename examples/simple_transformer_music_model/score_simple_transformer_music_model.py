@@ -1047,68 +1047,161 @@ for t in range(batch_np.shape[1]):
     special_symbols = [infill_corpus.mask_symbol,
                        infill_corpus.answer_symbol,
                        infill_corpus.end_context_symbol,
-                       infill_corpus.file_separator_symbol,
+                       #infill_corpus.file_separator_symbol,
                        infill_corpus.fill_symbol]
 
+    # KEEP FILE SEPARATOR SO WE CAN HANDLE IT NEXT
     reduced_indices = [n for n in range(len(symbol_sequence)) if symbol_sequence[n] not in special_symbols]
 
-    symbol_sequence = [symbol_sequence[n] for n in reduced_indices]
-    duration_sequence = [duration_sequence[n] for n in reduced_indices]
-    voice_sequence = [voice_sequence[n] for n in reduced_indices]
-    offset_sequence = [offset_sequence[n] for n in reduced_indices]
-
-    pitches_list = []
-    durations_list = []
-    voices_list = []
+    symbol_sequence = np.array([symbol_sequence[n] for n in reduced_indices])
+    duration_sequence = np.array([duration_sequence[n] for n in reduced_indices])
+    voice_sequence = np.array([voice_sequence[n] for n in reduced_indices])
+    offset_sequence = np.array([offset_sequence[n] for n in reduced_indices])
 
     # need to find this min! is srs
     # do starting chunk if > 0 offset?
-    # this is tricksy
     # check if the piece starts with an offset
     # if so, we account for that
     # take care because a later offset could be 0 we cross a file boundary...
-    from IPython import embed; embed(); raise ValueError()
-    min_offset = min(offset_sequence)
-    per_voice_min_offset = [min(offset_sequence[np.where(offset_sequence[:, t, 0] == v)[0], t, 1]) for v in range(4)]
+    offsets_addition_step_mapping = {}
+    if infill_corpus.file_separator_symbol in symbol_sequence:
+        # get all file separators
+        all_file_sep_pos = [0] + [_n for _n, el in enumerate(symbol_sequence) if tuple(el) == infill_corpus.file_separator_symbol]
+    else:
+        all_file_sep_pos = [0]
 
-    symbol_sequence = symbol_sequence[:30]
-    voice_sequence = voice_sequence[:30]
+    if len(all_file_sep_pos) > 2:
+        print("multiple file separators, handle it...")
+        from IPython import embed; embed(); raise ValueError()
 
-    base_pitches_list = [s[0] for s in symbol_sequence]
-    base_durations_list = [s[1] for s in symbol_sequence]
-    base_voices_list = [vi for vi in voice_sequence]
+    # for each voice, get the offset we have to add to the front to make it sound right
+    previous_gap = 0
+    for _n, afsp in enumerate(all_file_sep_pos):
+        per_voice_offset_start = []
+        if _n < len(all_file_sep_pos) - 1:
+            nxt = all_file_sep_pos[_n + 1]
+        else:
+            nxt = len(voice_sequence)
+        all_voice_indices = [previous_gap + np.where(voice_sequence[previous_gap:nxt] == vi)[0] for vi in range(4)]
+        for vi in range(4):
+            _voice_set = np.array(offset_sequence)[all_voice_indices[vi]]
+            first_val = _voice_set[0]
+            min_val = np.min(_voice_set)
+            if first_val != min_val:
+                print("WARNING: offset calculation min val != first val!. sample likely corrupt, dropping to debug!")
+                from IPython import embed; embed(); raise ValueError()
+            per_voice_offset_start.append(min_val)
+        calculated_offsets = [el - min(per_voice_offset_start) for el in per_voice_offset_start]
+        if previous_gap != 0:
+            # had an offset previously applied. we need to add *additional* time to "fix" the previous offset...
+            # get the last key
+            last_added = max([k for k in offsets_addition_step_mapping.keys()])
+            prv = offsets_addition_step_mapping[last_added]
+            # add 4.0 as a natural break, alongside the "corrective factor" to put the previous interval offsets back to even
+            prv_correction = [4.0 + (max(prv) - el) for el in prv]
+            # combine with new offset
+            for _m in range(len(calculated_offsets)):
+                calculated_offsets[_m] += prv_correction[_m]
+        offsets_addition_step_mapping[previous_gap] = calculated_offsets
+        # +1 to skip the separator itself
+        previous_gap = nxt + 1
+
+    splits = sorted(offsets_addition_step_mapping.keys())
+    if len(splits) > 1:
+        # do correction
+        symbol_seps = []
+        duration_seps = []
+        voice_seps = []
+        for a, b in zip(splits[:-1], splits[1:]):
+            symbol_seps.append(symbol_sequence[a:b])
+            duration_seps.append(duration_sequence[a:b])
+            voice_seps.append(voice_sequence[a:b])
+        symbol_seps.append(symbol_sequence[b:])
+        duration_seps.append(duration_sequence[b:])
+        voice_seps.append(voice_sequence[b:])
+        assert len(offsets_addition_step_mapping) == len(symbol_seps)
+        assert len(offsets_addition_step_mapping) == len(duration_seps)
+        assert len(offsets_addition_step_mapping) == len(voice_seps)
+
+        joined_symbols = []
+        joined_voices = []
+
+        ordered_k = sorted(offsets_addition_step_mapping.keys())
+
+        for a, b in zip(range(len(offsets_addition_step_mapping)), range(len(symbol_seps))):
+            # construct the offset chunks and append to respective list
+            this_sym = symbol_seps[b]
+            this_dur = duration_seps[b]
+            this_voice = voice_seps[b]
+            k = ordered_k[a]
+            this_offset = offsets_addition_step_mapping[k]
+            this_offset_voice = [_v for _v in range(len(this_offset))]
+            this_offset_dur = [t_o for t_o in this_offset]
+            this_offset_pitch = [0. for _v in range(len(this_offset))]
+            # to ensure it is in the dictionary, make it into multiples of 1, .5, .25 etc
+            rems = [t_o_d - int(t_o_d) for t_o_d in this_offset_dur]
+
+            this_offset_spread_voice = []
+            this_offset_spread_dur = []
+            this_offset_spread_pitch = []
+
+            for _n, rem in enumerate(rems):
+                if rem == 0:
+                    continue
+                else:
+                   # this assumes rem is in the dataset!
+                   assert rem in [.125, .25, .5, 1.]
+                   this_offset_spread_dur.append(rem)
+                   this_offset_spread_voice.append(_n)
+                   this_offset_spread_pitch.append(0)
+            
+            # now that we handled remaineders, stick in the rests in chunks of 1.
+            cores = [int(t_o_d) for t_o_d in this_offset_dur]
+            for _n, core in enumerate(cores):
+                if core == 0:
+                    continue
+                else:
+                    # core should be an integer >= 1
+                    for _j in range(core):
+                        this_offset_spread_voice.append(_n)
+                        this_offset_spread_dur.append(1.0)
+                        this_offset_spread_pitch.append(0)
+
+            #this_offset_sym = [infill_corpus.dictionary.idx2word[
+            assert len(this_offset_spread_dur) == len(this_offset_spread_pitch)
+            this_offset_symbols = np.array([(el1, el2) for el1, el2 in zip(this_offset_spread_pitch, this_offset_spread_dur)])
+            joined_voices.append(np.array(this_offset_spread_voice))
+            joined_symbols.append(this_offset_symbols)
+            joined_voices.append(this_voice)
+            joined_symbols.append(this_sym)
+        joined_voices = np.concatenate(joined_voices)
+        joined_symbols = np.concatenate(joined_symbols)
+    else:
+        # only one element, just add offset to start...
+        print("handle single case")
+        from IPython import embed; embed(); raise ValueError()
+
+    assert len(joined_voices) == len(joined_symbols)
+    # remove file separator symbol now
+    joined_symbols = [tuple(j) for j in joined_symbols]
+    joined_symbols = [(int(j[0]), j[1]) for j in joined_symbols]
+    joined_voices = [int(v) for v in joined_voices]
+
+    reduced_indices = [n for n in range(len(joined_symbols)) if joined_symbols[n] != infill_corpus.file_separator_symbol]
+    joined_symbols = [joined_symbols[n] for n in reduced_indices]
+    joined_voices = [joined_voices[n] for n in reduced_indices]
+    symbol_sequence = joined_symbols
+    voice_sequence = joined_voices
+
+    pitches_list = [s[0] for s in symbol_sequence]
+    durations_list = [s[1] for s in symbol_sequence]
+    voices_list = [vi for vi in voice_sequence]
     try:
-        assert all([bv != -1 for bv in base_voices_list])
+        assert all([v != -1 for v in voices_list])
     except:
         print(t)
         print("error?")
         from IPython import embed; embed()#; raise ValueError()
-
-    # add "blanks" to make the first notes start the correct place in time
-    for v in range(4):
-        scoot = per_voice_min_offset - min_offset
-        if scoot[v] > 0:
-            base_pitches_list.insert(0, 0)
-            base_durations_list.insert(0, scoot[v])
-            base_voices_list.insert(0, v)
-
-    pitches_list.extend(base_pitches_list)
-    durations_list.extend(base_durations_list)
-    voices_list.extend(base_voices_list)
-
-    """
-    pitches_list.extend(base_pitches_list)
-    durations_list.extend(base_durations_list)
-    voices_list.extend([1 for s in symbol_sequence])
-
-    pitches_list.extend(base_pitches_list)
-    durations_list.extend(base_durations_list)
-    voices_list.extend([2 for s in symbol_sequence])
-
-    pitches_list.extend(base_pitches_list)
-    durations_list.extend(base_durations_list)
-    voices_list.extend([3 for s in symbol_sequence])
-    """
 
     data = convert_voice_lists_to_music_json(pitch_lists=pitches_list, duration_lists=durations_list, voices_list=voices_list)
 
