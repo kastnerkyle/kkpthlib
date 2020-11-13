@@ -1123,6 +1123,10 @@ class MusicJSONInfillCorpus(object):
                     cur_batch_offsets.append(cur_offsets + cur_answer_offsets)
                     assert len(cur_batch[-1]) == len(cur_batch_offsets[-1])
 
+                    # rewrite the answers and offsets to be "linear", SSAATTBB order
+                    #print("mb")
+                    #from IPython import embed; embed(); raise ValueError()
+
                 max_len = max([len(b) for b in cur_batch])
                 cur_batch_masks = [[0] * len(b) + [1] * (max_len - len(b)) for b in cur_batch]
                 cur_batch = [b + [fill_symbol] * (max_len - len(b)) for b in cur_batch]

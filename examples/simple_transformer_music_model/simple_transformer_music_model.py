@@ -201,7 +201,6 @@ if __name__ == "__main__":
             #out_mems = in_mems
         return l, None, out_mems
 
-    """
     # the out-of-loop-check
     rs = []
     for i in range(100000):
@@ -212,7 +211,6 @@ if __name__ == "__main__":
             r = loop(train_itr, {"train": True}, rs[-1][-1])
         rs.append(r)
     from IPython import embed; embed(); raise ValueError()
-    """
 
     s = {"model": model,
          "optimizer": optimizer,
