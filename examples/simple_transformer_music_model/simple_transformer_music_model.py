@@ -29,7 +29,7 @@ from kkpthlib import write_music_json
 
 hp = HParams(memory_len=0,
              context_len=0,
-             sequence_len=128,
+             sequence_len=64,
              transformer_input_dim=380,
              inner_dim=900,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
@@ -152,7 +152,7 @@ if __name__ == "__main__":
     def loop(itr, extras, stateful_args):
         global first_valid
         global first_train
-        batch_np, batch_masks_np, batch_offsets_np = next(itr)
+        batch_np, batch_masks_np, batch_offsets_np, batch_indices_np = next(itr)
 
         batch = torch.tensor(batch_np)
         pad_batch = torch.cat((0 * batch[:1] + infill_corpus.dictionary.word2idx[infill_corpus.fill_symbol], batch), 0).to(hp.use_device)
@@ -160,6 +160,9 @@ if __name__ == "__main__":
 
         input_batch = pad_batch[:-1]
         target_batch = pad_batch[1:].long()
+
+        return_answers, return_offsets, return_positions = infill_corpus.get_answer_groups_from_example(batch_np, batch_offsets_np)
+        from IPython import embed; embed(); raise ValueError()
 
         in_mems = stateful_args
         if extras["train"]:

@@ -193,11 +193,9 @@ for t in range(batch_np.shape[1]):
     t1 = input_batch[context_boundary:]
     t2 = pad_batch_offsets_np[context_boundary:]
     a1 = [infill_corpus.dictionary.idx2word[ts] for ts in t1[:, t, 0]]
-    assert len(a1) == (len(t2) - 1)
-    # t2 and a1 are off by one because t2 has 1 extra "closure" element, slice it out
-    assert np.all(t2[-1, t] == np.array([-1, 0, 0]))
+    assert len(a1) == len(t2)
     _a1_durations = [aa1[1] for aa1 in a1]
-    _t2_durations = t2[:-1, t, -1]
+    _t2_durations = t2[:, t, -1]
     # ensure the sequences line up
     assert all([_a == _t for _a, _t in zip(_a1_durations, _t2_durations) if _a > 0])
     assert all([_t == 0 for _a, _t in zip(_a1_durations, _t2_durations) if _a <= 0])
@@ -245,6 +243,7 @@ for t in range(batch_np.shape[1]):
         assert len(gt_offsets) == len(mask_positions)
     except:
         from IPython import embed; embed(); raise ValueError()
+    from IPython import embed; embed(); raise ValueError()
 
 
     class SelfConstraint(Constraint):

@@ -522,8 +522,17 @@ def pitch_duration_velocity_lists_from_music_json_file(json_file, default_veloci
 
     n_steps = max([len(p) for p in parts])
 
+    # shared starts
+    tmp = [set(parts_cumulative_times[i]) for i in range(len(parts))]
+    # assume there at least 2 parts or more
+    candidates = tmp[0]
+    for i in range(len(tmp)):
+        candidates = candidates.intersection(tmp[i])
+
     measure_stops = [[] for p in parts]
     for v in range(len(parts)):
+        last_measure_boundary = -1
+
         for s in range(n_steps):
             if s >= len(parts[v]):
                 continue
@@ -532,48 +541,36 @@ def pitch_duration_velocity_lists_from_music_json_file(json_file, default_veloci
             p_c_s = parts_cumulative_times[v][s]
             p_v_s = parts_velocities[v][s]
 
-            #new_parts[v].append(p_s)
-            #new_parts_times[v].append(d_s)
-            #new_parts_cumulative_times[v].append(p_c_s)
-            #new_parts_velocities[v].append(p_v_s)
-            if p_c_s % measure_quarters == 0:
-                measure_stops[v].append((s + 1, p_c_s))
+            if p_c_s in candidates:
+                if p_c_s >= 4.0:
+                    if v == 0:
+                        if last_measure_boundary == -1 or s - last_measure_boundary > 3:
+                            measure_stops[v].append((s + 1, p_c_s))
+                            last_measure_boundary = s
+                    elif v > 0:
+                        if p_c_s in [el[1] for el in measure_stops[0]]:
+                            measure_stops[v].append((s + 1, p_c_s))
+                            last_measure_boundary = s
 
-    # the set of stop points consistent within all voices 
-
-    count = collections.Counter([m_i_s[1] for m_i in measure_stops for m_i_s in m_i])
-    shared_stop_points = sorted([k for k in count.keys() if count[k] == len(parts)])
-    if len(shared_stop_points) < 1:
-        raise ValueError("No points where all voices start on the measure start...?")
-
-    cleaned_measure_stops = []
-    for v in range(len(parts)):
-        r = [mi for mi in measure_stops[v] if mi[1] in shared_stop_points]
-        cleaned_measure_stops.append(r)
-
-
+    # back to front in order to avoid issues with indexes and shifting
     new_parts = [[] for p in parts]
     new_parts_times = [[] for p in parts]
     new_parts_cumulative_times = [[] for p in parts]
     new_parts_velocities = [[] for p in parts]
-    last_vs = [0 for v in range(len(parts))]
     for v in range(len(parts)):
-        cm = cleaned_measure_stops[v]
-        for cmi in cm:
-            last = last_vs[v]
+        new_parts[v].extend(parts[v])
+        new_parts_times[v].extend(parts_times[v])
+        new_parts_cumulative_times[v].extend(parts_cumulative_times[v])
+        new_parts_velocities[v].extend(parts_velocities[v])
 
-            new_parts[v].extend(parts[v][last:cmi[0]])
-            new_parts_times[v].extend(parts_times[v][last:cmi[0]])
-            new_parts_cumulative_times[v].extend(parts_cumulative_times[v][last:cmi[0]])
-            new_parts_velocities[v].extend(parts_velocities[v][last:cmi[0]])
+        for pt in measure_stops[v][::-1]:
+            new_parts[v].insert(pt[0], 99)
+            new_parts_times[v].insert(pt[0], 0)
+            new_parts_velocities[v].insert(pt[0], 0)
 
-            if add_measure_values:
-                new_parts[v].append(measure_value)
-                new_parts_times[v].append(fill_value)
-                new_parts_cumulative_times[v].append(fill_value)
-                new_parts_velocities[v].append(fill_value)
-
-            last_vs[v] = cmi[0]
+        new_parts_cumulative_times[v] = [el for el in np.cumsum([0] + new_parts_times[v])[:-1]]
+        # set duration to -1 now that we calculate the new cumulative times
+        new_parts_times[v] = [new_parts_times[v][_ii] if new_parts_times[v][_ii] > 0 else -1. for _ii in range(len(new_parts_times[v]))]
     return new_parts, new_parts_times, new_parts_velocities
 
 
@@ -790,105 +787,102 @@ class MusicJSONInfillCorpus(object):
         all_durations = []
         all_voices = []
         for path in json_file_paths:
-            pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
-            all_pitches.append([p for n, p in enumerate(pitches) if n in self.voices])
-            all_durations.append([d for n, d in enumerate(durations) if n in self.voices])
-            all_voices.append([v for n, v in enumerate(voices) if n in self.voices])
+            pitches, durations, velocities = pitch_duration_velocity_lists_from_music_json_file(path)
+            all_pitches.append([p for n, p in enumerate(pitches)])
+            all_durations.append([d for n, d in enumerate(durations)])
+            all_voices.append([v for n, v in enumerate(velocities)])
         return all_pitches, all_durations, all_voices
 
     def build_vocabulary(self, json_file_paths):
+        # merge the logic from the other pre_tokenize step
         for path in json_file_paths:
-            all_pitches = []
-            all_durations = []
-            pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
-            if self.raster_scan:
-                joint = []
-                v = 0
-                voice_counter = [0, 0, 0, 0]
-                while True:
-                    if voice_counter[v] >= len(pitches[v]):
-                        if all([voice_counter[i] >= len(pitches[i]) for i in range(len(voice_counter))]):
-                            break
-                    else:
-                        all_pitches.append(pitches[v][voice_counter[v]])
-                        all_durations.append(durations[v][voice_counter[v]])
-                    voice_counter[v] += 1
-                    v = v + 1
-                    v = v % len(pitches)
-                for p, d in zip(all_pitches, all_durations):
-                    if d == -1:
-                        continue
-                    else:
-                        joint.append((p, d))
-
-                for j in joint:
-                    if j not in self.dictionary.word2idx:
-                        self.dictionary.add_word(j)
-            else:
-                for v in self.voices:
-                    _pitches = [p for n, p in enumerate(pitches) if n == v]
-                    _durations = [d for n, d in enumerate(durations) if n == v]
-                    _pitches = _pitches[0]
-                    _durations = _durations[0]
-                    assert len(_pitches) == len(_durations)
-                    joint = []
-                    for p, d in zip(_pitches, _durations):
-                        if d == -1:
-                            continue
-                        else:
-                            joint.append((p, d))
-
-                    for j in joint:
-                        if j not in self.dictionary.word2idx:
-                            self.dictionary.add_word(j)
+            joint, joint_offsets, joint_files = self.pre_tokenize([path])
+            for j in joint:
+                if j not in self.dictionary.word2idx:
+                    self.dictionary.add_word(j)
 
     def pre_tokenize(self, json_file_paths):
         joints = []
         joints_offsets = []
         joints_files = []
         for path in json_file_paths:
-            pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
+            pitches, durations, velocities = pitch_duration_velocity_lists_from_music_json_file(path)
             all_pitches = []
             all_durations = []
             all_voice_offsets = []
             if self.raster_scan:
+                # need to get groups, then "flatten" SSSAAATTTBBB
+                # then add marks between, track voice
+                voice_step_counter = [0, 0, 0, 0]
+
+                def split_list(iterable, splitter):
+                    is_splitter = [n for n, el in enumerate(iterable) if el == splitter]
+                    if is_splitter[0] != 0:
+                        is_splitter = [0] + is_splitter
+                    if is_splitter[-1] != len(iterable):
+                        is_splitter = is_splitter + [len(iterable)]
+                    return split_by_index(iterable, is_splitter)
+
+                def split_by_index(iterable, is_splitter):
+                    i_s = is_splitter
+
+                    subs = []
+                    for i, j in zip(i_s[:-1], i_s[1:]):
+                        if i == 0:
+                            subs.append(iterable[i:j])
+                        else:
+                            subs.append(iterable[i + 1:j])
+
+                    # remove empties
+                    subs = [s_ for s_ in subs if len(s_) > 0]
+                    for s_ in subs:
+                        if len(s_) == 0:
+                            raise ValueError("Size zero split remains, fix this")
+                    return subs, i_s
+
+                def group_split_list(iterables, splitter_0):
+                    i_0, splits = split_list(iterables[0], splitter_0)
+                    res = [i_0]
+                    for iter_ in iterables[1:]:
+                        i_i, _ = split_by_index(iter_, splits)
+                        res.append(i_i)
+                    return res
+
+                this_g = []
+                for v in range(len(pitches)):
+                    g_i = group_split_list([pitches[v], durations[v]], 99)
+                    if v > 0:
+                        for el in g_i:
+                            assert len(el) == len(this_g[0][0])
+                    this_g.append(g_i)
+                # the joint thing is now the flattened version of this 99 SSAATB 99 SAATB 99, with voice and offset information added
                 joint = []
                 joint_offsets = []
-                v = 0
-                voice_counter = [0, 0, 0, 0]
                 voice_offsets = [0, 0, 0, 0]
-                while True:
-                    if voice_counter[v] >= len(pitches[v]):
-                        if all([voice_counter[i] >= len(pitches[i]) for i in range(len(voice_counter))]):
-                            break
-                    else:
-                        all_pitches.append(pitches[v][voice_counter[v]])
-                        all_durations.append(durations[v][voice_counter[v]])
-                        all_voice_offsets.append((v, voice_offsets[v]))
-                        voice_offsets[v] += durations[v][voice_counter[v]] if durations[v][voice_counter[v]] >= 0 else 0
-                        voice_counter[v] += 1
+                for step in range(len(this_g[0][0])):
+                    joint.append((99, 0))
+                    joint_offsets.append((0, voice_offsets[0], 0))
+                    print(voice_offsets)
+                    for v in range(len(pitches)):
+                        # 0 is pitch
+                        # 1 is duration
+                        p = this_g[v][0][step]
+                        d = this_g[v][1][step]
+                        assert len(p) == len(d)
+                        for p_i, d_i in zip(p, d):
+                            joint.append((p_i, d_i))
+                            joint_offsets.append((v, voice_offsets[v], d_i))
+                            voice_offsets[v] += d_i
+                joint.append((99, 0))
+                # voice 5? why not... special symbols channel
+                joint_offsets.append((5, 0, voice_offsets[0]))
 
-                    v = v + 1
-                    v = v % len(pitches)
-                    # need per-voice offsets... oof
-                assert len(all_pitches) == len(all_durations)
-                assert len(all_pitches) == len(all_voice_offsets)
-                for p, d, o in zip(all_pitches, all_durations, all_voice_offsets):
-                    # special symbols and measure markers
-                    if d == -1:
-                        continue
-                    else:
-                        joint.append((p, d))
-                        joint_offsets.append(o + (d,))
-                # per voice offsets from the left, starts at 0
                 joints_offsets.extend(joint_offsets)
                 joints.extend(joint)
                 joints_files.extend([(path, _n) for _n, j in enumerate(joint)])
-                joints.append(self.file_separator_symbol)
-                # file separator is -1 voice, 0 offset, 0 duration
-                joints_offsets.append((-1, 0, 0))
                 joints_files.append((path, len(joint)))
             else:
+                raise ValueError("Only support raster for now")
                 # treat each voice as a separate "file" for now
                 for v in self.voices:
                     _pitches = [p for n, p in enumerate(pitches) if n == v]
@@ -910,6 +904,88 @@ class MusicJSONInfillCorpus(object):
                 print("NYI: fix joint_offsets")
         assert len(joints) == len(joints_offsets)
         return joints, joints_offsets, joints_files
+
+    def get_answer_groups_from_example(self, batch, batch_offsets):
+        batch_return_answers = []
+        batch_return_offsets = []
+        batch_return_positions = []
+        for t in range(batch.shape[1]):
+            context_token = self.dictionary.word2idx[self.end_context_symbol]
+            answer_token = self.dictionary.word2idx[self.answer_symbol]
+            mask_token = self.dictionary.word2idx[self.mask_symbol]
+
+            # +1 to include context boundary
+            context_boundary = np.where(batch[:, t, 0] == context_token)[0][0] + 1
+            mask_positions = np.where(batch[:context_boundary, t, 0] == mask_token)[0]
+
+            # find last answer symbol
+            end_point = np.where(batch[:, t, 0] == self.dictionary.word2idx[self.answer_symbol])[0][-1] + 1
+
+            t1 = batch[context_boundary:end_point]
+            t2 = batch_offsets[context_boundary:end_point]
+            a1 = [self.dictionary.idx2word[ts] for ts in t1[:, t, 0]]
+            assert len(a1) == len(t2)
+            # t2 and a1 are off by one because t2 has 1 extra "closure" element, slice it out
+            assert np.all(t2[-1, t] == np.array([-1, 0, 0]))
+            _a1_durations = [aa1[1] for aa1 in a1]
+            _t2_durations = t2[:, t, -1]
+            # ensure the sequences line up
+            assert all([_a == _t for _a, _t in zip(_a1_durations, _t2_durations) if _a > 0])
+            assert all([_t == 0 for _a, _t in zip(_a1_durations, _t2_durations) if _a <= 0])
+
+            # 2 separate checks because < 0 is "special" symbols in the iterator, should have gt duration of 0
+            # get expected duration total for each answer, for each voice!
+            gt_answers = []
+            gt_offsets = []
+            _pre = [_aa1 if _aa1 > 0 else None for _aa1 in _a1_durations]
+            # collapse consequentive None values?
+            split_idx = [_n for _n in range(len(_pre)) if _pre[_n] == None]
+            if split_idx[0] != 0:
+                split_idx.insert(0, 0)
+            # if the last split idx isn't at the last element, add a dummy splitter
+            if split_idx[-1] != (len(_pre) - 1):
+                 # list grabs aren't inclusive, so we add 1 so that l[a:b] grabs elem b-1 (the last value in our data)
+                 split_idx.append(len(_pre))
+
+            boundaries = list(zip(split_idx[:-1], split_idx[1:]))
+            for b in boundaries:
+                # le or lt
+                if b[0] + 1 < b[1]:
+                    if b[0] > 0: # +1 to skip the boundary value of None
+                        gt_answers.append(a1[b[0] + 1:b[1]])
+                        gt_offsets.append(t2[b[0] + 1:b[1], t])
+                    else:
+                        gt_answers.append(a1[b[0]:b[1]])
+                        gt_offsets.append(t2[b[0]:b[1], t])
+                else:
+                    if b[1] == (len(_pre) - 1):
+                        # edge case where the last dummy chunk only has 1 elem
+                        # skip it? last value is end indicator
+                        #print("example 2")
+                        #from IPython import embed; embed(); raise ValueError()
+                        pass
+                        #gt_answers.append(a1[b[0] + 1:])
+                        #gt_offsets.append(t2[b[0] + 1:, t])
+                    elif b[0] == 0:
+                        gt_answers.append(a1[b[0]:b[1]])
+                        gt_offsets.append(t2[b[0]:b[1], t])
+                    else:
+                        print("boundary issue")
+                        from IPython import embed; embed(); raise ValueError()
+                        raise ValueError("boundary issue")
+
+            # now that we have gathered the answer groups, make sure there are the same number as mask positions
+            try:
+                assert len(gt_answers) == len(mask_positions)
+                assert len(gt_offsets) == len(mask_positions)
+            except:
+                print("answers and offsets do not have same length!")
+                from IPython import embed; embed(); raise ValueError()
+            batch_return_answers.append(gt_answers)
+            batch_return_offsets.append(gt_offsets)
+            batch_return_positions.append(mask_positions)
+        return batch_return_answers, batch_return_offsets, batch_return_positions
+
 
     def get_iterator(self, batch_size, random_seed, sequence_len=64, context_len=32, sample_percent=.15,
                      max_n_gram=8, _type="train"):
@@ -942,18 +1018,42 @@ class MusicJSONInfillCorpus(object):
                              end_context_symbol=end_context_symbol,
                              file_separator_symbol=file_separator_symbol,
                              fill_offset=fill_offset,
-                             fill_symbol=fill_symbol):
+                             fill_symbol=fill_symbol,
+                             loader=self):
             while True:
                 cur_batch = []
                 cur_batch_offsets = []
                 cur_batch_indices = []
                 for i in range(batch_size):
                     # sample place to start element from the dataset
-                    el = random_state.choice(len(content) - sequence_len - 1)
-                    cur_batch_indices.append(el)
+                    while True:
+                        while True:
+                            el = random_state.choice(len(content) - sequence_len - 1)
+                            if el < (len(content) - 2 * (sequence_len + context_len)):
+                                break
 
-                    cur_masked = content[el:el + sequence_len + context_len]
-                    cur_offsets = offsets[el:el + sequence_len + context_len]
+                        # find the nearest measure break and set start point
+                        while True:
+                            if content[el][0] == 99:
+                                break
+                            el = el + 1
+
+                        cur_masked = content[el:el + sequence_len + context_len]
+                        cur_offsets = offsets[el:el + sequence_len + context_len]
+                        if len(np.where(np.array([loader.dictionary.word2idx[cm] for cm in cur_masked]) == loader.dictionary.word2idx[file_separator_symbol])[0]) == 0:
+                            # extra defensive check, be sure there's at least 1 boundary
+                            if len(np.where(np.array([loader.dictionary.word2idx[cm] for cm in cur_masked]) == loader.dictionary.word2idx[(99, 0)])[0]) > 1:
+                                break
+                        else:
+                            pass
+
+                    # has to terminate on measure boundary otherwise we can't re-serialize (is non-causal)
+                    boundary_points = np.where(np.array([loader.dictionary.word2idx[cm] for cm in cur_masked]) == loader.dictionary.word2idx[(99, 0)])[0]
+                    if boundary_points[-1] != (len(cur_masked) - 1):
+                        cur_masked = cur_masked[:boundary_points[-1] + 1]
+                        cur_offsets = cur_offsets[:boundary_points[-1] + 1]
+
+                    cur_batch_indices.append(el)
 
                     # change logic here, use bit mask instead, 2 loops 
                     cur_percent = .0
@@ -966,17 +1066,59 @@ class MusicJSONInfillCorpus(object):
                             print("WARNING: more than (10 * the number of chunk elements) steps taken during masking/sampling")
                         # sample whether single word chunk or multiple
                         n_gram_type = random_state.choice(2)
+
+                        # choices here:
+                        # don't sample any measure marks!
+
                         if n_gram_type == 0:
                             # if it was 0, just mask a single word
                             mask_out_sz = 1
                         else:
                             mask_out_sz = random_state.choice(np.arange(2, max_n_gram + 1))
 
-                        # start point for slice
-                        mask_out_start = random_state.choice(np.arange(context_len, sequence_len - mask_out_sz))
-                        mask_range = list(range(mask_out_start, mask_out_start + mask_out_sz))
-                        cur_bitmask = [cb if n not in mask_range else 1 for n, cb in enumerate(cur_bitmask)]
-                        cur_percent = sum(cur_bitmask) / float(len(cur_bitmask))
+                        # can sample "vertical" (all notes in a time slice)
+                        # sample horizontal "full voice"
+                        # horizontal "groups of notes" (can cross boundary then we clean up)
+                        n_gram_style = random_state.choice(2)
+                        num_voices = len(np.unique(np.array(cur_offsets)[:, 0]))
+                        if n_gram_style == 0:
+                            mask_out_sz = random_state.choice(np.arange(2, num_voices))
+                            block_index = random_state.choice(len(boundary_points) - 2)
+                            l_i = boundary_points[block_index]
+                            # +1 to include the measure mark
+                            r_i = boundary_points[block_index + 1] + 1
+                            sub_masked = cur_masked[l_i:r_i]
+                            sub_offsets = cur_offsets[l_i:r_i]
+                            sub_time_point = random_state.choice(np.unique(np.array(sub_offsets)[:, 1]))
+                            # find entry for each voice that crosses the sub_time_point
+                            elements_to_blank = []
+                            for v in sorted(np.unique(np.array(cur_offsets)[:, 0])):
+                                this_voice_idx = np.where(np.array(cur_offsets)[:, 0] == v)[0].astype("int32")
+                                all_crossed = []
+                                for _ii in this_voice_idx:
+                                    # find first point which is not strictly less than the sampled time point
+                                    if sub_offsets[_ii][1] < sub_time_point:
+                                        pass
+                                    else:
+                                        if len(all_crossed) > 0 and all_crossed[-1] != sub_offsets[_ii][1]:
+                                            all_crossed.append(_ii)
+                                            break
+                                        else:
+                                            all_crossed.append(_ii)
+                                # need to get the first one that crossed, which wasn't a special symbol aka 0 duration
+                                non_blank_crossings = [ac for ac in all_crossed if sub_offsets[ac][2] != 0]
+                                elements_to_blank.append(non_blank_crossings[0])
+                            print("vert")
+                            from IPython import embed; embed(); raise ValueError()
+                        elif n_gram_style == 1:
+                            # horizontal
+                            # start point for slice
+                            print("horiz")
+                            mask_out_start = random_state.choice(np.arange(context_len, context_len + sequence_len - mask_out_sz))
+                            mask_range = list(range(mask_out_start, mask_out_start + mask_out_sz))
+                            from IPython import embed; embed(); raise ValueError()
+                            cur_bitmask = [cb if n not in mask_range else 1 for n, cb in enumerate(cur_bitmask)]
+                            cur_percent = sum(cur_bitmask) / float(len(cur_bitmask))
 
                     # make sure offset durations match data duration values
                     assert len(cur_masked) == len(cur_offsets)
@@ -1114,18 +1256,20 @@ class MusicJSONInfillCorpus(object):
                     cur_answer = [end_context_symbol]
                     cur_answer_offsets = [fill_offset]
                     for _ii in range(len(cur_answer_groups)):
-                        cur_answer.extend(cur_answer_groups[_ii])
+                        # rewrite the answers and offsets to be "linear", SSAATTBB order
+                        offs = cur_offset_groups[_ii]
+                        ans = cur_answer_groups[_ii]
+                        for _v in range(4):
+                            assert len(offs) == len(ans)
+                            v_ans = [a for a, o in zip(ans, offs) if o[0] == _v]
+                            v_offs = [o for o in offs if o[0] == _v]
+                            cur_answer.extend(v_ans)
+                            cur_answer_offsets.extend(v_offs)
                         cur_answer.append(answer_symbol)
-                        cur_answer_offsets.extend(cur_offset_groups[_ii])
                         cur_answer_offsets.append(fill_offset)
-
                     cur_batch.append(cur_masked + cur_answer)
                     cur_batch_offsets.append(cur_offsets + cur_answer_offsets)
                     assert len(cur_batch[-1]) == len(cur_batch_offsets[-1])
-
-                    # rewrite the answers and offsets to be "linear", SSAATTBB order
-                    #print("mb")
-                    #from IPython import embed; embed(); raise ValueError()
 
                 max_len = max([len(b) for b in cur_batch])
                 cur_batch_masks = [[0] * len(b) + [1] * (max_len - len(b)) for b in cur_batch]
