@@ -1040,6 +1040,12 @@ class MusicJSONInfillCorpus(object):
 
                         cur_masked = content[el:el + sequence_len + context_len]
                         cur_offsets = offsets[el:el + sequence_len + context_len]
+                        _times = np.array(cur_offsets)[:, 1]
+                        if any([t > _times[-1] for t in _times]):
+                            # skip ones that happen on the boundary of 2 files
+                            # find it because time is not monotonically increasing
+                            continue
+
                         if len(np.where(np.array([loader.dictionary.word2idx[cm] for cm in cur_masked]) == loader.dictionary.word2idx[file_separator_symbol])[0]) == 0:
                             # extra defensive check, be sure there's at least 1 boundary
                             if len(np.where(np.array([loader.dictionary.word2idx[cm] for cm in cur_masked]) == loader.dictionary.word2idx[(99, 0)])[0]) > 1:
@@ -1092,32 +1098,40 @@ class MusicJSONInfillCorpus(object):
                             sub_time_point = random_state.choice(np.unique(np.array(sub_offsets)[:, 1]))
                             # find entry for each voice that crosses the sub_time_point
                             elements_to_blank = []
+                            sub_voices = random_state.choice(np.arange(2, num_voices + 1))
+                            which_voices = np.arange(num_voices + 1)
+                            random_state.shuffle(which_voices)
+                            which_voices = [w for w in which_voices[:sub_voices]]
                             for v in sorted(np.unique(np.array(cur_offsets)[:, 0])):
                                 this_voice_idx = np.where(np.array(cur_offsets)[:, 0] == v)[0].astype("int32")
                                 all_crossed = []
                                 for _ii in this_voice_idx:
                                     # find first point which is not strictly less than the sampled time point
-                                    if sub_offsets[_ii][1] < sub_time_point:
+                                    if cur_offsets[_ii][1] < sub_time_point:
                                         pass
                                     else:
-                                        if len(all_crossed) > 0 and all_crossed[-1] != sub_offsets[_ii][1]:
+                                        if len(all_crossed) > 0 and all_crossed[-1] != cur_offsets[_ii][1]:
                                             all_crossed.append(_ii)
                                             break
                                         else:
                                             all_crossed.append(_ii)
+                                # only do it for voices from which_voices, this gives a random subset of all voices
+                                if v not in which_voices:
+                                    continue
                                 # need to get the first one that crossed, which wasn't a special symbol aka 0 duration
-                                non_blank_crossings = [ac for ac in all_crossed if sub_offsets[ac][2] != 0]
+                                non_blank_crossings = [ac for ac in all_crossed if cur_offsets[ac][2] != 0]
                                 elements_to_blank.append(non_blank_crossings[0])
-                            print("vert")
-                            from IPython import embed; embed(); raise ValueError()
+
+                            cur_bitmask = [cb if n not in elements_to_blank else 1 for n, cb in enumerate(cur_bitmask)]
+                            cur_percent = sum(cur_bitmask) / float(len(cur_bitmask))
                         elif n_gram_style == 1:
+                            # only edge case here is to NEVER blank out 0 duration "special symbols"
                             # horizontal
                             # start point for slice
-                            print("horiz")
-                            mask_out_start = random_state.choice(np.arange(context_len, context_len + sequence_len - mask_out_sz))
+                            # context len?
+                            mask_out_start = random_state.choice(np.arange(0, len(cur_masked) - (mask_out_sz + 1)))
                             mask_range = list(range(mask_out_start, mask_out_start + mask_out_sz))
-                            from IPython import embed; embed(); raise ValueError()
-                            cur_bitmask = [cb if n not in mask_range else 1 for n, cb in enumerate(cur_bitmask)]
+                            cur_bitmask = [cb if n not in mask_range or cur_masked[n][-1] == 0. else 1 for n, cb in enumerate(cur_bitmask)]
                             cur_percent = sum(cur_bitmask) / float(len(cur_bitmask))
 
                     # make sure offset durations match data duration values
