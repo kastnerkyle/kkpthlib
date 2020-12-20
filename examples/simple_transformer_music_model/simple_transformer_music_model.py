@@ -162,6 +162,21 @@ if __name__ == "__main__":
         target_batch = pad_batch[1:].long()
 
         return_answers, return_offsets, return_positions = infill_corpus.get_answer_groups_from_example(batch_np, batch_offsets_np)
+        print("start")
+        for i in range(1000000):
+            #if i % 1000 == 0:
+            print(i)
+            batch_np, batch_masks_np, batch_offsets_np, batch_indices_np = next(itr)
+
+            batch = torch.tensor(batch_np)
+            pad_batch = torch.cat((0 * batch[:1] + infill_corpus.dictionary.word2idx[infill_corpus.fill_symbol], batch), 0).to(hp.use_device)
+            batch_masks = torch.tensor(batch_masks_np).to(hp.use_device)
+
+            input_batch = pad_batch[:-1]
+            target_batch = pad_batch[1:].long()
+
+            return_answers, return_offsets, return_positions = infill_corpus.get_answer_groups_from_example(batch_np, batch_offsets_np)
+        print("fin")
         from IPython import embed; embed(); raise ValueError()
 
         in_mems = stateful_args

@@ -875,7 +875,7 @@ class MusicJSONInfillCorpus(object):
                             voice_offsets[v] += d_i
                 joint.append((99, 0))
                 # voice 5? why not... special symbols channel
-                joint_offsets.append((5, 0, voice_offsets[0]))
+                joint_offsets.append((5, voice_offsets[0], 0))
 
                 joints_offsets.extend(joint_offsets)
                 joints.extend(joint)
@@ -1089,7 +1089,11 @@ class MusicJSONInfillCorpus(object):
                         num_voices = len(np.unique(np.array(cur_offsets)[:, 0]))
                         if n_gram_style == 0:
                             mask_out_sz = random_state.choice(np.arange(2, num_voices))
-                            block_index = random_state.choice(len(boundary_points) - 2)
+                            # if there are exactly 2 boundary points, it's just start and end
+                            if len(boundary_points) > 2:
+                                block_index = random_state.choice(len(boundary_points) - 2)
+                            else:
+                                block_index = 0
                             l_i = boundary_points[block_index]
                             # +1 to include the measure mark
                             r_i = boundary_points[block_index + 1] + 1
@@ -1120,8 +1124,13 @@ class MusicJSONInfillCorpus(object):
                                     continue
                                 # need to get the first one that crossed, which wasn't a special symbol aka 0 duration
                                 non_blank_crossings = [ac for ac in all_crossed if cur_offsets[ac][2] != 0]
-                                elements_to_blank.append(non_blank_crossings[0])
-
+                                if len(non_blank_crossings) == 0:
+                                    # sanity check that this condition happens rarely - can sample the very last measure mark
+                                    # thus the only non_crossing is a special symbol, so we end up with 0 non_blank_crossings
+                                    #print("empty non_crossings, continue")
+                                    continue
+                                else:
+                                    elements_to_blank.append(non_blank_crossings[0])
                             cur_bitmask = [cb if n not in elements_to_blank else 1 for n, cb in enumerate(cur_bitmask)]
                             cur_percent = sum(cur_bitmask) / float(len(cur_bitmask))
                         elif n_gram_style == 1:
@@ -1136,12 +1145,8 @@ class MusicJSONInfillCorpus(object):
 
                     # make sure offset durations match data duration values
                     assert len(cur_masked) == len(cur_offsets)
-                    for cm, co in zip(cur_masked, cur_offsets):
-                        if cm[1] >= 0:
-                            assert cm[1] == co[2]
-                            # offsets and data do not match!
-                            #print("INSPECT: offsets and data do not match")
-                            #from IPython import embed; embed(); raise ValueError()
+                    for n, (cm, co) in enumerate(zip(cur_masked, cur_offsets)):
+                        assert cm[1] == co[2]
 
                     # now that we have a bitmask, loop over and grab answers, mark chunk boundaries
                     up_flag = False
