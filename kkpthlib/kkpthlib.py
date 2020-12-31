@@ -1804,6 +1804,36 @@ class PositionalEmbedding(nn.Module):
             return pos_emb[:, None, :]
 
 
+class EventPositionalEmbedding(nn.Module):
+    # credit to transformer xl
+    def __init__(self, embedding_dimension,
+                 name=None,
+                 strict=None,
+                 dtype="default",
+                 device="default"):
+        super(EventPositionalEmbedding, self).__init__()
+
+        self.embedding_dimension = embedding_dimension
+        d = embedding_dimension
+
+        inv_freq = 1. / (10000. ** (torch.arange(0.0, self.embedding_dimension, 2.0) / float(self.embedding_dimension)))
+        self.register_buffer('inv_freq', inv_freq)
+
+    def forward(self, event_position_sequence, batch_size=None):
+        assert event_position_sequence.shape[1] == batch_size
+        all_pos_emb = []
+        for i in range(batch_size):
+            torch.ger(event_position_sequence[:, 0].float(), self.inv_freq)
+            sinusoid_inp_i = torch.ger(event_position_sequence[:, i].float(), self.inv_freq)
+            pos_emb_i = torch.cat([torch.sin(sinusoid_inp_i), torch.cos(sinusoid_inp_i)], dim=-1)
+            all_pos_emb.append(pos_emb_i[:, None, :])
+
+        pos_emb = torch.cat(all_pos_emb, dim=1)
+        assert pos_emb.shape[1] == batch_size
+        assert len(pos_emb.shape) == 3
+        return pos_emb
+
+
 class LayerNorm(torch.nn.Module):
     """
     https://nlp.seas.harvard.edu/2018/04/03/attention.html
@@ -2146,6 +2176,7 @@ class AWDTransformerXLDecoderBlock(nn.Module):
                  inner_dropout_keep_prob=0.8,
                  hidden_dropout_keep_prob=1.0,
                  output_dropout_keep_prob=0.5,
+                 event_based_positions=False,
                  name=None,
                  random_state=None,
                  memory_len=0,
@@ -2174,6 +2205,7 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         self.n_layers = n_layers
         self.device = device
         self.dtype = dtype
+        self.event_based_positions = event_based_positions
         self.local_bias_ac = nn.Parameter(torch.zeros(n_heads, head_dim))
         self.local_bias_bd = nn.Parameter(torch.zeros(n_heads, head_dim))
 
@@ -2197,9 +2229,14 @@ class AWDTransformerXLDecoderBlock(nn.Module):
 
         self.memory_len = memory_len
         self.context_len = context_len
-        self.pos_emb = PositionalEmbedding(model_dim,
-                                           device=device,
-                                           dtype=dtype)
+        if self.event_based_positions:
+            self.pos_emb = EventPositionalEmbedding(model_dim,
+                                                    device=device,
+                                                    dtype=dtype)
+        else:
+            self.pos_emb = PositionalEmbedding(model_dim,
+                                               device=device,
+                                               dtype=dtype)
         self.locked_drop_i = LockedDropout(input_dropout_keep_prob,
                                            random_state=random_state,
                                            device=device,
@@ -2272,9 +2309,10 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         return new_mems
 
 
-    def forward(self, input_tensor, input_mask_tensor=None, list_of_mems=None):
+    def forward(self, input_tensor, input_mask_tensor=None, input_event_positions=None, list_of_mems=None):
         if not list_of_mems:
             list_of_mems = self.init_list_of_mems()
+
 
         shp = input_tensor.shape
 
@@ -2285,10 +2323,20 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         attn_mask = torch.triu(input_tensor.new_ones(qlen, klen), diagonal=1 + mlen).bool()[:, :, None]
         attn_mask = (attn_mask.type(input_mask_tensor.dtype) + input_mask_tensor[:, None, :] > 0).bool()
 
-        # relative positional embedding
-        pos_seq = torch.arange(klen, -1, -1.0, device=input_tensor.device)
-        pe = self.pos_emb(pos_seq, batch_size=shp[1])
-        # one longer than because _rel_shift reduces size by 1
+        if self.event_based_positions:
+            if input_event_positions is None:
+                raise ValueError("event_based_positions enabled in init, but not passed in forward pass!")
+            # reverse the input positions?, and append 0 at the end
+            #pos_seq = torch.flip(input_event_positions, dims=[0])
+            pos_seq = input_event_positions
+            pos_seq = torch.cat([(pos_seq[-1, :] * 0.)[None, :], pos_seq], dim=0)
+            # duplicate 
+            pe = self.pos_emb(pos_seq, batch_size=shp[1])
+        else:
+            # relative positional embedding
+            pos_seq = torch.arange(klen, -1, -1.0, device=input_tensor.device)
+            pe = self.pos_emb(pos_seq, batch_size=shp[1])
+            # one longer than expected because _rel_shift reduces size by 1
 
         hids = []
         core_out = self.locked_drop_i(input_tensor)

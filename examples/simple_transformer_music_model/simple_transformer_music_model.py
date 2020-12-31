@@ -30,14 +30,16 @@ from kkpthlib import write_music_json
 hp = HParams(memory_len=0,
              context_len=0,
              sequence_len=64,
+             n_voice_channels=5,
              transformer_input_dim=380,
              inner_dim=900,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
              learning_rate=1E-4,
              min_learning_rate=1E-6,
              clip=.25,
+             #clip=1.,
              batch_size=10,
-             n_layers=16,
+             n_layers=15,
              embedding_dropout_keep_prob=0.5,
              attention_dropout_keep_prob=0.8,
              input_dropout_keep_prob=0.3,
@@ -58,12 +60,15 @@ def build_model(hp, file_corpus):
 
             vocab_size = len(this_file_corpus.dictionary.idx2word)
             inp = hp.transformer_input_dim
-            self.emb = EmbeddingDropout(vocab_size,
-                                        inp,
-                                        dropout_keep_prob=hp.embedding_dropout_keep_prob,
-                                        random_state=random_state,
-                                        device=hp.use_device,
-                                        name="embed")
+            self.n_voice_embeddings = hp.n_voice_channels
+            self.embs = nn.ModuleList()
+            for _v in range(self.n_voice_embeddings):
+                self.embs.append(EmbeddingDropout(vocab_size,
+                                                  inp,
+                                                  dropout_keep_prob=hp.embedding_dropout_keep_prob,
+                                                  random_state=random_state,
+                                                  device=hp.use_device,
+                                                  name="embed_{}".format(_v)))
             self.in_proj = Linear([inp],
                                   hp.transformer_input_dim,
                                   random_state=random_state,
@@ -74,6 +79,7 @@ def build_model(hp, file_corpus):
 
             self.transformer = AWDTransformerXLDecoderBlock([hp.transformer_input_dim],
                                                             name="transformer_block",
+                                                            event_based_positions=True,
                                                             random_state=random_state,
                                                             memory_len=hp.memory_len,
                                                             context_len=hp.context_len,
@@ -96,11 +102,17 @@ def build_model(hp, file_corpus):
                                    scale=0.02,
                                    name="model_out")
 
-        def forward(self, input_batch, input_batch_masks, list_of_mems=None):
-            e, d_e = self.emb(input_batch)
+        def forward(self, input_batch, input_batch_masks, input_batch_offsets, oh_target_voice_batch_mask, list_of_mems=None):
+            e_o = []
+            for e_i in range(len(self.embs)):
+                e, d_e = self.embs[e_i](input_batch)
+                e_o.append(e[..., None])
+            e_o = torch.cat(e_o, dim=-1)
+            e = (oh_target_voice_batch_mask[:, :, None, :] * e_o).sum(axis=-1)
+            #e, d_e = self.emb(input_batch)
             x1 = relu(self.in_proj([e]))
             # right now assume all batch masks are the same...
-            out, l_o_m = self.transformer(x1, input_batch_masks, list_of_mems=list_of_mems)
+            out, l_o_m = self.transformer(x1, input_batch_masks, input_event_positions=input_batch_offsets[:, :, 1], list_of_mems=list_of_mems)
             p = self.out_proj([out])
             return p, l_o_m
     return Model(hp, file_corpus).to(hp.use_device)
@@ -148,59 +160,77 @@ if __name__ == "__main__":
 
     first_valid = True
     first_train = True
+    batch_cnt = 0
 
     def loop(itr, extras, stateful_args):
         global first_valid
         global first_train
         batch_np, batch_masks_np, batch_offsets_np, batch_indices_np = next(itr)
+        # check that we can work with it
+        return_answers, return_offsets, return_positions = infill_corpus.get_answer_groups_from_example(batch_np, batch_offsets_np)
+
+        # replace -1 with 4 for "special channel"
+        for i in range(batch_offsets_np.shape[1]):
+            replace_i = np.where(batch_offsets_np[:, i, 0] == -1)[0]
+            batch_offsets_np[replace_i, i, 0] = 4
+
+        # one hot batch mask?
+        oh_voice_batch_mask_np = [(0. * batch_offsets_np[:, :, 0])[:, :, None] for _ in range(hp.n_voice_channels)]
+        oh_voice_batch_mask_np = np.concatenate(oh_voice_batch_mask_np, axis=-1).astype("float32")
+        for i in range(batch_offsets_np.shape[1]):
+            for _v in range(hp.n_voice_channels):
+                match_i = np.where(batch_offsets_np[:, i, 0] == _v)[0]
+                oh_voice_batch_mask_np[match_i, i, _v] = 1.
+
+        try:
+            assert np.all(oh_voice_batch_mask_np.sum(axis=-1).ravel() == 1.)
+        except:
+            print("error in oh mask checks")
+            from IPython import embed; embed(); raise ValueError()
+
+        oh_voice_batch_mask = torch.tensor(oh_voice_batch_mask_np).to(hp.use_device)
+        # target because we never padded with 0s, but only want to work with target 
+        oh_target_voice_batch_mask = oh_voice_batch_mask
 
         batch = torch.tensor(batch_np)
         pad_batch = torch.cat((0 * batch[:1] + infill_corpus.dictionary.word2idx[infill_corpus.fill_symbol], batch), 0).to(hp.use_device)
+
+        offsets = torch.tensor(batch_offsets_np)
+        pad_offsets = torch.cat((-1 + 0 * offsets[:1], offsets)).to(hp.use_device)
+
         batch_masks = torch.tensor(batch_masks_np).to(hp.use_device)
 
         input_batch = pad_batch[:-1]
         target_batch = pad_batch[1:].long()
-
-        return_answers, return_offsets, return_positions = infill_corpus.get_answer_groups_from_example(batch_np, batch_offsets_np)
-        print("start")
-        for i in range(1000000):
-            #if i % 1000 == 0:
-            print(i)
-            batch_np, batch_masks_np, batch_offsets_np, batch_indices_np = next(itr)
-
-            batch = torch.tensor(batch_np)
-            pad_batch = torch.cat((0 * batch[:1] + infill_corpus.dictionary.word2idx[infill_corpus.fill_symbol], batch), 0).to(hp.use_device)
-            batch_masks = torch.tensor(batch_masks_np).to(hp.use_device)
-
-            input_batch = pad_batch[:-1]
-            target_batch = pad_batch[1:].long()
-
-            return_answers, return_offsets, return_positions = infill_corpus.get_answer_groups_from_example(batch_np, batch_offsets_np)
-        print("fin")
-        from IPython import embed; embed(); raise ValueError()
+        input_batch_offsets = pad_offsets[:-1]
+        target_batch_offsets = pad_offsets[1:]
 
         in_mems = stateful_args
         if extras["train"]:
             if first_train:
                 model.train()
-                out, out_mems = model(input_batch, batch_masks, list_of_mems=None)
+                out, out_mems = model(input_batch, batch_masks, input_batch_offsets, oh_target_voice_batch_mask, list_of_mems=None)
                 first_train = False
                 first_valid = True
             else:
                 model.train()
-                out, out_mems = model(input_batch, batch_masks, list_of_mems=in_mems)
+                out, out_mems = model(input_batch, batch_masks, input_batch_offsets, oh_target_voice_batch_mask, list_of_mems=in_mems)
         else:
             if first_valid:
                 model.eval()
-                out, out_mems = model(input_batch, batch_masks, list_of_mems=None)
+                out, out_mems = model(input_batch, batch_masks, input_batch_offsets, oh_target_voice_batch_mask, list_of_mems=None)
                 first_valid = False
                 first_train = True
             else:
                 model.eval()
-                out, out_mems = model(input_batch, batch_masks, list_of_mems=in_mems)
+                out, out_mems = model(input_batch, batch_masks, input_batch_offsets, oh_target_voice_batch_mask, list_of_mems=in_mems)
 
         # inputs have already been cut to context length inside transformer
         loss = loss_fun(out, target_batch)
+        #global batch_cnt
+        #if batch_cnt > 0:
+        #    from IPython import embed; embed(); raise ValueError()
+        #batch_cnt += 1
         # masks use transformer convention 0 if valid, 1 if invalid
         loss = loss * (1. - batch_masks)
         loss = (loss / (1. - batch_masks).sum()).sum()
@@ -209,7 +239,8 @@ if __name__ == "__main__":
         optimizer.zero_grad()
         if extras["train"]:
             loss.backward()
-            clipping_grad_norm_(model.parameters(), hp.clip)
+            #clipping_grad_norm_(model.parameters(), hp.clip)
+            clipping_grad_value_(model.parameters(), hp.clip)
             optimizer.step()
         else:
             pass
@@ -219,9 +250,10 @@ if __name__ == "__main__":
             #out_mems = in_mems
         return l, None, out_mems
 
+    """
     # the out-of-loop-check
     rs = []
-    for i in range(100000):
+    for i in range(1000):
         print(i)
         if i == 0:
             r = loop(train_itr, {"train": True}, None)
@@ -229,6 +261,7 @@ if __name__ == "__main__":
             r = loop(train_itr, {"train": True}, rs[-1][-1])
         rs.append(r)
     from IPython import embed; embed(); raise ValueError()
+    """
 
     s = {"model": model,
          "optimizer": optimizer,

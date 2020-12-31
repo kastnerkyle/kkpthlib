@@ -862,7 +862,6 @@ class MusicJSONInfillCorpus(object):
                 for step in range(len(this_g[0][0])):
                     joint.append((99, 0))
                     joint_offsets.append((0, voice_offsets[0], 0))
-                    print(voice_offsets)
                     for v in range(len(pitches)):
                         # 0 is pitch
                         # 1 is duration
@@ -874,8 +873,8 @@ class MusicJSONInfillCorpus(object):
                             joint_offsets.append((v, voice_offsets[v], d_i))
                             voice_offsets[v] += d_i
                 joint.append((99, 0))
-                # voice 5? why not... special symbols channel
-                joint_offsets.append((5, voice_offsets[0], 0))
+                # voice -1 special symbols channel
+                joint_offsets.append((-1, voice_offsets[0], 0))
 
                 joints_offsets.extend(joint_offsets)
                 joints.extend(joint)
