@@ -41,10 +41,10 @@ hp = HParams(memory_len=0,
              batch_size=10,
              n_layers=15,
              embedding_dropout_keep_prob=0.5,
-             attention_dropout_keep_prob=0.8,
+             attention_dropout_keep_prob=0.6,
              input_dropout_keep_prob=0.3,
              inner_dropout_keep_prob=0.8,
-             hidden_dropout_keep_prob=1.0,
+             hidden_dropout_keep_prob=0.8,
              output_dropout_keep_prob=0.5,
              random_seed=2122)
 
@@ -160,7 +160,6 @@ if __name__ == "__main__":
 
     first_valid = True
     first_train = True
-    batch_cnt = 0
 
     def loop(itr, extras, stateful_args):
         global first_valid

@@ -2638,7 +2638,7 @@ def convert_voice_lists_to_music_json(pitch_lists, duration_lists, velocity_list
                 parts_velocities = [velocity_lists[i] for i in range(len(pitch_lists)) if selector[i]]
             else:
                 parts_velocities = [default_velocity for i in range(len(pitch_lists)) if selector[i]]
-            # WE ASSUME MEASURE SELECTOR IS A UNIQue ONE
+            # WE ASSUME MEASURE SELECTOR IS A UNIQUE ONE
             if any([p == measure_value for p in parts]):
                 continue
             else:
