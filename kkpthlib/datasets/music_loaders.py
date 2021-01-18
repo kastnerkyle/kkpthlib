@@ -238,6 +238,7 @@ def write_music_json(json_data, out_name, default_velocity=120):
     with open(out_name, "w") as f:
          json.dump(data, f, indent=4)
 
+
 _program_presets = {
                     "dreamy_r_preset": [("Sitar", 30),
                                         ("Orchestral Harp", 40),
@@ -499,7 +500,9 @@ def piano_roll_from_music_json_file(json_file, default_velocity=120, quantizatio
 def pitch_duration_velocity_lists_from_music_json_file(json_file, default_velocity=120, n_voices=4,
                                                        add_measure_values=True,
                                                        measure_value=99,
-                                                       measure_quarters=4,
+                                                       measure_quarters=8,
+                                                       force_quarters_match=False,
+                                                       trim_uneven_last=False,
                                                        fill_value=-1):
     """
     return list of list [[each_voice] n_voices] or numpy array of shape (time_len, n_voices)
@@ -528,6 +531,16 @@ def pitch_duration_velocity_lists_from_music_json_file(json_file, default_veloci
     candidates = tmp[0]
     for i in range(len(tmp)):
         candidates = candidates.intersection(tmp[i])
+
+    mod_candidates = [c for c in sorted(list(candidates)) if c % measure_quarters == 0]
+    # skip 0
+    full_enumeration = [c for c in list(range(1, int(mod_candidates[-1]) + measure_quarters)) if c % measure_quarters == 0]
+    if force_quarters_match:
+        try:
+            assert all([f_e in mod_candidates for f_e in full_enumeration])
+        except:
+            raise AttributeError("force quarters match failed! measure_quarters {}, file {}".format(measure_quarters, json_file))
+        candidates = mod_candidates
 
     measure_stops = [[] for p in parts]
     for v in range(len(parts)):
@@ -571,6 +584,59 @@ def pitch_duration_velocity_lists_from_music_json_file(json_file, default_veloci
         new_parts_cumulative_times[v] = [el for el in np.cumsum([0] + new_parts_times[v])[:-1]]
         # set duration to -1 now that we calculate the new cumulative times
         new_parts_times[v] = [new_parts_times[v][_ii] if new_parts_times[v][_ii] > 0 else -1. for _ii in range(len(new_parts_times[v]))]
+
+    if trim_uneven_last:
+        if not all([_pt[-1] == -1 for _pt in new_parts_times]):
+            sum_lasts = -1
+            part_sums = []
+            part_cuts = []
+            for v in range(len(new_parts_times)):
+                minuses = np.where(np.array(new_parts_times[v]) == -1)[0]
+                last_minus = minuses[-1]
+                part_cuts.append(last_minus)
+                part_s = sum(new_parts_times[v][last_minus + 1:])
+                if part_s == measure_quarters:
+                    part_sums.append(True)
+                else:
+                    part_sums.append(False)
+
+            if all(part_sums):
+                l = None
+                for v in range(len(new_parts_times)):
+                    if new_parts[v][-1] != 99:
+                        new_parts[v].append(99)
+                        new_parts_times[v].append(-1.)
+                        new_parts_cumulative_times[v].append(new_parts_cumulative_times[-1])
+                        new_parts_velocities[v].append(0)
+                    else:
+                        raise ValueError("part sums -1 is 99, but all _pt[-1] == -1... shouldn't get here in RowRaster corpus")
+
+                    if l is not None:
+                        assert len(new_parts[v]) == l
+                        assert len(new_parts_times[v]) == l
+                        assert len(new_parts_cumulative_times[v]) == l
+                        assert len(new_parts_velocities[v]) == l
+                    else:
+                        l = len(new_parts[v])
+                        assert len(new_parts_times[v]) == l
+                        assert len(new_parts_cumulative_times[v]) == l
+                        assert len(new_parts_velocities[v]) == l
+            else:
+                for v in range(len(new_parts_times)):
+                   new_parts[v] = new_parts[v][:part_cuts[v] + 1]
+                   new_parts_times[v] = new_parts_times[v][:part_cuts[v] + 1]
+                   new_parts_cumulative_times[v] = new_parts_cumulative_times[v][:part_cuts[v] + 1]
+                   new_parts_velocities[v] = new_parts_velocities[v][:part_cuts[v] + 1]
+        assert all([_pt[-1] == -1 for _pt in new_parts_times])
+        # check they all sum to the right value
+        for v in range(len(new_parts)):
+            _s = 0
+            for el in new_parts_times[v]:
+                if el != -1:
+                    _s += el
+                elif el == -1:
+                    assert _s == measure_quarters
+                    _s = 0
     return new_parts, new_parts_times, new_parts_velocities
 
 
@@ -1301,6 +1367,228 @@ class MusicJSONInfillCorpus(object):
                 yield token_batch, cur_batch_masks, cur_batch_offsets, cur_batch_indices
                 #yield np.array(token_batch).T[..., None], np.array(cur_batch_masks).T, np.array(cur_batch_offsets).transpose(1, 0, 2)
         return sample_minibatch()
+
+
+class MusicJSONRowRasterCorpus(object):
+    def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
+                 measure_quarters=8,
+                 max_vocabulary_size=-1,
+                 add_eos=False,
+                 tokenization_fn="row_flatten",
+                 default_velocity=120, quantization_rate=.25, n_voices=4,
+                 separate_onsets=True, onsets_boundary=100):
+        """
+        """
+        self.dictionary = LookupDictionary()
+        self.measure_quarters = measure_quarters
+        self.max_vocabulary_size = max_vocabulary_size
+
+        self.add_eos = add_eos
+        self.tokenization_fn = tokenization_fn
+        self.default_velocity = default_velocity
+        self.quantization_rate = quantization_rate
+        self.n_voices = n_voices
+        self.separate_onsets = separate_onsets
+        self.onsets_boundary = onsets_boundary
+
+        if tokenization_fn == "row_flatten":
+            def tk(arr):
+                print("tokenize")
+                from IPython import embed; embed(); raise ValueError()
+                t = [el for el in arr.ravel()]
+                if add_eos:
+                    # 2 measures of silence are the eos
+                    return t + [0] * 32
+                else:
+                    return t
+            self.tokenization_fn = tk
+        else:
+            raise ValueError("Unknown tokenization_fn {}".format(tokenization_fn))
+
+        """
+        self.voices = voices
+        self.mask_symbol = (-1, -1)
+        self.answer_symbol = (-2, -2)
+        self.end_context_symbol = (-3, -3)
+        self.file_separator_symbol = (-4, -4)
+        self.fill_symbol = (-5, -5)
+        self.special_symbols = [self.mask_symbol, self.answer_symbol, self.end_context_symbol, self.file_separator_symbol, self.fill_symbol]
+        self.raster_scan = raster_scan
+        """
+
+        self.train_data_file_paths = train_data_file_paths
+        self.valid_data_file_paths = valid_data_file_paths
+
+        train_pitches, train_durations, train_velocities, train_updated_files = self._load_music_json(train_data_file_paths)
+        self.train_data_file_paths = train_updated_files
+
+        """
+        self.dictionary.add_word(self.mask_symbol)
+        self.dictionary.add_word(self.answer_symbol)
+        self.dictionary.add_word(self.end_context_symbol)
+        self.dictionary.add_word(self.file_separator_symbol)
+        self.dictionary.add_word(self.fill_symbol)
+        """
+
+        self.build_vocabulary(train_data_file_paths)
+        if valid_data_file_paths != None:
+            valid_pitches, valid_durations, valid_velocities, valid_updated_files = self._load_music_json(valid_data_file_paths)
+            self.valid_data_file_paths = valid_updated_files
+            self.build_vocabulary(self.valid_data_file_paths)
+        if test_data_file_paths != None:
+            test_pitches, test_durations, test_velocities, test_updated_files = self._load_music_json(test_data_file_paths)
+            self.test_data_file_paths = test_updated_files
+
+        self.train, self.train_files_attribution = self.tokenize(train_data_file_paths)
+        if valid_data_file_paths is not None:
+            self.valid, self.valid_files_attribution = self.tokenize(valid_data_file_paths)
+        if test_data_file_paths is not None:
+            self.test, self.test_files_attribution = self.tokenize(test_data_file_paths)
+
+    def _load_music_json(self, json_file_paths, skip_invalid=True, verbose=True):
+        all_pitches = []
+        all_durations = []
+        all_velocities = []
+        skips = 0
+        nonskips = 0
+        # 8, 2k nonskip 1k skip
+        # 16, 3360 nonskips 624 skips
+        nonskip_paths = []
+        for path in json_file_paths:
+            """
+            pitches, durations, velocities = pitch_duration_velocity_lists_from_music_json_file(path,
+                                                                                                force_quarters_match=True,
+                                                                                                trim_uneven_last=True,
+                                                                                                measure_quarters=self.measure_quarters)
+            for i in range(len(pitches)):
+                dij = [durations[i][j] if durations[i][j] != -1 else self.quantization_rate for j in range(len(durations[i]))]
+                if not all([dijel % self.quantization_rate == 0. for dijel in dij]):
+                    raise ValueError("invalid quantization value")
+            all_pitches.append([p for n, p in enumerate(pitches)])
+            # set measure marks to minimum interval
+            all_durations.append([d for n, d in enumerate(durations)])
+            all_velocities.append([v for n, v in enumerate(velocities)])
+            nonskip_paths.append(path)
+            nonskips += 1
+            """
+            try:
+                pitches, durations, velocities = pitch_duration_velocity_lists_from_music_json_file(path,
+                                                                                                    force_quarters_match=True,
+                                                                                                    trim_uneven_last=True,
+                                                                                                    measure_quarters=self.measure_quarters)
+                for i in range(len(pitches)):
+                    dij = [durations[i][j] if durations[i][j] != -1 else self.quantization_rate for j in range(len(durations[i]))]
+                    if not all([dijel % self.quantization_rate == 0. for dijel in dij]):
+                        raise ValueError("invalid quantization value")
+                all_pitches.append([p for n, p in enumerate(pitches)])
+                # set measure marks to minimum interval
+                all_durations.append([d for n, d in enumerate(durations)])
+                all_velocities.append([v for n, v in enumerate(velocities)])
+                nonskip_paths.append(path)
+                nonskips += 1
+            except:
+                skips += 1
+                continue
+        if skips > 0:
+            if verbose:
+                logger.info("Skipped {} files due to force_quarters_match settings...".format(skips))
+                logger.info("Using {} files which satisfy force_quarters_match settings...".format(nonskips))
+
+        assert len(all_pitches) == len(nonskip_paths)
+        assert len(all_pitches) == len(all_durations)
+        assert len(all_pitches) == len(all_velocities)
+        for _i in range(len(all_pitches)):
+            assert len(all_pitches[_i]) == len(all_durations[_i])
+            assert len(all_pitches[_i]) == len(all_velocities[_i])
+            for _j in range(len(all_pitches[_i])):
+                assert len(all_pitches[_i][_j]) == len(all_durations[_i][_j])
+                assert len(all_pitches[_i][_j]) == len(all_velocities[_i][_j])
+
+        # just convert all pitches and durations to piano roll directly...
+        return all_pitches, all_durations, all_velocities, nonskip_paths
+
+    def build_vocabulary(self, json_file_paths):
+        """Tokenizes a text file."""
+
+        words, _ = self.tokenize(json_file_paths, return_pre_tokenization_instead=True)
+
+        for word in words:
+            self.dictionary.add_word(word)
+
+    def tokenize(self, paths, return_pre_tokenization_instead=False):
+        """Tokenizes a text file."""
+        # just use the load function to get the data...
+        pitches, durations, velocities, updated_files = self._load_music_json(paths, verbose=False)
+        new_durations = []
+        for i in range(len(pitches)):
+            # make a piano roll here
+            new_durations_i = []
+            for j in range(len(pitches[i])):
+                assert pitches[i][j][-1] == 99
+                dij = [durations[i][j][el] if durations[i][j][el] != -1 else self.quantization_rate for el in range(len(durations[i][j]))]
+                new_durations_i.append(dij)
+            new_durations.append(new_durations_i)
+
+        rolls = []
+        voice_rolls = []
+        for i in range(len(pitches)):
+            this_roll = []
+            this_voice_roll = []
+            # find chunk boundaries
+            marks = np.where(np.array(pitches[i][0]) == 99 )[0]
+            if marks[0] != 0:
+                marks = np.concatenate(([0], marks))
+
+            n_marks = len(marks)
+            assert n_marks > 1
+            # -1 because we pair them off
+            for _c in range(n_marks - 1):
+                for j in range(len(pitches[i])):
+                    marks = np.where(np.array(pitches[i][j]) == 99)[0]
+                    if marks[0] != 0:
+                        marks = np.concatenate(([0], marks))
+                    bs = list(zip(marks[:-1], marks[1:]))
+                    bi = bs[_c][0]
+                    bj = bs[_c][1]
+                    # write em out in chunks
+                    # skip the actual mark, add in manually once all are written
+                    chunk_roll = []
+                    chunk_voice_roll = []
+                    for el in range(bi, bj):
+                        if pitches[i][j][el] == 99:
+                            continue
+                        assert durations[i][j][el] % self.quantization_rate == 0.
+                        n_q_steps = int(durations[i][j][el] / self.quantization_rate)
+                        assert n_q_steps > 0
+                        cr = [pitches[i][j][el]] * n_q_steps
+                        cvr = [j] * n_q_steps
+                        if self.separate_onsets:
+                            cr[0] += self.onsets_boundary
+                        chunk_roll.extend(cr)
+                        chunk_voice_roll.extend(cvr)
+
+                chunk_roll.append(99)
+                chunk_voice_roll.append(-1)
+                this_roll.extend(chunk_roll)
+                this_voice_roll.extend(chunk_voice_roll)
+            rolls.append(this_roll)
+            voice_rolls.append(this_voice_roll)
+
+        ids = []
+        file_attr = []
+        for i, roll in enumerate(rolls):
+            this_file_attr = updated_files[i]
+            for word in roll:
+                if return_pre_tokenization_instead:
+                    token = word
+                else:
+                    if word in self.dictionary.word2idx:
+                        token = self.dictionary.word2idx[word]
+                    else:
+                        token = self.dictionary.word2idx["<unk>"]
+                ids.append(token)
+                file_attr.append(this_file_attr)
+        return ids, file_attr
 
 
 class MusicJSONRasterCorpus(object):

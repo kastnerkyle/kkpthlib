@@ -97,7 +97,7 @@ from kkpthlib import make_batches_from_list
 from kkpthlib import fetch_jsb_chorales
 from kkpthlib import piano_roll_from_music_json_file
 from kkpthlib import MusicJSONRasterCorpus
-from kkpthlib import convert_voice_roll_to_pitch_duration
+from kkpthlib import convert_voice_roll_to_music_json
 from kkpthlib import music_json_to_midi
 from kkpthlib import write_music_json
 
@@ -186,7 +186,7 @@ if not os.path.exists(midi_sample_dir):
 for i in range(np_data.shape[1]):
     sampled_sentence = [corpus.dictionary.idx2word[c] for c in np_data[:, i]]
     sampled_voice_roll = np.array(sampled_sentence[:len(sampled_sentence) // 4 * 4]).reshape(-1, 4).T
-    data = convert_voice_roll_to_music_json_pitch_duration(sampled_voice_roll)
+    data = convert_voice_roll_to_music_json(sampled_voice_roll)
 
     json_fpath = midi_sample_dir + os.sep + "sampled{}.json".format(i)
     write_music_json(data, json_fpath)
@@ -198,7 +198,7 @@ for i in range(np_data.shape[1]):
 for i in range(true_data.shape[1]):
     true_sentence = [corpus.dictionary.idx2word[c] for c in true_data[:, i]]
     true_voice_roll = np.array(true_sentence[:len(true_sentence) // 4 * 4]).reshape(-1, 4).T
-    data = convert_voice_roll_to_pitch_duration(true_voice_roll)
+    data = convert_voice_roll_to_music_json(true_voice_roll)
 
     json_fpath = midi_sample_dir + os.sep + "true{}.json".format(i)
     write_music_json(data, json_fpath)

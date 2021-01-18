@@ -166,6 +166,7 @@ if __name__ == "__main__":
         global first_train
         batch_np, batch_masks_np, batch_offsets_np, batch_indices_np = next(itr)
         # check that we can work with it
+        from IPython import embed; embed(); raise ValueError()
         return_answers, return_offsets, return_positions = infill_corpus.get_answer_groups_from_example(batch_np, batch_offsets_np)
 
         # replace -1 with 4 for "special channel"

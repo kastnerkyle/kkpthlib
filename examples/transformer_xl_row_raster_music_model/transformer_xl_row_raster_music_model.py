@@ -21,7 +21,7 @@ from kkpthlib import run_loop
 
 from kkpthlib import fetch_jsb_chorales
 from kkpthlib import piano_roll_from_music_json_file
-from kkpthlib import MusicJSONRasterCorpus
+from kkpthlib import MusicJSONRowRasterCorpus
 
 hp = HParams(memory_len=32,
              context_len=128,
@@ -34,7 +34,8 @@ hp = HParams(memory_len=32,
              batch_size=24,
              n_layers=16,
              max_sequence_length=256,
-             max_vocabulary_size=133, # len(corpus.dictionary.counter)
+             max_vocabulary_size=97, # len(corpus.dictionary.counter)
+             #max_vocabulary_size=133, # len(corpus.dictionary.counter)
              random_seed=2122)
 
 def get_hparams():
@@ -91,8 +92,8 @@ if __name__ == "__main__":
     train_files = [f for f in all_transposed if all([vn not in f for vn in valid_names])]
     valid_files = [f for f in all_transposed if any([vn in f for vn in valid_names])]
 
-    corpus = MusicJSONRasterCorpus(train_data_file_paths=train_files,
-                                   valid_data_file_paths=valid_files)
+    corpus = MusicJSONRowRasterCorpus(train_data_file_paths=train_files,
+                                      valid_data_file_paths=valid_files)
     #all_pp = [piano_roll_from_music_json_file(at).ravel() for at in all_transposed]
     #all_pp = [ppi for ppi in np.concatenate(all_pp)]
     # all_pp is one giant list

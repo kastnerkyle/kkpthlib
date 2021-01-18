@@ -2313,7 +2313,6 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         if not list_of_mems:
             list_of_mems = self.init_list_of_mems()
 
-
         shp = input_tensor.shape
 
         qlen = shp[0]
@@ -2321,7 +2320,10 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         klen = mlen + qlen
         # masking works internally by setting 1s to neg inf, 0s are left alone! This is slightly different than expected
         attn_mask = torch.triu(input_tensor.new_ones(qlen, klen), diagonal=1 + mlen).bool()[:, :, None]
-        attn_mask = (attn_mask.type(input_mask_tensor.dtype) + input_mask_tensor[:, None, :] > 0).bool()
+        if input_mask_tensor is None:
+            input_mask_tensor = (0. * input_tensor[:, :, 0]).long()
+        input_mask_tensor_dtype = input_mask_tensor.dtype
+        attn_mask = (attn_mask.type(input_mask_tensor_dtype) + input_mask_tensor[:, None, :] > 0).bool()
 
         if self.event_based_positions:
             if input_event_positions is None:

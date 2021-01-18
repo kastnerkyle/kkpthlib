@@ -5,11 +5,13 @@ from .hparams import HParams
 from .iterators import *
 from .datasets import fetch_jsb_chorales
 from .datasets import MusicJSONRasterCorpus
+from .datasets import MusicJSONRowRasterCorpus
 from .datasets import MusicJSONInfillCorpus
 from .datasets import MusicJSONPitchDurationCorpus
 from .datasets import MusicJSONFlatMeasureCorpus
 from .datasets import MusicJSONFlatKeyframeMeasureCorpus
 from .datasets import music_json_to_midi
+from .datasets import convert_voice_roll_to_music_json
 from .datasets import write_music_json
 from .datasets import piano_roll_from_music_json_file
 from .datasets import convert_voice_lists_to_music_json
