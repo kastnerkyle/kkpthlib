@@ -34,8 +34,11 @@ hp = HParams(memory_len=32,
              batch_size=24,
              n_layers=16,
              max_sequence_length=256,
-             max_vocabulary_size=97, # len(corpus.dictionary.counter)
-             #max_vocabulary_size=133, # len(corpus.dictionary.counter)
+             force_column=True,
+             no_measure_mark=True,
+             # 134 for no_measure_mark, 135 with measure mark
+             #max_vocabulary_size=135, # len(corpus.dictionary.counter)
+             max_vocabulary_size=134, # len(corpus.dictionary.counter)
              random_seed=2122)
 
 def get_hparams():
@@ -93,7 +96,8 @@ if __name__ == "__main__":
     valid_files = [f for f in all_transposed if any([vn in f for vn in valid_names])]
 
     corpus = MusicJSONRowRasterCorpus(train_data_file_paths=train_files,
-                                      valid_data_file_paths=valid_files)
+                                      valid_data_file_paths=valid_files, force_column=hp.force_column,
+                                      no_measure_mark=hp.no_measure_mark)
     #all_pp = [piano_roll_from_music_json_file(at).ravel() for at in all_transposed]
     #all_pp = [ppi for ppi in np.concatenate(all_pp)]
     # all_pp is one giant list

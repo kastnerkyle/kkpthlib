@@ -96,7 +96,7 @@ from kkpthlib import StepIterator
 from kkpthlib import make_batches_from_list
 from kkpthlib import fetch_jsb_chorales
 from kkpthlib import piano_roll_from_music_json_file
-from kkpthlib import MusicJSONRasterCorpus
+from kkpthlib import MusicJSONRowRasterCorpus
 from kkpthlib import convert_voice_roll_to_music_json
 from kkpthlib import music_json_to_midi
 from kkpthlib import write_music_json
@@ -121,6 +121,12 @@ valid_names = bwv_names[:15]
 train_files = [f for f in all_transposed if all([vn not in f for vn in valid_names])]
 valid_files = [f for f in all_transposed if any([vn in f for vn in valid_names])]
 
+# backwards compat
+if not hasattr(hp, "force_column"):
+    hp.force_column = False
+if not hasattr(hp, "no_measure_mark"):
+    hp.no_measure_mark = False
+
 # now we want to aggregate "start" seeds from each of the files
 batch_size = args.batch_size
 assert batch_size <= len(valid_files)
@@ -129,15 +135,27 @@ sample_len = args.sample_len
 
 seed_batches = []
 used_valid_files = []
-for i in range(batch_size):
-    corpus = MusicJSONRasterCorpus(train_data_file_paths=train_files,
-                                   valid_data_file_paths=[valid_files[i]])
+i = 0
+while len(seed_batches) < batch_size:
+    # needs to be a while til we find good seeds...
+    corpus = MusicJSONRowRasterCorpus(train_data_file_paths=train_files,
+                                      valid_data_file_paths=[valid_files[i]],
+                                      force_column=hp.force_column,
+                                      no_measure_mark=hp.no_measure_mark)
+    if len(corpus.valid[:sample_len]) == 0:
+        print("valid file {} didn't match quarters constraint".format(i))
+    i += 1
+    if len(corpus.valid[:sample_len]) == 0:
+        continue
     seed_batches.append(np.array(corpus.valid[:sample_len]))
     used_valid_files.append(valid_files[i])
 
 # make the full corpus to ensure vocabulary matches training
-corpus = MusicJSONRasterCorpus(train_data_file_paths=train_files,
-                               valid_data_file_paths=valid_files)
+corpus = MusicJSONRowRasterCorpus(train_data_file_paths=train_files,
+                                  valid_data_file_paths=valid_files,
+                                  force_column=hp.force_column,
+                                  no_measure_mark=hp.no_measure_mark,
+                                  )
 
 min_len = min([sb.shape[0] for sb in seed_batches])
 if sample_len < min_len:
@@ -146,6 +164,109 @@ if sample_len < min_len:
 seed_batches = [sb[:min_len] for sb in seed_batches]
 np_data = np.array(seed_batches).T
 true_data = np_data.copy()
+
+def convert_sampled_sequence_to_music_json_data(np_arr):
+    all_data = []
+    for i in range(np_arr.shape[1]):
+        tmp = np_arr[:, i]
+
+        if hp.force_column:
+            if hp.no_measure_mark:
+                if len(tmp) % 128 != 0:
+                    tmp = tmp[:len(tmp) - (len(tmp) % 128)]
+                r_tmp = tmp.reshape(-1, 128)
+                voices_rolls = [[] for i in range(4)]
+                for mi in range(len(r_tmp)):
+                    # no skip, no measure marks
+                    measure_tmp = r_tmp[mi, :]
+                    notes_measure_tmp = [corpus.dictionary.idx2word[m] for m in measure_tmp]
+                    # 4 voices, X events each
+                    voices_measure = np.array(notes_measure_tmp).reshape(-1, 4).transpose()
+                    # final array will be 4 lists of N steps, no measure marks
+                    # can check the conversion with:
+                    # convert_voice_roll_to_music_json(voices_measure)
+                    for v in range(len(voices_measure)):
+                        voices_rolls[v].extend([m for m in voices_measure[v]])
+            else:
+                tmp = np.concatenate(([corpus.dictionary.word2idx[99]], tmp))
+                boundaries = np.where(tmp == corpus.dictionary.word2idx[99])[0]
+                r_tmp = tmp[:boundaries[-1]].reshape(-1, 129)
+                voices_rolls = [[] for i in range(4)]
+                for mi in range(len(r_tmp)):
+                    # 1: to skip the initial marker
+                    assert r_tmp[mi, 0] == corpus.dictionary.word2idx[99]
+                    measure_tmp = r_tmp[mi, 1:]
+                    notes_measure_tmp = [corpus.dictionary.idx2word[m] for m in measure_tmp]
+                    # 4 voices, X events each
+                    voices_measure = np.array(notes_measure_tmp).reshape(-1, 4).transpose()
+                    # final array will be 4 lists of N steps, no measure marks
+                    # can check the conversion with:
+                    # convert_voice_roll_to_music_json(voices_measure)
+                    for v in range(len(voices_measure)):
+                        voices_rolls[v].extend([m for m in voices_measure[v]])
+        else:
+            # append on 1 value to make it uniform
+            tmp = np.concatenate(([corpus.dictionary.word2idx[99]], tmp))
+            boundaries = np.where(tmp == corpus.dictionary.word2idx[99])[0]
+
+            # 128 + 1 for measure mark
+            r_tmp = tmp[:boundaries[-1]].reshape(-1, 129)
+
+            voices_rolls = [[] for i in range(4)]
+            for mi in range(len(r_tmp)):
+                # 1: to skip the initial marker
+                assert r_tmp[mi, 0] == corpus.dictionary.word2idx[99]
+                measure_tmp = r_tmp[mi, 1:]
+                notes_measure_tmp = [corpus.dictionary.idx2word[m] for m in measure_tmp]
+                # 4 voices, X events each
+                voices_measure = np.array(notes_measure_tmp).reshape(4, -1)
+                # final array will be 4 lists of N steps, no measure marks
+                # can check the conversion with:
+                # convert_voice_roll_to_music_json(voices_measure)
+                for v in range(len(voices_measure)):
+                    voices_rolls[v].extend([m for m in voices_measure[v]])
+        data = convert_voice_roll_to_music_json(np.array(voices_rolls))
+        all_data.append(data)
+    return all_data
+
+#all_data = convert_sampled_sequence_to_music_json_data(true_data)
+
+"""
+i = 1
+tmp = true_data[:, i]
+# append on 1 value to make it uniform
+tmp = np.concatenate(([corpus.dictionary.word2idx[99]], tmp))
+boundaries = np.where(tmp == corpus.dictionary.word2idx[99])[0]
+# 128 + 1 for measure mark
+r_tmp = tmp[:boundaries[-1]].reshape(-1, 129)
+
+voices_rolls = [[] for i in range(4)]
+for mi in range(len(r_tmp)):
+    # 1: to skip the initial marker
+    assert r_tmp[mi, 0] == corpus.dictionary.word2idx[99]
+    measure_tmp = r_tmp[mi, 1:]
+    notes_measure_tmp = [corpus.dictionary.idx2word[m] for m in measure_tmp]
+    # 4 voices, X events each
+    voices_measure = np.array(notes_measure_tmp).reshape(4, -1)
+    # final array will be 4 lists of N steps, no measure marks
+    # can check the conversion with:
+    # convert_voice_roll_to_music_json(voices_measure)
+    for v in range(len(voices_measure)):
+        voices_rolls[v].extend([m for m in voices_measure[v]])
+data = convert_voice_roll_to_music_json(np.array(voices_rolls))
+
+midi_sample_dir = "midi_samples"
+if not os.path.exists(midi_sample_dir):
+    os.mkdir(midi_sample_dir)
+
+json_fpath = midi_sample_dir + os.sep + "true{}.json".format(i)
+write_music_json(data, json_fpath)
+
+fpath = midi_sample_dir + os.sep + "true{}.midi".format(i)
+music_json_to_midi(data, fpath)
+print("Wrote out {}".format(fpath))
+from IPython import embed; embed(); raise ValueError()
+"""
 
 np_data = np_data[:hp.context_len + 1]
 # set same seed for all, check variability
@@ -180,15 +301,18 @@ for i in range(sample_len - hp.context_len):
     reduced_probs = softmax_np(reduced)
     sample_last = [sampling_random_state.choice(np.arange(reduced_probs.shape[-1]), p=reduced_probs[-1, j]) for j in range(reduced_probs.shape[1])]
     np_data = np.concatenate((np_data, np.array(sample_last)[None]), axis=0)
+    """
+    array([ 32,  65,  98, 131, 164, 197, 230, 263, 296, 329, 362, 395, 428,
+            461, 494]
+    """
+
 
 midi_sample_dir = "midi_samples"
 if not os.path.exists(midi_sample_dir):
     os.mkdir(midi_sample_dir)
 
-for i in range(np_data.shape[1]):
-    sampled_sentence = [corpus.dictionary.idx2word[c] for c in np_data[:, i]]
-    sampled_voice_roll = np.array(sampled_sentence[:len(sampled_sentence) // 4 * 4]).reshape(-1, 4).T
-    data = convert_voice_roll_to_music_json(sampled_voice_roll)
+all_data = convert_sampled_sequence_to_music_json_data(np_data)
+for i, data in enumerate(all_data):
 
     json_fpath = midi_sample_dir + os.sep + "sampled{}.json".format(i)
     write_music_json(data, json_fpath)
@@ -197,11 +321,9 @@ for i in range(np_data.shape[1]):
     music_json_to_midi(data, fpath)
     print("Wrote out {}".format(fpath))
 
-for i in range(true_data.shape[1]):
-    true_sentence = [corpus.dictionary.idx2word[c] for c in true_data[:, i]]
-    true_voice_roll = np.array(true_sentence[:len(true_sentence) // 4 * 4]).reshape(-1, 4).T
-    data = convert_voice_roll_to_music_json(true_voice_roll)
 
+all_data = convert_sampled_sequence_to_music_json_data(true_data)
+for i, data in enumerate(all_data):
     json_fpath = midi_sample_dir + os.sep + "true{}.json".format(i)
     write_music_json(data, json_fpath)
 

@@ -1374,6 +1374,8 @@ class MusicJSONRowRasterCorpus(object):
                  measure_quarters=8,
                  max_vocabulary_size=-1,
                  add_eos=False,
+                 force_column=False,
+                 no_measure_mark=False,
                  tokenization_fn="row_flatten",
                  default_velocity=120, quantization_rate=.25, n_voices=4,
                  separate_onsets=True, onsets_boundary=100):
@@ -1384,12 +1386,14 @@ class MusicJSONRowRasterCorpus(object):
         self.max_vocabulary_size = max_vocabulary_size
 
         self.add_eos = add_eos
+        self.no_measure_mark = no_measure_mark
         self.tokenization_fn = tokenization_fn
         self.default_velocity = default_velocity
         self.quantization_rate = quantization_rate
         self.n_voices = n_voices
         self.separate_onsets = separate_onsets
         self.onsets_boundary = onsets_boundary
+        self.force_column = force_column
 
         if tokenization_fn == "row_flatten":
             def tk(arr):
@@ -1515,7 +1519,7 @@ class MusicJSONRowRasterCorpus(object):
         for word in words:
             self.dictionary.add_word(word)
 
-    def tokenize(self, paths, return_pre_tokenization_instead=False):
+    def tokenize(self, paths, return_pre_tokenization_instead=False, inspect=False):
         """Tokenizes a text file."""
         # just use the load function to get the data...
         pitches, durations, velocities, updated_files = self._load_music_json(paths, verbose=False)
@@ -1543,6 +1547,8 @@ class MusicJSONRowRasterCorpus(object):
             assert n_marks > 1
             # -1 because we pair them off
             for _c in range(n_marks - 1):
+                shared_chunk_roll = []
+                shared_voice_roll = []
                 for j in range(len(pitches[i])):
                     marks = np.where(np.array(pitches[i][j]) == 99)[0]
                     if marks[0] != 0:
@@ -1566,11 +1572,42 @@ class MusicJSONRowRasterCorpus(object):
                             cr[0] += self.onsets_boundary
                         chunk_roll.extend(cr)
                         chunk_voice_roll.extend(cvr)
-
-                chunk_roll.append(99)
-                chunk_voice_roll.append(-1)
-                this_roll.extend(chunk_roll)
-                this_voice_roll.extend(chunk_voice_roll)
+                    shared_chunk_roll.extend(chunk_roll)
+                    shared_voice_roll.extend(chunk_voice_roll)
+                if self.force_column:
+                    assert len(shared_chunk_roll) % self.n_voices == 0
+                    chunk_sz = int(len(shared_chunk_roll) / self.n_voices)
+                    chunks = []
+                    voice_chunks = []
+                    for _ii in range(self.n_voices):
+                        _ll = _ii * chunk_sz
+                        _rr = (_ii + 1) * chunk_sz
+                        cc = shared_chunk_roll[_ll:_rr]
+                        vv = shared_voice_roll[_ll:_rr]
+                        assert all([vv[0] == vvi for vvi in vv])
+                        chunks.append(cc)
+                        voice_chunks.append(vv)
+                    for cc in chunks:
+                        assert len(cc) == len(chunks[0])
+                    column_shared_chunk_roll = []
+                    column_shared_voice_roll = []
+                    for _ii in range(len(chunks[0])):
+                        for _jj in range(len(chunks)):
+                            column_shared_chunk_roll.append(chunks[_jj][_ii])
+                            column_shared_voice_roll.append(voice_chunks[_jj][_ii])
+                    shared_voice_roll = column_shared_voice_roll
+                    shared_chunk_roll = column_shared_chunk_roll
+                if self.no_measure_mark:
+                    if not self.force_column:
+                        raise ValueError("Unable to skip measure marks (no_measure_mark=True) with row rasterization (force_column=False)\n",
+                                         "set force_column=True to skip measure marks")
+                    # can we just skip it?
+                    pass
+                else:
+                    shared_chunk_roll.append(99)
+                    shared_voice_roll.append(-1)
+                this_roll.extend(shared_chunk_roll)
+                this_voice_roll.extend(shared_voice_roll)
             rolls.append(this_roll)
             voice_rolls.append(this_voice_roll)
 
