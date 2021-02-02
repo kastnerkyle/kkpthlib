@@ -8,6 +8,11 @@ import struct
 import numpy as np
 import itertools
 import copy
+try:
+    import cPickle as pickle
+except:
+    import pickle
+import copy
 from ..core import get_logger
 from ..data import LookupDictionary
 from .loaders import get_kkpthlib_dataset_dir
@@ -1367,6 +1372,247 @@ class MusicJSONInfillCorpus(object):
                 yield token_batch, cur_batch_masks, cur_batch_offsets, cur_batch_indices
                 #yield np.array(token_batch).T[..., None], np.array(cur_batch_masks).T, np.array(cur_batch_offsets).transpose(1, 0, 2)
         return sample_minibatch()
+
+
+class MusicPklCorpus(object):
+    def __init__(self,
+                 pkl_path,
+                 tokenization_type="fixed_vocabulary",
+                 use_only_these_valid_indices=None,
+                 measure_quarters=None,
+                 no_measure_mark=True,
+                 force_column=True):
+        self.pkl_path = pkl_path
+        self.no_measure_mark = no_measure_mark
+        self.force_column = force_column
+        self.measure_quarters = measure_quarters
+        self.use_only_these_valid_indices = use_only_these_valid_indices
+        self.tokenization_type = tokenization_type
+
+        with open(pkl_path, 'rb') as p:
+            data = pickle.load(p, encoding='latin1')
+        train_data = copy.deepcopy(data['train'])
+        valid_data = copy.deepcopy(data['valid'])
+        test_data = copy.deepcopy(data['test'])
+
+        """
+        # theoretical is 21-108 inclusive (range(21, 109))
+        # practical is 36-81 inclusive
+        all_notes = set()
+        for d in [train_data, valid_data, test_data]:
+            for di in d:
+                try:
+                    li = np.array(di)
+                    # if it isnt 2d it made an object array
+                    li.shape[0]
+                    li.shape[1]
+                    l = [el for el in li.ravel()]
+                    all_notes = all_notes | set(l)
+                except:
+                    continue
+        """
+
+        vocab_opts = ["fixed_vocabulary", "standard_nlp"]
+        if self.tokenization_type == "fixed_vocabulary":
+            self.dictionary = LookupDictionary()
+            self.build_fixed_vocabulary()
+        elif self.tokenization_type in vocab_opts:
+            self.dictionary = LookupDictionary()
+            self.build_vocabulary(train_data, is_valid=False)
+            self.build_vocabulary(valid_data, is_valid=True)
+        else:
+            raise ValueError("Unknown tokenization_type {} given! Options are {}".format(self.tokenization_type, vocab_opts))
+
+        # dont build vocabulary over test data...
+        # edit: do we force the same output size as baselines?
+
+        self.train, self.train_file_attribution = self.tokenize(train_data, is_valid=False)
+        self.valid, self.valid_file_attribution = self.tokenize(valid_data, is_valid=True)
+
+    def build_fixed_vocabulary(self):
+        for word in range(21, 109):
+            self.dictionary.add_word(word)
+        if self.no_measure_mark is False:
+            # measure mark is 999
+            self.dictionary.add_word(999)
+
+    def build_vocabulary(self, list_data, is_valid):
+        # always build vocabulary over all values
+        words, _ = self.tokenize(list_data, run_pre_tokenization_instead=True, is_valid=False)
+        for word in words:
+            self.dictionary.add_word(word)
+
+    def tokenize(self, list_data, run_pre_tokenization_instead=False, is_valid=False):
+        full_flat_list = []
+        # train step index, step into example index, voice value, shift value
+        full_flat_index_attribution = []
+        for ii in range(len(list_data)):
+            try:
+                this_shifted = np.array(list_data[ii])
+                this_shifted.shape[0]
+                this_shifted.shape[1]
+            except:
+                print("error creating uniform array on index {}".format(ii))
+                continue
+            if is_valid:
+               if self.use_only_these_valid_indices is not None:
+                   if ii not in self.use_only_these_valid_indices:
+                       continue
+
+            # start with natural version
+            # TODO: "logical" augmentation order?
+            for jj in [0] + list(range(-6, 0)) + list(range(1, 6)):
+                """
+                tmp = [ee for ee in full_flat_list if ee != 999]
+                if len(tmp) > 0 and min(tmp) < 21:
+                    print("just got min")
+                    from IPython import embed; embed(); raise ValueError()
+
+                if len(tmp) > 0 and max(tmp) > 108:
+                    print("just got max")
+                    from IPython import embed; embed(); raise ValueError()
+                """
+
+                _shift = int(jj)
+                _measure_fill = 999 - _shift
+                try:
+                    this_shifted = np.array(list_data[ii]) + _shift
+                except:
+                    print("error creating uniform array on index {}".format(ii))
+                    continue
+
+                if this_shifted.ravel().min() < min(self.dictionary.word2idx.keys()) or this_shifted.ravel().max() > max(self.dictionary.word2idx.keys()):
+                    print("data augmentation {} puts this piece {} out of vocabulary bounds, skipping".format(_shift, ii))
+                    continue
+
+                if self.force_column:
+                    if self.no_measure_mark:
+                        full_flat_list.extend([el for el in this_shifted.ravel()])
+                        full_flat_index_attribution.extend([(ii, _shift) for (n, el) in enumerate(this_shifted.ravel())])
+                    elif self.no_measure_mark is False and self.measure_quarters is not None:
+                        arr = np.array(list_data[ii])
+                        change_0 = np.diff(arr[:, 0], prepend=arr[0, 0]) != 0
+                        change_1 = np.diff(arr[:, 1], prepend=arr[0, 1]) != 0
+                        change_2 = np.diff(arr[:, 2], prepend=arr[0, 2]) != 0
+                        change_3 = np.diff(arr[:, 3], prepend=arr[0, 3]) != 0
+                        changes = [a for a in np.where(change_0 & change_1 & change_2 & change_3)[0]]
+                        theoretical = list(np.arange(0, len(list_data[ii]), self.measure_quarters)[1:])
+                        last_match = None
+                        count = 0
+                        for t in theoretical:
+                             if t in changes:
+                                 last_match = t
+                                 count += 1
+
+                        if last_match is None:
+                            continue
+                        assert self.measure_quarters is not None
+                        if len(arr) > last_match + self.measure_quarters:
+                            last_match = last_match + self.measure_quarters
+                        if count >= 8:
+                            # if at least 8 groups matched the theoretical, keep as much as we can and use it
+
+                            # need to add measure marks at each of the change points, and the end? 
+                            this_arr = np.array(arr)
+                            # fill backwards so putting the values in doesn't confuse the count
+                            for t in theoretical[::-1]:
+                                if t >= last_match:
+                                    continue
+                                if len(this_arr[:t]) >= last_match:
+                                    continue
+                                this_arr = np.concatenate((this_arr[:t], np.array(4 * [_measure_fill])[None], this_arr[t:]), axis=0)
+                            this_arr = np.concatenate((np.array(4 * [_measure_fill])[None], this_arr), axis=0)
+                            this_flat_list = [el for el in this_arr.ravel() + _shift]
+                            # this attribution is wrong for step...
+                            this_flat_index_attribution = [(ii, _shift) for (n, el) in enumerate(this_arr.ravel())]
+                            out_flat_list = []
+                            out_flat_index_attribution = []
+                            # remove duplicate measure marks
+                            was_mark = False
+                            lst = -1
+                            for _n in range(len(this_flat_list)):
+                                if this_flat_list[_n] == lst:
+                                    if this_flat_list[_n] == 999:
+                                        last = this_flat_list[_n]
+                                        continue
+                                lst = this_flat_list[_n]
+                                out_flat_list.append(this_flat_list[_n])
+                                out_flat_index_attribution.append(this_flat_index_attribution[_n])
+                            full_flat_list.extend(out_flat_list)
+                            full_flat_index_attribution.extend([out_flat_index_attribution])
+                    elif self.measure_mark is None:
+                        print("support auto??")
+                        from IPython import embed; embed(); raise ValueError()
+                else:
+                    flattened = []
+                    arr = np.array(list_data[ii])
+                    change_0 = np.diff(arr[:, 0], prepend=arr[0, 0]) != 0
+                    change_1 = np.diff(arr[:, 1], prepend=arr[0, 1]) != 0
+                    change_2 = np.diff(arr[:, 2], prepend=arr[0, 2]) != 0
+                    change_3 = np.diff(arr[:, 3], prepend=arr[0, 3]) != 0
+                    changes = [a for a in np.where(change_0 & change_1 & change_2 & change_3)[0]]
+                    theoretical = list(np.arange(0, len(list_data[ii]), self.measure_quarters)[1:])
+                    last_match = None
+                    count = 0
+                    for t in theoretical:
+                         if t in changes:
+                             last_match = t
+                             count += 1
+
+                    if last_match is None:
+                        continue
+
+                    assert self.measure_quarters is not None
+                    if len(arr) > last_match + self.measure_quarters:
+                        last_match = last_match + self.measure_quarters
+                    if count >= 8:
+                        # if at least 8 groups matched the theoretical, keep as much as we can and use it
+
+                        # need to add measure marks at each of the change points, and the end? 
+                        this_arr = np.array(arr)
+                        # fill backwards so putting the values in doesn't confuse the count
+                        for t in theoretical[::-1]:
+                            if t >= last_match:
+                                continue
+                            if len(this_arr[:t]) >= last_match:
+                                continue
+                            # append all 4 frows, with a measure mark at the end...
+                            new_flattened = []
+                            new_flattened.extend([e for e in this_arr[t:, 0]])
+                            new_flattened.extend([e for e in this_arr[t:, 1]])
+                            new_flattened.extend([e for e in this_arr[t:, 2]])
+                            new_flattened.extend([e for e in this_arr[t:, 3]])
+                            new_flattened.append(_measure_fill)
+                            flattened = new_flattened + flattened
+                            this_arr = this_arr[:t]
+                    # do the last values (0 to first t)
+                    new_flattened = []
+                    new_flattened.extend([e for e in this_arr[:t, 0]])
+                    new_flattened.extend([e for e in this_arr[:t, 1]])
+                    new_flattened.extend([e for e in this_arr[:t, 2]])
+                    new_flattened.extend([e for e in this_arr[:t, 3]])
+                    new_flattened.append(_measure_fill)
+
+                    flattened = new_flattened + flattened
+                    this_flat_list = [el + _shift for el in flattened]
+                    this_flat_index_attribution = [(ii, _shift) for (n, el) in enumerate(flattened)]
+
+                    full_flat_list.extend(this_flat_list)
+                    full_flat_index_attribution.extend([this_flat_index_attribution])
+
+        if run_pre_tokenization_instead:
+            return full_flat_list, full_flat_index_attribution
+        else:
+            tmp = [ee for ee in full_flat_list if ee != 999]
+            if len(tmp) > 0 and min(tmp) < 21:
+                print("just got min")
+                from IPython import embed; embed(); raise ValueError()
+
+            if len(tmp) > 0 and max(tmp) > 108:
+                print("just got max")
+                from IPython import embed; embed(); raise ValueError()
+            full_token_list = [self.dictionary.word2idx[el] for el in full_flat_list]
+            return full_token_list, full_flat_index_attribution
 
 
 class MusicJSONRowRasterCorpus(object):
@@ -2914,6 +3160,8 @@ def convert_voice_roll_to_music_json(voice_roll, quantization_rate=.25, onsets_b
                 if token != note_held:
                     # make it an onset?
                     print("WARNING: got non-onset pitch change, forcing onset token at step {}, voice {}".format(t, v))
+                    voice_data["parts"][v].append(note_held)
+                    voice_data["parts_times"][v].append(ongoing_duration)
                     note_held = token
                     ongoing_duration = duration_step
                 else:
@@ -3088,6 +3336,7 @@ class MusicJSONVoiceIterator(object):
                     # frist
                     for v in range(n_voices):
                         flat_pitch.append(this_pitch[v][0])
+                        print("needs measure support also...")
                         flat_voice.append(v)
                         flat_time.append(this_time[v][0])
                         flat_cumulative_step.append(voice_step_counter[v])

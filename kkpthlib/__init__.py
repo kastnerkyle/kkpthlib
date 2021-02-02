@@ -6,6 +6,7 @@ from .iterators import *
 from .datasets import fetch_jsb_chorales
 from .datasets import MusicJSONRasterCorpus
 from .datasets import MusicJSONRowRasterCorpus
+from .datasets import MusicPklCorpus
 from .datasets import MusicJSONInfillCorpus
 from .datasets import MusicJSONPitchDurationCorpus
 from .datasets import MusicJSONFlatMeasureCorpus
@@ -19,6 +20,7 @@ from .datasets import convert_voice_roll_to_music_json
 from .datasets import midi_instruments_name_to_number
 from .datasets import midi_percussion_name_to_number
 from .datasets import pitch_duration_velocity_lists_from_music_json_file
+from .data import LookupDictionary
 from .checkers import *
 from .sample import *
 from .plotters import *
