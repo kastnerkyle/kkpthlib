@@ -285,7 +285,8 @@ _program_presets = {
 
 def music_json_to_midi(json_file, out_name, tempo_factor=.5,
                        default_velocity=120,
-                       voice_program_map=None):
+                       voice_program_map=None,
+                       verbose=True):
     """
     string (filepath) or json.dumps object
 
@@ -1380,14 +1381,34 @@ class MusicPklCorpus(object):
                  tokenization_type="fixed_vocabulary",
                  use_only_these_valid_indices=None,
                  measure_quarters=None,
+                 quantization="16th",
                  no_measure_mark=True,
-                 force_column=True):
+                 force_column=True,
+                 preserve_shift_order=False,
+                 add_eof_mark=True,
+                 eof_mark_token=None,
+                 repeat_data_once=True,
+                 show_skip_error=False):
+        if force_column == False:
+            if no_measure_mark == True:
+                raise ValueError("Row based rasterization requires measure marks! force_column=False, no_measure_mark=True cannot be specified")
         self.pkl_path = pkl_path
         self.no_measure_mark = no_measure_mark
         self.force_column = force_column
         self.measure_quarters = measure_quarters
         self.use_only_these_valid_indices = use_only_these_valid_indices
         self.tokenization_type = tokenization_type
+        self.quantization = quantization
+        self.add_eof_mark = add_eof_mark
+        self.eof_mark_token = eof_mark_token
+        self.repeat_data_once = repeat_data_once
+        self.show_skip_error = show_skip_error
+        self.preserve_shift_order = preserve_shift_order
+        if self.quantization != "16th":
+            raise ValueError("Only '16th' quantization currently supported")
+        self._span_mult = 4
+        self._match_type = "pair"
+        # match_type can be "single", "pair", "triple", "full"
 
         with open(pkl_path, 'rb') as p:
             data = pickle.load(p, encoding='latin1')
@@ -1429,6 +1450,10 @@ class MusicPklCorpus(object):
         self.train, self.train_file_attribution = self.tokenize(train_data, is_valid=False)
         self.valid, self.valid_file_attribution = self.tokenize(valid_data, is_valid=True)
 
+        logger.info("Number of training tokens: {}".format(len(self.train)))
+        logger.info("Number of valid tokens: {}".format(len(self.valid)))
+        logger.info("Vocabulary size: {}, using tokenization_type {}".format(len(self.dictionary.idx2word), self.tokenization_type))
+
     def build_fixed_vocabulary(self):
         for word in range(21, 109):
             self.dictionary.add_word(word)
@@ -1446,22 +1471,33 @@ class MusicPklCorpus(object):
         full_flat_list = []
         # train step index, step into example index, voice value, shift value
         full_flat_index_attribution = []
+        # span mult of 4 assumes 16th note quantization
+        span_mult = self._span_mult
+
+        full_flat_jj_lists = []
+        full_flat_jj_index_attribution = []
+        # natural key, then others by half step
+        # TODO: "logical" augmentation order?
+        shift_order_scheme = [0] + list(range(-6, 0)) + list(range(1, 6))
+        for jj in shift_order_scheme:
+            full_flat_jj_lists.append([])
+            full_flat_jj_index_attribution.append([])
+
         for ii in range(len(list_data)):
             try:
                 this_shifted = np.array(list_data[ii])
                 this_shifted.shape[0]
                 this_shifted.shape[1]
             except:
-                print("error creating uniform array on index {}".format(ii))
+                if self.show_skip_error:
+                    logger.info("error creating uniform array on index {}".format(ii))
                 continue
             if is_valid:
                if self.use_only_these_valid_indices is not None:
                    if ii not in self.use_only_these_valid_indices:
                        continue
 
-            # start with natural version
-            # TODO: "logical" augmentation order?
-            for jj in [0] + list(range(-6, 0)) + list(range(1, 6)):
+            for nn, jj in enumerate(shift_order_scheme):
                 """
                 tmp = [ee for ee in full_flat_list if ee != 999]
                 if len(tmp) > 0 and min(tmp) < 21:
@@ -1478,17 +1514,21 @@ class MusicPklCorpus(object):
                 try:
                     this_shifted = np.array(list_data[ii]) + _shift
                 except:
-                    print("error creating uniform array on index {}".format(ii))
+                    if self.show_skip_error:
+                        logger.info("error creating uniform array on index {}".format(ii))
                     continue
 
                 if this_shifted.ravel().min() < min(self.dictionary.word2idx.keys()) or this_shifted.ravel().max() > max(self.dictionary.word2idx.keys()):
-                    print("data augmentation {} puts this piece {} out of vocabulary bounds, skipping".format(_shift, ii))
+                    if self.show_skip_error:
+                        logger.info("data augmentation {} puts this piece {} out of vocabulary bounds, skipping".format(_shift, ii))
                     continue
 
                 if self.force_column:
                     if self.no_measure_mark:
-                        full_flat_list.extend([el for el in this_shifted.ravel()])
-                        full_flat_index_attribution.extend([(ii, _shift) for (n, el) in enumerate(this_shifted.ravel())])
+                        full_flat_jj_lists[nn].append([el for el in this_shifted.ravel()])
+                        full_flat_jj_index_attribution[nn].append([(ii, _shift) for (n, el) in enumerate(this_shifted.ravel())])
+                        #full_flat_list.extend([el for el in this_shifted.ravel()])
+                        #full_flat_index_attribution.extend([(ii, _shift) for (n, el) in enumerate(this_shifted.ravel())])
                     elif self.no_measure_mark is False and self.measure_quarters is not None:
                         arr = np.array(list_data[ii])
                         change_0 = np.diff(arr[:, 0], prepend=arr[0, 0]) != 0
@@ -1496,7 +1536,8 @@ class MusicPklCorpus(object):
                         change_2 = np.diff(arr[:, 2], prepend=arr[0, 2]) != 0
                         change_3 = np.diff(arr[:, 3], prepend=arr[0, 3]) != 0
                         changes = [a for a in np.where(change_0 & change_1 & change_2 & change_3)[0]]
-                        theoretical = list(np.arange(0, len(list_data[ii]), self.measure_quarters)[1:])
+                        # assume 16th span here
+                        theoretical = list(np.arange(0, len(list_data[ii]), span_mult * self.measure_quarters)[1:])
                         last_match = None
                         count = 0
                         for t in theoretical:
@@ -1538,24 +1579,57 @@ class MusicPklCorpus(object):
                                 lst = this_flat_list[_n]
                                 out_flat_list.append(this_flat_list[_n])
                                 out_flat_index_attribution.append(this_flat_index_attribution[_n])
-                            full_flat_list.extend(out_flat_list)
-                            full_flat_index_attribution.extend([out_flat_index_attribution])
+                            full_flat_jj_lists[nn].append(out_flat_list)
+                            full_flat_jj_index_attribution[nn].append(out_flat_index_attribution)
+                            #full_flat_list.extend(out_flat_list)
+                            #full_flat_index_attribution.extend([out_flat_index_attribution])
                     elif self.measure_mark is None:
                         print("support auto??")
                         from IPython import embed; embed(); raise ValueError()
                 else:
+                    # TODO: Backport this logic to columnar
                     flattened = []
                     arr = np.array(list_data[ii])
                     change_0 = np.diff(arr[:, 0], prepend=arr[0, 0]) != 0
                     change_1 = np.diff(arr[:, 1], prepend=arr[0, 1]) != 0
                     change_2 = np.diff(arr[:, 2], prepend=arr[0, 2]) != 0
                     change_3 = np.diff(arr[:, 3], prepend=arr[0, 3]) != 0
-                    changes = [a for a in np.where(change_0 & change_1 & change_2 & change_3)[0]]
-                    theoretical = list(np.arange(0, len(list_data[ii]), self.measure_quarters)[1:])
+
+                    if self._match_type == "full":
+                        changes = [a for a in np.where(change_0 & change_1 & change_2 & change_3)[0]]
+                        change_group = [changes]
+                    elif self._match_type == "single":
+                        changes0 = [a for a in np.where(change_0)[0]]
+                        changes1 = [a for a in np.where(change_1)[0]]
+                        changes2 = [a for a in np.where(change_2)[0]]
+                        changes3 = [a for a in np.where(change_3)[0]]
+
+                        change_group = [changes0, changes1, changes2, changes3]
+                    elif self._match_type == "pair":
+                        changes01 = [a for a in np.where(change_0 & change_1)[0]]
+                        changes02 = [a for a in np.where(change_0 & change_2)[0]]
+                        changes03 = [a for a in np.where(change_0 & change_3)[0]]
+                        changes12 = [a for a in np.where(change_1 & change_2)[0]]
+                        changes13 = [a for a in np.where(change_1 & change_3)[0]]
+                        changes23 = [a for a in np.where(change_2 & change_3)[0]]
+
+                        change_group = [changes01, changes02, changes03, changes12, changes13, changes23]
+                    elif self._match_type == "triple":
+                        changes012 = [a for a in np.where(change_0 & change_1 & change_2)[0]]
+                        changes013 = [a for a in np.where(change_0 & change_1 & change_3)[0]]
+                        changes023 = [a for a in np.where(change_0 & change_2 & change_3)[0]]
+                        changes123 = [a for a in np.where(change_1 & change_2 & change_3)[0]]
+
+                        change_group = [changes012, changes013, changes023, changes123]
+                    else:
+                        raise ValueError("Unknown self._match_type {}".format(self._match_type))
+
+                    theoretical = list(np.arange(0, len(list_data[ii]), span_mult * self.measure_quarters)[1:])
                     last_match = None
                     count = 0
                     for t in theoretical:
-                         if t in changes:
+                         any_checks = any([t in c for c in change_group])
+                         if any_checks:
                              last_match = t
                              count += 1
 
@@ -1567,7 +1641,6 @@ class MusicPklCorpus(object):
                         last_match = last_match + self.measure_quarters
                     if count >= 8:
                         # if at least 8 groups matched the theoretical, keep as much as we can and use it
-
                         # need to add measure marks at each of the change points, and the end? 
                         this_arr = np.array(arr)
                         # fill backwards so putting the values in doesn't confuse the count
@@ -1585,33 +1658,61 @@ class MusicPklCorpus(object):
                             new_flattened.append(_measure_fill)
                             flattened = new_flattened + flattened
                             this_arr = this_arr[:t]
-                    # do the last values (0 to first t)
-                    new_flattened = []
-                    new_flattened.extend([e for e in this_arr[:t, 0]])
-                    new_flattened.extend([e for e in this_arr[:t, 1]])
-                    new_flattened.extend([e for e in this_arr[:t, 2]])
-                    new_flattened.extend([e for e in this_arr[:t, 3]])
-                    new_flattened.append(_measure_fill)
+                        # do the last values (0 to first t)
+                        new_flattened = []
+                        new_flattened.extend([e for e in this_arr[:t, 0]])
+                        new_flattened.extend([e for e in this_arr[:t, 1]])
+                        new_flattened.extend([e for e in this_arr[:t, 2]])
+                        new_flattened.extend([e for e in this_arr[:t, 3]])
+                        new_flattened.append(_measure_fill)
 
-                    flattened = new_flattened + flattened
-                    this_flat_list = [el + _shift for el in flattened]
-                    this_flat_index_attribution = [(ii, _shift) for (n, el) in enumerate(flattened)]
+                        flattened = new_flattened + flattened
+                        this_flat_list = [el + _shift for el in flattened]
+                        this_flat_index_attribution = [(ii, _shift) for (n, el) in enumerate(flattened)]
 
-                    full_flat_list.extend(this_flat_list)
-                    full_flat_index_attribution.extend([this_flat_index_attribution])
+                        full_flat_jj_lists[nn].append(this_flat_list)
+                        full_flat_jj_index_attribution[nn].append(this_flat_index_attribution)
+                        #full_flat_list.extend(this_flat_list)
+                        #full_flat_index_attribution.extend([this_flat_index_attribution])
 
-        if run_pre_tokenization_instead:
-            return full_flat_list, full_flat_index_attribution
+        if self.preserve_shift_order:
+            raise ValueError("TODO: impl preserve_shift_order=True")
         else:
-            tmp = [ee for ee in full_flat_list if ee != 999]
-            if len(tmp) > 0 and min(tmp) < 21:
-                print("just got min")
-                from IPython import embed; embed(); raise ValueError()
+            hash_seed = hash(len(full_flat_jj_lists[0]))
+            shuff_rs = np.random.RandomState(hash_seed)
 
-            if len(tmp) > 0 and max(tmp) > 108:
-                print("just got max")
-                from IPython import embed; embed(); raise ValueError()
-            full_token_list = [self.dictionary.word2idx[el] for el in full_flat_list]
+            # create random sample order, shift order pairs
+            sample_order = list(range(len(full_flat_jj_lists[0])))
+            shuff_rs.shuffle(sample_order)
+            sample_shift_pairs = []
+            for o in sample_order:
+                shift_order = list(range(len(full_flat_jj_lists)))
+                shuff_rs.shuffle(shift_order)
+                # randomize the shift order seen for every example
+                for so in shift_order:
+                    sample_shift_pairs.append((so, o))
+            # shuffle again, should be totally random example/shift ordering
+            shuff_rs.shuffle(sample_shift_pairs)
+            for ssp in sample_shift_pairs:
+                # do it twice if we have the repeat data flag - hypothesis is that this
+                # envourages the model's "memory" to repeat/learn repeat structures
+                full_flat_list.extend(full_flat_jj_lists[ssp[0]][ssp[1]])
+                full_flat_index_attribution.extend(full_flat_jj_index_attribution[ssp[0]][ssp[1]])
+                if self.add_eof_mark:
+                    full_flat_list.append(self.eof_mark_token)
+                    full_flat_index_attribution.append(self.eof_mark_token)
+                if self.repeat_data_once:
+                    full_flat_list.extend(full_flat_jj_lists[ssp[0]][ssp[1]])
+                    full_flat_index_attribution.extend(full_flat_jj_index_attribution[ssp[0]][ssp[1]])
+                    if self.add_eof_mark:
+                        full_flat_list.append(self.eof_mark_token)
+                        full_flat_index_attribution.append(self.eof_mark_token)
+        # now construct full flat list and full flat index attribution in order to avoid any issue with data ordering
+        # TODO: add new song token?
+        if run_pre_tokenization_instead:
+            return [el for el in full_flat_list if el != self.eof_mark_token], [el for el in full_flat_index_attribution if el != self.eof_mark_token]
+        else:
+            full_token_list = [self.dictionary.word2idx[el] if el != self.eof_mark_token else self.eof_mark_token for el in full_flat_list]
             return full_token_list, full_flat_index_attribution
 
 
@@ -3125,7 +3226,7 @@ class MusicJSONRasterIterator(object):
             return raster_roll_voices, mask, [ac.astype(np.float32) * mask[..., None] for ac in all_clocks]
 
 
-def convert_voice_roll_to_music_json(voice_roll, quantization_rate=.25, onsets_boundary=100):
+def convert_voice_roll_to_music_json(voice_roll, quantization_rate=.25, onsets_boundary=100, verbose=True):
     """
     take in voice roll and turn it into a pitch, duration thing again
 
@@ -3159,7 +3260,8 @@ def convert_voice_roll_to_music_json(voice_roll, quantization_rate=.25, onsets_b
             elif token != 0:
                 if token != note_held:
                     # make it an onset?
-                    print("WARNING: got non-onset pitch change, forcing onset token at step {}, voice {}".format(t, v))
+                    if verbose:
+                        print("WARNING: got non-onset pitch change, forcing onset token at step {}, voice {}".format(t, v))
                     voice_data["parts"][v].append(note_held)
                     voice_data["parts_times"][v].append(ongoing_duration)
                     note_held = token
@@ -3436,3 +3538,84 @@ def fetch_jsb_chorales():
     jsb_dataset_path = check_fetch_jsb_chorales()
     json_files = [jsb_dataset_path + os.sep + fname for fname in sorted(os.listdir(jsb_dataset_path)) if ".json" in fname]
     return {"files": json_files}
+
+
+def convert_sampled_pkl_sequence_to_music_json_data(np_arr, corpus, measure_quarters=4, force_column=False, no_measure_mark=True, add_const=0,
+                                                    verbose=True):
+    # 16 * 4 = 64
+    # 4 16ths per quarter, 4 voices
+    shape_bound = int(measure_quarters * 4 * 4)
+    all_data = []
+    for i in range(np_arr.shape[1]):
+        tmp = np_arr[:, i]
+
+        if force_column:
+            if no_measure_mark:
+                if len(tmp) % shape_bound != 0:
+                    tmp = tmp[:len(tmp) - (len(tmp) % shape_bound)]
+                r_tmp = tmp.reshape(-1, shape_bound)
+                voices_rolls = [[] for i in range(4)]
+                for mi in range(len(r_tmp)):
+                    # no skip, no measure marks
+                    measure_tmp = r_tmp[mi, :]
+                    notes_measure_tmp = [corpus.dictionary.idx2word[m] for m in measure_tmp]
+                    # 4 voices, X events each
+                    voices_measure = np.array(notes_measure_tmp).reshape(-1, 4).transpose()
+                    # final array will be 4 lists of N steps, no measure marks
+                    # can check the conversion with:
+                    # convert_voice_roll_to_music_json(voices_measure)
+                    for v in range(len(voices_measure)):
+                        voices_rolls[v].extend([m for m in voices_measure[v]])
+            else:
+                tmp = np.concatenate(([corpus.dictionary.word2idx[999]], tmp))
+                boundaries = np.where(tmp == corpus.dictionary.word2idx[999])[0]
+                r_tmp = tmp[:boundaries[-1]].reshape(-1, shape_bound + 1)
+                voices_rolls = [[] for i in range(4)]
+                for mi in range(len(r_tmp)):
+                    # 1: to skip the initial marker
+                    assert r_tmp[mi, 0] == corpus.dictionary.word2idx[999]
+                    measure_tmp = r_tmp[mi, 1:]
+                    notes_measure_tmp = [corpus.dictionary.idx2word[m] for m in measure_tmp]
+                    # 4 voices, X events each
+                    voices_measure = np.array(notes_measure_tmp).reshape(-1, 4).transpose()
+                    # final array will be 4 lists of N steps, no measure marks
+                    # can check the conversion with:
+                    # convert_voice_roll_to_music_json(voices_measure)
+                    for v in range(len(voices_measure)):
+                        voices_rolls[v].extend([m for m in voices_measure[v]])
+        else:
+            # append on 1 value to make it uniform
+            tmp = np.concatenate(([corpus.dictionary.word2idx[999]], tmp))
+            # last multiple?
+            boundaries = np.where(tmp == corpus.dictionary.word2idx[999])[0]
+            l = 0
+            for b in boundaries:
+                if b % (shape_bound + 1) == 0:
+                    l = b
+            # dont use l for now
+            measure_chunk_shp = shape_bound
+
+            # + 1 for measure mark
+
+            r_tmp = tmp[:l].reshape(-1, measure_chunk_shp + 1)
+
+            voices_rolls = [[] for i in range(4)]
+            for mi in range(len(r_tmp)):
+                # 1: to skip the initial marker
+                assert r_tmp[mi, 0] == corpus.dictionary.word2idx[999]
+                measure_tmp = r_tmp[mi, 1:]
+                notes_measure_tmp = [corpus.dictionary.idx2word[m] for m in measure_tmp]
+                # 4 voices, X events each
+                voices_measure = np.array(notes_measure_tmp).reshape(4, -1)
+                # final array will be 4 lists of N steps, no measure marks
+                # can check the conversion with:
+                # convert_voice_roll_to_music_json(voices_measure)
+                for v in range(len(voices_measure)):
+                    voices_rolls[v].extend([m for m in voices_measure[v]])
+        vr = np.array(voices_rolls)
+        for ii in range(vr.shape[1]):
+            nz = np.where(vr[:, ii] > 0)[0]
+            vr[nz, ii] += add_const
+        data = convert_voice_roll_to_music_json(vr, verbose=verbose)
+        all_data.append(data)
+    return all_data

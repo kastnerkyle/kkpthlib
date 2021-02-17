@@ -108,7 +108,7 @@ class Trie(object):
             el = list_of_items[s:e]
             self.insert(el)
             if with_attribution_tag:
-                tk_seq = [str(eel).encode("ascii", "ignore") for eel in el]
+                tk_seq = [str(eel).encode("ascii", "ignore").decode("latin-1") for eel in el]
                 tk = ":".join(tk_seq[:-1]) + "->" + tk_seq[-1]
                 if tk not in self.attribution_tags:
                     self.attribution_tags[tk] = []
@@ -145,7 +145,7 @@ class Trie(object):
                 if not ss:
                     attributions.append(None)
                 else:
-                    tk_seq = [str(eel).encode("ascii", "ignore") for eel in el]
+                    tk_seq = [str(eel).encode("ascii", "ignore").decode("latin-1") for eel in el]
                     tk = ":".join(tk_seq[:-1]) + "->" + tk_seq[-1]
                     attributions[(tk, s, len(list_of_items))] = self.attribution_tags[tk]
             searches.append(ss)
@@ -304,8 +304,9 @@ def music21_from_midi(midi_path):
     mf.close()
     return midi.translate.midiFileToStream(mf)
 
-def get_metadata(p):
+def get_metadata(p, original_filepath_to_piece):
     piece_container = {}
+    piece_container["original_filepath"] = original_filepath_to_piece
     piece_container["parts"] = []
     piece_container["parts_times"] = []
     piece_container["parts_cumulative_times"] = []
@@ -334,7 +335,7 @@ def get_metadata(p):
             if n.isRest:
                 part.append(0)
             else:
-                part.append(n.midi)
+                part.append(n.pitch.midi)
             part_time.append(n.duration.quarterLength)
         piece_container["parts"][i] += part
         piece_container["parts_times"][i] += part_time
@@ -348,19 +349,24 @@ def save_metadata_to_json(piece_container, fpath):
          print(j, file=f)
 
 
-def get_music21_metadata(list_of_musicjson_or_midi_files, only_pieces_with_n_voices=[4], assume_cached=False,
+def get_music21_metadata(list_of_musicjson_or_midi_files, explicit_metapath_tag, only_pieces_with_n_voices=[4], assume_cached=False,
                          metapath="_kkpthlib_cache", verbose=False):
     """
     build metadata for plagiarism checks
     """
-    metapath = get_cache_dir() + "_{}_metadata".format(abs(hash(tuple(list_of_musicjson_or_midi_files))) % 10000)
+    #metapath = get_cache_dir() + "_{}_metadata".format(abs(hash(tuple(list_of_musicjson_or_midi_files))) % 10000)
+    metapath = get_cache_dir() + "_{}_metadata".format(explicit_metapath_tag)
     if assume_cached:
-        print("Already cached!")
+        print("Already cached files found in {}!".format(metapath))
         files_list = [metapath + os.sep + f for f in os.listdir(metapath) if ".metajson" in f]
         if not os.path.exists(metapath):
             raise ValueError("{} does not exist, cannot assume cached!".format(metapath))
         return {"files": files_list}
-    midi_cache_path = get_cache_dir() + "_{}_midicache".format(abs(hash(tuple(list_of_musicjson_or_midi_files))) % 10000)
+    else:
+        if os.path.exists(metapath):
+            raise ValueError("Folder {} already exists even though assume_cached=False! Cowardly refusing to continue - delete manually!".format(metapath))
+
+    midi_cache_path = get_cache_dir() + "_{}_midicache".format(explicit_metapath_tag)
     piece_paths = []
     for f in list_of_musicjson_or_midi_files:
         if f.endswith(".json"):
@@ -397,12 +403,12 @@ def get_music21_metadata(list_of_musicjson_or_midi_files, only_pieces_with_n_voi
             print("Skipping file {}, {} due to unknown or multiple tempo changes...".format(it, p_bach))
             continue
 
-        print("Processing {}, {} ...".format(it, piece))
+        print("Processing {} of {}, {} ...".format(it, len(piece_paths), piece))
         stripped_extension_name = ".".join(os.path.split(piece)[1].split(".")[:-1])
         base_fpath = metapath + os.sep + stripped_extension_name
         skipped = False
         k = p.analyze('key')
-        dp = get_metadata(p)
+        dp = get_metadata(p, piece)
         if os.path.exists(base_fpath + ".metajson"):
             pass
         else:
@@ -429,11 +435,16 @@ def build_music_plagiarism_checkers(metajson_files, roman_reduced_max_order=10, 
     tenor_pitch_checker = MaxOrder(pitches_max_order)
     bass_pitch_checker = MaxOrder(pitches_max_order)
 
+    soprano_pitch_duration_checker = MaxOrder(pitches_max_order)
+    alto_pitch_duration_checker = MaxOrder(pitches_max_order)
+    tenor_pitch_duration_checker = MaxOrder(pitches_max_order)
+    bass_pitch_duration_checker = MaxOrder(pitches_max_order)
+
     for n, jf in enumerate(metajson_files):
         print("growing plagiarism checker {}/{}".format(n + 1, len(metajson_files)))
         with open(jf) as f:
             data = json.load(f)
-        tag = jf.split(os.sep)[-1]
+        tag = data["original_filepath"]
         roman_names = data["roman_names"]
         roman_reduced_names = [x[0] for x in groupby(roman_names)]
         roman_checker.insert(roman_names, with_attribution_tag=tag)
@@ -441,13 +452,32 @@ def build_music_plagiarism_checkers(metajson_files, roman_reduced_max_order=10, 
         pitched_functional_names = data["pitched_functional_names"]
         functional_names = data["functional_names"]
 
+        # pad with empty stuff if < max order?
+        if len(roman_reduced_names) <= roman_reduced_max_order:
+            print("{} roman reduced names < max order, padding with '-'".format(jf))
+            roman_reduced_names = roman_reduced_names + ["-"] * roman_reduced_max_order
+            roman_reduced_names = roman_reduced_names[:roman_reduced_max_order + 1]
         roman_reduced_checker.insert(roman_reduced_names, with_attribution_tag=tag)
         pitched_functional_checker.insert(pitched_functional_names, with_attribution_tag=tag)
         functional_checker.insert(functional_names, with_attribution_tag=tag)
+
         soprano_pitch_checker.insert(data["parts"][0], with_attribution_tag=tag)
         alto_pitch_checker.insert(data["parts"][1], with_attribution_tag=tag)
         tenor_pitch_checker.insert(data["parts"][2], with_attribution_tag=tag)
         bass_pitch_checker.insert(data["parts"][3], with_attribution_tag=tag)
+
+        assert len(data["parts"][0]) == len(data["parts_times"][0])
+        soprano_pitch_duration_checker.insert(list(zip(data["parts"][0], data["parts_times"][0])), with_attribution_tag=tag)
+
+        assert len(data["parts"][1]) == len(data["parts_times"][1])
+        alto_pitch_duration_checker.insert(list(zip(data["parts"][1], data["parts_times"][1])), with_attribution_tag=tag)
+
+        assert len(data["parts"][2]) == len(data["parts_times"][2])
+        tenor_pitch_duration_checker.insert(list(zip(data["parts"][2], data["parts_times"][2])), with_attribution_tag=tag)
+
+        assert len(data["parts"][3]) == len(data["parts_times"][3])
+        bass_pitch_duration_checker.insert(list(zip(data["parts"][3], data["parts_times"][3])), with_attribution_tag=tag)
+
     return {"roman_names_checker": roman_checker,
             "roman_reduced_names_checker": roman_reduced_checker,
             "pitched_functional_checker": pitched_functional_checker,
@@ -455,10 +485,19 @@ def build_music_plagiarism_checkers(metajson_files, roman_reduced_max_order=10, 
             "soprano_pitch_checker": soprano_pitch_checker,
             "alto_pitch_checker": alto_pitch_checker,
             "tenor_pitch_checker": tenor_pitch_checker,
-            "bass_pitch_checker": bass_pitch_checker}
+            "bass_pitch_checker": bass_pitch_checker,
+            "soprano_pitch_duration_checker": soprano_pitch_duration_checker,
+            "alto_pitch_duration_checker": alto_pitch_duration_checker,
+            "tenor_pitch_duration_checker": tenor_pitch_duration_checker,
+            "bass_pitch_duration_checker": bass_pitch_duration_checker}
 
 
-def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers):
+def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write_checker_results_to_directory=None,
+                                    report_maxorder_violations=0):
+    """ report_maxorder_violations = 0 means to also save and report files that violate the absolute maxorder for a given checker.
+        setting to -1, -2 etc will report maxorder - 1, maxorder - 2 violations as well.
+
+        for reading the report, the attribution tag is a tuple of name of file, number of steps into sequence associated with that file, total number of items in the file """
     tmp_midi_path = "_tmp.midi"
     if os.path.exists(tmp_midi_path):
         os.remove(tmp_midi_path)
@@ -470,7 +509,7 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers):
         shutil.copy2(f, tmp_midi_path)
 
     p = music21_from_midi(tmp_midi_path)
-    dp = get_metadata(p)
+    dp = get_metadata(p, tmp_midi_path)
     roman_names = dp["roman_names"]
     roman_reduced_names = [x[0] for x in groupby(roman_names)]
     functional_names = dp["functional_names"]
@@ -499,25 +538,120 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers):
 
     soprano_pitch_max_order_ok = checkers["soprano_pitch_checker"].satisfies_max_order(soprano_parts)
     soprano_pitch_matrix, soprano_pitch_attr = checkers["soprano_pitch_checker"].included_at_index(soprano_parts, return_attributions=True)
-    print("Soprano pitch checker status {}".format(soprano_pitch_max_order_ok))
+    print("Soprano pitch checker reports no max-order copying: {}".format(soprano_pitch_max_order_ok))
 
     alto_pitch_max_order_ok = checkers["alto_pitch_checker"].satisfies_max_order(soprano_parts)
     alto_pitch_matrix, alto_pitch_attr = checkers["alto_pitch_checker"].included_at_index(alto_parts, return_attributions=True)
-    print("Alto pitch checker status {}".format(alto_pitch_max_order_ok))
+    print("Alto pitch checker reports no max-order copying: {}".format(alto_pitch_max_order_ok))
 
     tenor_pitch_max_order_ok = checkers["tenor_pitch_checker"].satisfies_max_order(tenor_parts)
     tenor_pitch_matrix, tenor_pitch_attr = checkers["tenor_pitch_checker"].included_at_index(tenor_parts, return_attributions=True)
-    print("Tenor pitch checker status {}".format(tenor_pitch_max_order_ok))
+    print("Tenor pitch checker reports no max-order copying: {}".format(tenor_pitch_max_order_ok))
 
     bass_pitch_max_order_ok = checkers["bass_pitch_checker"].satisfies_max_order(bass_parts)
     bass_pitch_matrix, bass_pitch_attr = checkers["bass_pitch_checker"].included_at_index(bass_parts, return_attributions=True)
-    print("Bass pitch checker status {}".format(bass_pitch_max_order_ok))
+    print("Bass pitch checker reports no max-order copying: {}".format(bass_pitch_max_order_ok))
+
+    assert len(dp["parts"][0]) == len(dp["parts_times"][0])
+    soprano_parts_durations = list(zip(dp["parts"][0], dp["parts_times"][0]))
+
+    assert len(dp["parts"][1]) == len(dp["parts_times"][1])
+    alto_parts_durations = list(zip(dp["parts"][1], dp["parts_times"][1]))
+
+    assert len(dp["parts"][2]) == len(dp["parts_times"][2])
+    tenor_parts_durations = list(zip(dp["parts"][2], dp["parts_times"][2]))
+
+    assert len(dp["parts"][3]) == len(dp["parts_times"][3])
+    bass_parts_durations = list(zip(dp["parts"][3], dp["parts_times"][3]))
+
+    soprano_pitch_duration_max_order_ok = checkers["soprano_pitch_duration_checker"].satisfies_max_order(soprano_parts_durations)
+    soprano_pitch_duration_matrix, soprano_pitch_duration_attr = checkers["soprano_pitch_duration_checker"].included_at_index(soprano_parts_durations, return_attributions=True)
+    print("Soprano pitch duration checker reports no max-order copying: {}".format(soprano_pitch_duration_max_order_ok))
+
+    alto_pitch_duration_max_order_ok = checkers["alto_pitch_duration_checker"].satisfies_max_order(alto_parts_durations)
+    alto_pitch_duration_matrix, alto_pitch_duration_attr = checkers["alto_pitch_duration_checker"].included_at_index(alto_parts_durations, return_attributions=True)
+    print("Alto pitch duration checker reports no max-order copying: {}".format(alto_pitch_duration_max_order_ok))
+
+    tenor_pitch_duration_max_order_ok = checkers["tenor_pitch_duration_checker"].satisfies_max_order(tenor_parts_durations)
+    tenor_pitch_duration_matrix, tenor_pitch_duration_attr = checkers["tenor_pitch_duration_checker"].included_at_index(tenor_parts_durations, return_attributions=True)
+    print("Tenor pitch duration checker reports no max-order copying: {}".format(tenor_pitch_duration_max_order_ok))
+
+    bass_pitch_duration_max_order_ok = checkers["bass_pitch_duration_checker"].satisfies_max_order(bass_parts_durations)
+    bass_pitch_duration_matrix, bass_pitch_duration_attr = checkers["bass_pitch_duration_checker"].included_at_index(bass_parts_durations, return_attributions=True)
+    print("Bass pitch duration checker reports no max-order copying: {}".format(bass_pitch_duration_max_order_ok))
 
     if os.path.exists(tmp_midi_path):
         os.remove(tmp_midi_path)
 
-    from IPython import embed; embed(); raise ValueError()
+    if write_checker_results_to_directory is not None:
+        # write out diagnostic reports, copy in relevant songs...
+        if not os.path.exists(write_checker_results_to_directory):
+            os.mkdir(write_checker_results_to_directory)
 
+        import pprint
+        reports_dict = {"roman_names": roman_names_attr,
+                        "roman_reduced_names": roman_reduced_names_attr,
+                        "functional_names": functional_names_attr,
+                        "pitched_functional_names": pitched_functional_names_attr,
+                        "soprano_pitch": soprano_pitch_attr,
+                        "alto_pitch": alto_pitch_attr,
+                        "tenor_pitch": tenor_pitch_attr,
+                        "bass_pitch": bass_pitch_attr,
+                        "soprano_pitch_duration": soprano_pitch_duration_attr,
+                        "alto_pitch_duration": alto_pitch_duration_attr,
+                        "tenor_pitch_duration": tenor_pitch_duration_attr,
+                        "bass_pitch_duration": bass_pitch_duration_attr}
+        for k, v in reports_dict.items():
+            output_s = pprint.pformat(v)
+            cleaned_infile_path = "_".join("_".join(midi_or_musicjson_file_path.split(os.sep)).split("."))
+            subfolder = write_checker_results_to_directory + os.sep + cleaned_infile_path
+            if not os.path.exists(subfolder):
+                os.mkdir(subfolder)
+            subsubfolder = subfolder + os.sep + k
+            if not os.path.exists(subsubfolder):
+                os.mkdir(subsubfolder)
+            output_path = subsubfolder + os.sep + "{}_{}_report.txt".format(cleaned_infile_path, k)
+            with open(output_path, "w") as f:
+                f.write(output_s)
+            # tag is name of file, number of steps into sequence associated with that file, total number of items in the file
+            check_file_copy_dir = subsubfolder + os.sep + "file_to_check_against"
+            # copy original file in here
+            maxorder_match_dir = subsubfolder + os.sep + "maxorder_matches"
+            # copy related matches in here
+            print("Saving report {}".format(output_path))
+            # checkers[k + "_checker"].order_tries[-1].attribution_tags
+            # works because this is an ordered dict
+            last_key = list(v.keys())[-1]
+
+            if report_maxorder_violations != 0:
+                raise ValueError("Currently only supports maxorder_violations = 0 aka report the highest maxorder violations from check")
+
+            # if there are violations, iterate them and copy the files to "maxorder_match_dir"
+            if len(v[last_key]) > 0:
+                for ki, vi in v[last_key].items():
+                    # tuple format is filename, first
+                    for el in vi:
+                        match_fpath = el[0]
+                        match_step = el[1]
+                        if os.path.exists(match_fpath):
+                            if not os.path.exists(check_file_copy_dir):
+                                os.mkdir(check_file_copy_dir)
+
+                            # multiple copies but makes things simpler
+                            shutil.copy2(midi_or_musicjson_file_path, check_file_copy_dir)
+
+                            if not os.path.exists(maxorder_match_dir):
+                                os.mkdir(maxorder_match_dir)
+
+                            shutil.copy2(match_fpath, maxorder_match_dir)
+                            #from IPython import embed; embed(); raise ValueError()
+                        else:
+                            print("path fail?")
+                            from IPython import embed; embed(); raise ValueError()
+
+            # now generate html report...
+
+        print("report complete")
 
 '''
 if __name__ == "__main__":

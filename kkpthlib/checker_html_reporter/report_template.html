@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+    <title> $PAGE_NAME </title>
+    <script type="text/javascript" src="http://mbostock.github.com/d3/d3.v2.js"></script>
+    <script type="text/javascript">
+    $JAVASCRIPT_NOTE_DATA
+    </script>
+    <style type="text/css">
+        .chart {
+            shape-rendering: crispEdges;
+        }
+
+        .mini text {
+            font: 9px sans-serif;
+        }
+
+        .main text {
+            font: 12px sans-serif;
+        }
+
+        .miniItem {
+            fill: slategray;
+            fill-opacity: .7;
+            stroke: black;
+            stroke-width: 2;
+        }
+        .brush .extent {
+            stroke: gray;
+            fill: dodgerblue;
+            fill-opacity: .365;
+        }
+
+    </style>
+</head>
+<body>
+<script type="text/javascript">
+    //data
+    var lanes = $LANE_NAMES
+    laneLength = lanes.length,
+    timeBegin = 0,
+    timeEnd = $LANE_TIME_END ;
+
+
+</script>
+<script type="text/javascript">
+    var m = [20, 15, 15, 120], //top right bottom left
+        w = 960 - m[1] - m[3],
+        h = 600 - m[0] - m[2],
+        miniHeight = laneLength * 6 //* 18,  //removed *12
+        mainHeight = h - miniHeight - 50;
+
+    //scales
+    var x = d3.scale.linear() //where is this positioned? at the top or bottom? this might be for main
+        .domain([timeBegin, timeEnd])
+        .range([0, w]);
+
+    var y2 = d3.scale.linear()
+        .domain([0, laneLength])
+        .range([0, miniHeight]);
+
+    var zoom = d3.behavior.zoom()
+        .scaleExtent([1, 10])
+        .on("zoom", zoomed);
+
+    var //xAxis = d3.svg.axis().scale(x1).orient("bottom"),
+        xAxis2 = d3.svg.axis().scale(x).orient("bottom"),
+
+
+        drag = d3.behavior.drag() //when moving rect from left side, other components of rectangle need to be resized   //so we must include this...i think
+            .on("drag", dragmove);
+
+    chart = d3.select("body")
+        .append("svg")
+        .attr("width", w + m[1] + m[3])
+        .attr("height", h + m[0] + m[2])
+        .attr("class", "chart")
+        .call(zoom);
+
+    var mini = chart.append("g")
+        .attr("transform", "translate(" + m[3] + "," + (mainHeight + m[0]) + ")")
+        .attr("width", w)
+        .attr("height", miniHeight)
+        .attr("class", "mini");
+
+
+    //mini lanes and texts
+    mini.append("g").selectAll(".laneLines")
+        .data(minimalNotesFinal)
+        //.data(notes)
+        .enter().append("line")
+        .attr("x1", 0)
+        .attr("y1", function(d) {return y2(d.lane);})
+        .attr("x2", w)
+        .attr("y2", function(d) {return y2(d.lane);})
+        .attr("stroke", "lightgray");
+
+    mini.append("g").selectAll(".laneText")
+        .data(lanes)
+        .enter().append("text")
+        .text(function(d) {return d;})
+        .attr("x", -m[1])
+        .attr("y", function(d, i) {return y2(i + .5);})
+        .attr("dy", ".5ex")
+        .attr("text-anchor", "end")
+        .attr("class", "laneText");
+
+    mini.append("g")
+        .attr("class", "x axis")
+        .attr("transform", "translate(0," + miniHeight + ")")
+        .call(xAxis2);
+
+
+    //mini item rects soon to be brushes
+    mini.append("g").selectAll("miniItems")
+        .data(minimalNotesFinal)
+        .enter().append("rect") //"brush"
+        .attr("class", function(d) {return "miniItem";}) //midi
+        .attr("x", function(d) {return x(d.time);}) //time
+        .attr("y", function(d) {return y2(d.lane + .5) - 2.5;}) //midi
+        .attr("width", function(d) {
+            return x(d.duration);})
+        .attr("height", 5)
+        .on('click', noteClicked)
+        .call(drag);
+
+
+    mini.append("g")
+        .attr("class", "x brush")
+        //.call(brush)
+        .selectAll("rect")
+        .attr("y", 1)
+        .attr("height", miniHeight - 1);
+
+
+
+    function noteClicked(d, i) { //
+        if (d3.event.defaultPrevented) return; // dragged
+    }
+
+    function dragmove(d) {
+
+        d3.select(this)
+
+            .attr("x", d.x = Math.max(0, d3.event.x));
+
+    }
+
+    function zoomed() {
+        mini.attr("transform", "translate(" + d3.event.translate + ")scale(" + d3.event.scale + ")");
+    }
+
+
+</script>
+</body>
+</html>
