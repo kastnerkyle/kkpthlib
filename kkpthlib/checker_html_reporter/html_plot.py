@@ -152,17 +152,34 @@ def make_plot_json(list_of_notes):
         cur = cur + c
     return cur[:-2] + post + code_stub
 
-def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot", end_time=60, info_tag=None):
+def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot", end_time=60, info_tag=None, report_index_value=0):
     from string import Template
     plot_module_path = __file__
     plot_module_dir = str(os.sep).join(os.path.split(plot_module_path)[:-1])
     with open(plot_module_dir + os.sep + "report_template.html", "r") as f:
         l = f.read()
     t = Template(l)
-    if info_tag is None:
-        info_tag = ""
+    button_function = """
+    function toggleReport%sFunction() {
+        var x = document.getElementById("report%sinfo");
+        if (x.style.display === "none") {
+            x.style.display = "block";
+        } else {
+            x.style.display = "none";
+        }
+    }
+    """ % (str(report_index_value), str(report_index_value))
+    button_html = '<button onclick="toggleReport%sFunction()">Toggle Report %s Info</button>' % (str(report_index_value), str(report_index_value))
+    info_tag_core = info_tag
+
+    info_tag = '<div id="report%sinfo" display="block">\n' % str(report_index_value)
+    if info_tag_core is None:
+        info_tag += ""
+    else:
+        info_tag += info_tag_core
+    info_tag += '\n</div>\n'
     # if we reverse the list, we reverse the axis
-    return t.substitute(PAGE_NAME=page_name, JAVASCRIPT_NOTE_DATA=javascript_note_data_string, LANE_NAMES=str([LANES_LOOKUP[i] for i in range(N_LANES)]), LANE_TIME_END=end_time, INFO_TAG=info_tag)
+    return t.substitute(PAGE_NAME=page_name, JAVASCRIPT_NOTE_DATA=javascript_note_data_string, LANE_NAMES=str([LANES_LOOKUP[i] for i in range(N_LANES)]), LANE_TIME_END=end_time, INFO_TAG=info_tag, BUTTON_HTML=button_html, BUTTON_FUNCTION=button_function, REPORT_NAME="report{}".format(report_index_value))
 
 
 def make_index_html_string(list_of_report_file_base_names):
@@ -172,9 +189,32 @@ def make_index_html_string(list_of_report_file_base_names):
     with open(plot_module_dir + os.sep + "index_template.html", "r") as f:
         l = f.read()
 
+    report_div_template = '\n<div id="big{}" display="none"></div>\n'
+    report_load_template = "<script>\n$('#big{}').load('{}.html');"
+    report_load_template += '$("#big{}").hide();\n'
+    report_button_function_template = """
+    function toggleBig%sFunction() {
+        var x = document.getElementById("big%s");
+        if (x.style.display === "none") {
+            x.style.display = "block";
+        } else {
+            x.style.display = "none";
+        }
+    }
+    </script>
+    """
+    report_button_html_template = '<button onclick="toggleBig%sFunction()">Toggle Chart %s</button>'
+    index_chunk = "\n"
+    # do divs
+    for name in list_of_report_file_base_names:
+        index_chunk = index_chunk + report_div_template.format(name)
+        index_chunk = index_chunk + report_load_template.format(name, name, name)
+        index_chunk = index_chunk + report_button_function_template % (name, name)
+        index_chunk = index_chunk + report_button_html_template % (name, name)
+        index_chunk = index_chunk + "\n"
+    '''
     report_div_template = '<div id="{}"></div>\n'
     report_load_template = "    $('#{}').load('{}.html');\n"
-
     index_chunk = "\n"
     # do divs
     for name in list_of_report_file_base_names:
@@ -186,6 +226,7 @@ def make_index_html_string(list_of_report_file_base_names):
         index_chunk = index_chunk + report_load_template.format(name, name)
     # end script
     index_chunk = index_chunk + "</script>\n"
+    '''
 
     # unused example of what it should look like
     """

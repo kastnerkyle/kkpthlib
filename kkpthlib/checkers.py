@@ -547,7 +547,7 @@ def write_html_report_for_musicjson(midi_or_musicjson_file_path, html_report_wri
         os.mkdir(report_dir)
 
     # write out the html with minor modifications for lane names
-    w = make_website_string(javascript_note_data_string=r, end_time=end_time, info_tag=info_tag)
+    w = make_website_string(javascript_note_data_string=r, end_time=end_time, info_tag=info_tag, report_index_value=report_index_value)
     with open(report_dir + os.sep + "report{}.html".format(report_index_value), "w") as f:
         f.write(w)
 
@@ -739,7 +739,7 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                             shutil.copy2(match_fpath, maxorder_match_dir)
                             # now generate html report...
                             info_tag = ""
-                            info_tag += "\n<br>Checker: {}\n<br>Match sequence: {}\n<br>Matched against file: {}\n<br>Match start step: {}\n<br>Query file: {}\n<br>Query start step: {}\n<br>".format(k, ki[0], match_fpath, match_step, midi_or_musicjson_file_path, ki[1])
+                            info_tag += "\n<br>Report report{}\n<br>Checker: {}\n<br>Match sequence: {}\n<br>Matched against file: {}\n<br>Match start step: {}\n<br>Query file: {}\n<br>Query start step: {}\n<br>".format(report_index_value, k, ki[0], match_fpath, match_step, midi_or_musicjson_file_path, ki[1])
                             # TODO: TAG EVERYTHING WITH THE REPORT ID FOR UNIQUE MATCH/TOGGLE, WRITE OUT UNIQUE JS PER DIV... OY
                             write_html_report_for_musicjson(match_fpath, subsubfolder, report_index_value=report_index_value,
                                                             info_tag=info_tag)
@@ -749,10 +749,8 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                             from IPython import embed; embed(); raise ValueError()
 
                 w = make_index_html_string(["report{}".format(i) for i in range(report_index_value)])
-                with open(subsubfolder + os.sep + "test_report" + os.sep + "index.html", "w") as f:
+                with open(subsubfolder + os.sep + "test_report" + os.sep + "0_index.html", "w") as f:
                     f.write(w)
-                print("HELOW")
-                from IPython import embed; embed(); raise ValueError()
         print("report complete")
         from IPython import embed; embed(); raise ValueError()
 
