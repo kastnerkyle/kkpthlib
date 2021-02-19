@@ -152,18 +152,24 @@ def make_plot_json(list_of_notes):
         cur = cur + c
     return cur[:-2] + post + code_stub
 
-def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot", end_time=60):
+def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot", end_time=60, info_tag=None):
     from string import Template
-    with open("report_template.html", "r") as f:
+    plot_module_path = __file__
+    plot_module_dir = str(os.sep).join(os.path.split(plot_module_path)[:-1])
+    with open(plot_module_dir + os.sep + "report_template.html", "r") as f:
         l = f.read()
     t = Template(l)
+    if info_tag is None:
+        info_tag = ""
     # if we reverse the list, we reverse the axis
-    return t.substitute(PAGE_NAME=page_name, JAVASCRIPT_NOTE_DATA=javascript_note_data_string, LANE_NAMES=str([LANES_LOOKUP[i] for i in range(N_LANES)]), LANE_TIME_END=end_time)
+    return t.substitute(PAGE_NAME=page_name, JAVASCRIPT_NOTE_DATA=javascript_note_data_string, LANE_NAMES=str([LANES_LOOKUP[i] for i in range(N_LANES)]), LANE_TIME_END=end_time, INFO_TAG=info_tag)
 
 
 def make_index_html_string(list_of_report_file_base_names):
     from string import Template
-    with open("index_template.html", "r") as f:
+    plot_module_path = __file__
+    plot_module_dir = str(os.sep).join(os.path.split(plot_module_path)[:-1])
+    with open(plot_module_dir + os.sep + "index_template.html", "r") as f:
         l = f.read()
 
     report_div_template = '<div id="{}"></div>\n'
