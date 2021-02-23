@@ -170,9 +170,10 @@ def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot"
     }
     """ % (str(report_index_value), str(report_index_value))
     button_html = '<button onclick="toggleReport%sFunction()">Toggle Report %s Info</button>' % (str(report_index_value), str(report_index_value))
+    button_html = ""
     info_tag_core = info_tag
 
-    info_tag = '<div id="report%sinfo" display="block">\n' % str(report_index_value)
+    info_tag = '<div class="section" id="report%sinfo" display="block">\n' % str(report_index_value)
     if info_tag_core is None:
         info_tag += ""
     else:
@@ -189,12 +190,16 @@ def make_index_html_string(list_of_report_file_base_names):
     with open(plot_module_dir + os.sep + "index_template.html", "r") as f:
         l = f.read()
 
-    report_div_template = '\n<div id="big{}" display="none"></div>\n'
-    report_load_template = "<script>\n$('#big{}').load('{}.html');"
-    report_load_template += '$("#big{}").hide();\n'
+    report_first_div_template = '\n<div class="first-container" id="big{}_index" display="none"></div>\n'
+    report_secondary_div_template = '\n<div class="secondary-container" id="big{}_index" display="none"></div>\n'
+    report_load_template = "<script>\n$('#big{}_index').load('{}.html');"
+    report_load_template += '$("#big{}_index").hide();\n</script>\n'
     report_button_function_template = """
-    function toggleBig%sFunction() {
-        var x = document.getElementById("big%s");
+    <script>
+    function toggleBig%sIndexFunction() {
+        var btn = document.getElementById("toggleBig%sIndex")
+        var x = document.getElementById("big%s_index");
+        btn.style.borderStyle = (btn.style.borderStyle!=='inset' ? 'inset' : 'outset')
         if (x.style.display === "none") {
             x.style.display = "block";
         } else {
@@ -203,14 +208,21 @@ def make_index_html_string(list_of_report_file_base_names):
     }
     </script>
     """
-    report_button_html_template = '<button onclick="toggleBig%sFunction()">Toggle Chart %s</button>'
+    report_button_html_template = '<button id="toggleBig%sIndex" onclick="toggleBig%sIndexFunction()">Toggle Chart %s</button>'
     index_chunk = "\n"
-    # do divs
+    # do buttons, then divsm then functions
     for name in list_of_report_file_base_names:
-        index_chunk = index_chunk + report_div_template.format(name)
+        index_chunk = index_chunk + report_button_function_template % (name, name, name)
+        index_chunk = index_chunk + report_button_html_template % (name, name, name)
+
+    for _i, name in enumerate(list_of_report_file_base_names):
+        if _i == 0:
+            index_chunk = index_chunk + report_first_div_template.format(name)
+        else:
+            index_chunk = index_chunk + report_secondary_div_template.format(name)
+
+    for name in list_of_report_file_base_names:
         index_chunk = index_chunk + report_load_template.format(name, name, name)
-        index_chunk = index_chunk + report_button_function_template % (name, name)
-        index_chunk = index_chunk + report_button_html_template % (name, name)
         index_chunk = index_chunk + "\n"
     '''
     report_div_template = '<div id="{}"></div>\n'

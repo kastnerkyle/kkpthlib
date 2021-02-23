@@ -732,14 +732,23 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
 
                             # multiple copies but makes things simpler
                             shutil.copy2(midi_or_musicjson_file_path, check_file_copy_dir)
+                            if report_index_value == 0:
+                                # 0th report is always for the TRUE data
+                                info_tag = ""
+                                info_tag += "\n<br>Source report report{}\n<br>Source file: {}\n<br>This is the data we matched against!<br>\n".format(report_index_value, midi_or_musicjson_file_path)
+                                # do we need to convert midi to musicjson here
+                                write_html_report_for_musicjson(midi_or_musicjson_file_path, subsubfolder, report_index_value=report_index_value,
+                                                                info_tag=info_tag)
+                                report_index_value += 1
 
                             if not os.path.exists(maxorder_match_dir):
                                 os.mkdir(maxorder_match_dir)
 
                             shutil.copy2(match_fpath, maxorder_match_dir)
                             # now generate html report...
+                            match_fname = match_fpath.split(os.sep)[-1]
                             info_tag = ""
-                            info_tag += "\n<br>Report report{}\n<br>Checker: {}\n<br>Match sequence: {}\n<br>Matched against file: {}\n<br>Match start step: {}\n<br>Query file: {}\n<br>Query start step: {}\n<br>".format(report_index_value, k, ki[0], match_fpath, match_step, midi_or_musicjson_file_path, ki[1])
+                            info_tag += "\n<br>Report report{}\n<br>Checker: {}\n<br>Match sequence: {}\n<br>Matched against file: {}\n<br>Match start step: {}\n<br>Query file: {}\n<br>Query start step: {}\n<br>".format(report_index_value, k, ki[0], match_fname, match_step, midi_or_musicjson_file_path, ki[1])
                             # TODO: TAG EVERYTHING WITH THE REPORT ID FOR UNIQUE MATCH/TOGGLE, WRITE OUT UNIQUE JS PER DIV... OY
                             write_html_report_for_musicjson(match_fpath, subsubfolder, report_index_value=report_index_value,
                                                             info_tag=info_tag)

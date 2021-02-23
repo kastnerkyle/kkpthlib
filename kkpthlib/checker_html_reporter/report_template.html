@@ -8,8 +8,19 @@
     $JAVASCRIPT_NOTE_DATA
     </script>
 
-
     <style type="text/css">
+        .grid-container {
+            display: grid;
+            grid-template-columns: 1000px 200px;
+            grid-gap: 20px;
+        }
+
+        .section {
+            display: flex;
+            justify-content: flex-start;
+            align-items: center;
+        }
+
         .chart {
             shape-rendering: crispEdges;
         }
@@ -37,7 +48,13 @@
     </style>
 </head>
 <body>
-<div id="big$REPORT_NAME" display="none"></div>
+
+<div class="grid-container">
+<div class="section" id="big$REPORT_NAME" display="none"></div>
+$BUTTON_HTML
+$INFO_TAG
+</div>
+
 <script type="text/javascript">
     //data
     var lanes = $LANE_NAMES
@@ -48,8 +65,8 @@
 <script type="text/javascript">
     var m = [20, 15, 15, 120], //top right bottom left
         w = 960 - m[1] - m[3],
-        h = 600 - m[0] - m[2],
-        miniHeight = laneLength * 6 //* 18,  //removed *12
+        h = 300 - m[0] - m[2],
+        miniHeight = laneLength * 3 //* 18,  //removed *12
         mainHeight = h - miniHeight - 50;
 
     //scales
@@ -81,6 +98,7 @@
         .call(zoom);
 
     var mini = chart.append("g")
+        .style("font", "4px times")
         .attr("transform", "translate(" + m[3] + "," + (mainHeight + m[0]) + ")")
         .attr("width", w)
         .attr("height", miniHeight)
@@ -106,7 +124,9 @@
         .attr("y", function(d, i) {return y2(i + .5);})
         .attr("dy", ".5ex")
         .attr("text-anchor", "end")
-        .attr("class", "laneText");
+        .attr("class", "laneText")
+        .style("font-family", "Times New Roman")
+        .style("font-size", "3px");
 
     mini.append("g")
         .attr("class", "x axis")
@@ -120,10 +140,10 @@
         .enter().append("rect") //"brush"
         .attr("class", function(d) {return "miniItem";}) //midi
         .attr("x", function(d) {return x(d.time);}) //time
-        .attr("y", function(d) {return y2(d.lane + .5) - 2.5;}) //midi
+        .attr("y", function(d) {return y2(d.lane + .5) - 1;}) //midi
         .attr("width", function(d) {
             return x(d.duration);})
-        .attr("height", 5)
+        .attr("height", 2)
         .on('click', noteClicked)
         .call(drag);
 
@@ -134,8 +154,6 @@
         .selectAll("rect")
         .attr("y", 1)
         .attr("height", miniHeight - 1);
-
-
 
     function noteClicked(d, i) { //
         if (d3.event.defaultPrevented) return; // dragged
@@ -156,9 +174,6 @@
     $BUTTON_FUNCTION
 
 </script>
-<br>
-$BUTTON_HTML
-<br>
-$INFO_TAG
+
 </body>
 </html>
