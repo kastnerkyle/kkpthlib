@@ -39,6 +39,14 @@
             stroke: black;
             stroke-width: 2;
         }
+
+        .miniItemHighlight {
+            fill: red;
+            fill-opacity: .7;
+            stroke: red;
+            stroke-width: 2;
+        }
+
         .brush .extent {
             stroke: gray;
             fill: dodgerblue;
@@ -139,6 +147,19 @@ $INFO_TAG
         .data(minimalNotesFinal)
         .enter().append("rect") //"brush"
         .attr("class", function(d) {return "miniItem";}) //midi
+        .attr("x", function(d) {return x(d.time);}) //time
+        .attr("y", function(d) {return y2(d.lane + .5) - 1;}) //midi
+        .attr("width", function(d) {
+            return x(d.duration);})
+        .attr("height", 2)
+        .on('click', noteClicked)
+        .call(drag);
+
+    //mini item rects soon to be brushes
+    mini.append("g").selectAll("miniItemHighlights")
+        .data(minimalNotesHighlightFinal)
+        .enter().append("rect") //"brush"
+        .attr("class", function(d) {return "miniItemHighlight";}) //midi
         .attr("x", function(d) {return x(d.time);}) //time
         .attr("y", function(d) {return y2(d.lane + .5) - 1;}) //midi
         .attr("width", function(d) {

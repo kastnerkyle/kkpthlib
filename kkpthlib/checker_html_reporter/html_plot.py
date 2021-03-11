@@ -14,7 +14,8 @@ chunk = '''    "name": "{}",
     "midi": {},
     "time": {},
     "velocity": {},
-    "duration": {}
+    "duration": {},
+    "highlight": "{}"
 '''
 
 post_chunk = '''},
@@ -98,7 +99,12 @@ def _create_code_stub_init():
     template = "minimalNotes{} = [];\n"
     for i in range(N_LANES):
         s = s + template.format(i)
+
+    template = "minimalNotesHighlight{} = [];\n"
+    for i in range(N_LANES):
+        s = s + template.format(i)
     s = s + "minimalNotesFinal = [];\n"
+    s = s + "minimalNotesHighlightFinal = [];\n"
     return s
 code_stub_init = _create_code_stub_init()
 
@@ -106,12 +112,23 @@ def _create_code_stub_functions():
     # use simple subs because the string has both {} and ()
     from string import Template
     s = "\n"
+    
     template = '''
 minimalNotes$index = notes.filter(function (el){
-    return el.name == "$note_name";
+    return ((el.name == "$note_name") && (el.highlight == "no"));
 });
 
 var minimalNotesFinal$index = minimalNotes$index.map(function(el){
+    var addKey = Object.assign({}, el);
+    addKey.lane = $lane_index;
+    return addKey;
+});
+
+minimalNotesHighlight$index = notes.filter(function (el){
+    return ((el.name == "$note_name") && (el.highlight == "yes"));
+});
+
+var minimalNotesHightlightFinal$index = minimalNotesHighlight$index.map(function(el){
     var addKey = Object.assign({}, el);
     addKey.lane = $lane_index;
     return addKey;
@@ -127,9 +144,11 @@ code_stub_functions = _create_code_stub_functions()
 def _create_code_stub_combine():
     s = "\n"
     template = "minimalNotesFinal = minimalNotesFinal.concat(minimalNotesFinal{})\n"
+    template += "minimalNotesHighlightFinal = minimalNotesHighlightFinal.concat(minimalNotesHightlightFinal{})\n"
     for i in range(N_LANES):
-        s = s + template.format(i)
-    s + "console.log(minimalNotesFinal)\n"
+        s = s + template.format(i, i)
+    s = s + "console.log(minimalNotesFinal)\n"
+    s = s + "console.log(minimalNotesHighlightFinal)\n"
     return s
 
 code_stub_combine = _create_code_stub_combine()
@@ -140,7 +159,11 @@ def make_chunk(note_tuple):
     start_time = note_tuple[1]
     velocity = 1.0
     duration = note_tuple[2]
-    s = pre_chunk + chunk.format(name, midi, start_time, velocity, duration) + post_chunk
+    if name == "Ab4":
+        highlight = "yes"
+    else:
+        highlight = "no"
+    s = pre_chunk + chunk.format(name, midi, start_time, velocity, duration, highlight) + post_chunk
     return s
 
 code_stub = code_stub_pre + code_stub_init + code_stub_functions + code_stub_combine
@@ -183,7 +206,7 @@ def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot"
     return t.substitute(PAGE_NAME=page_name, JAVASCRIPT_NOTE_DATA=javascript_note_data_string, LANE_NAMES=str([LANES_LOOKUP[i] for i in range(N_LANES)]), LANE_TIME_END=end_time, INFO_TAG=info_tag, BUTTON_HTML=button_html, BUTTON_FUNCTION=button_function, REPORT_NAME="report{}".format(report_index_value))
 
 
-def make_index_html_string(list_of_report_file_base_names):
+def make_index_html_string(list_of_report_file_base_name_tuples):
     from string import Template
     plot_module_path = __file__
     plot_module_dir = str(os.sep).join(os.path.split(plot_module_path)[:-1])
@@ -208,20 +231,24 @@ def make_index_html_string(list_of_report_file_base_names):
     }
     </script>
     """
-    report_button_html_template = '<button id="toggleBig%sIndex" onclick="toggleBig%sIndexFunction()">Toggle Chart %s</button>'
+    report_button_html_template = '<button id="toggleBig%sIndex" onclick="toggleBig%sIndexFunction()">%s (%s)</button>'
     index_chunk = "\n"
     # do buttons, then divsm then functions
-    for name in list_of_report_file_base_names:
+    for tup in list_of_report_file_base_name_tuples:
+        name = tup[0]
+        data_fname = tup[1]
         index_chunk = index_chunk + report_button_function_template % (name, name, name)
-        index_chunk = index_chunk + report_button_html_template % (name, name, name)
+        index_chunk = index_chunk + report_button_html_template % (name, name, name, data_fname)
 
-    for _i, name in enumerate(list_of_report_file_base_names):
+    for _i, tup in enumerate(list_of_report_file_base_name_tuples):
+        name = tup[0]
         if _i == 0:
             index_chunk = index_chunk + report_first_div_template.format(name)
         else:
             index_chunk = index_chunk + report_secondary_div_template.format(name)
 
-    for name in list_of_report_file_base_names:
+    for tup in list_of_report_file_base_name_tuples:
+        name = tup[0]
         index_chunk = index_chunk + report_load_template.format(name, name, name)
         index_chunk = index_chunk + "\n"
     '''

@@ -721,8 +721,10 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
             # if there are violations, iterate them and copy the files to "maxorder_match_dir"
             if len(v[last_key]) > 0:
                 report_index_value = 0
+                report_index_names = []
                 for ki, vi in v[last_key].items():
                     # tuple format is filename, first
+                    # sort by file name?
                     for el in vi:
                         match_fpath = el[0]
                         match_step = el[1]
@@ -740,6 +742,8 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                                 write_html_report_for_musicjson(midi_or_musicjson_file_path, subsubfolder, report_index_value=report_index_value,
                                                                 info_tag=info_tag)
                                 report_index_value += 1
+                                lcl_name = midi_or_musicjson_file_path.split(os.sep)[-1]
+                                report_index_names.append(lcl_name)
 
                             if not os.path.exists(maxorder_match_dir):
                                 os.mkdir(maxorder_match_dir)
@@ -753,11 +757,12 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                             write_html_report_for_musicjson(match_fpath, subsubfolder, report_index_value=report_index_value,
                                                             info_tag=info_tag)
                             report_index_value += 1
+                            report_index_names.append(match_fname)
                         else:
                             print("path fail?")
                             from IPython import embed; embed(); raise ValueError()
 
-                w = make_index_html_string(["report{}".format(i) for i in range(report_index_value)])
+                w = make_index_html_string([("report{}".format(i), report_index_names[i]) for i in range(report_index_value)])
                 with open(subsubfolder + os.sep + "test_report" + os.sep + "0_index.html", "w") as f:
                     f.write(w)
         print("report complete")
