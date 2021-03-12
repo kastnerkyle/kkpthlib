@@ -21,6 +21,7 @@ from .datasets import music21_parse_and_save_json
 from .checker_html_reporter import make_index_html_string
 from .checker_html_reporter import make_website_string
 from .checker_html_reporter import make_plot_json
+from .checker_html_reporter import midi_to_name_lookup 
 
 class GroupDict(OrderedDict):
     def __init__(self):
@@ -496,7 +497,7 @@ def build_music_plagiarism_checkers(metajson_files, roman_reduced_max_order=10, 
             "tenor_pitch_duration_checker": tenor_pitch_duration_checker,
             "bass_pitch_duration_checker": bass_pitch_duration_checker}
 
-def write_html_report_for_musicjson(midi_or_musicjson_file_path, html_report_write_directory, report_index_value=0, info_tag=None):
+def write_html_report_for_musicjson(midi_or_musicjson_file_path, html_report_write_directory, match_info=None, report_index_value=0, info_tag=None):
     tmp_midi_path = "_rpttmp.midi"
     tmp_json_path = "_rpttmp.json"
     if os.path.exists(tmp_midi_path):
@@ -517,24 +518,52 @@ def write_html_report_for_musicjson(midi_or_musicjson_file_path, html_report_wri
     with open(tmp_json_path, "r") as f:
         music_json_data = json.load(f)
     l = []
+    marked_l = []
     for _p in range(len(music_json_data["parts"])):
         parts = music_json_data["parts"][_p]
         parts_times = music_json_data["parts_times"][_p]
         parts_cumulative_times = music_json_data["parts_cumulative_times"][_p]
         assert len(parts) == len(parts_times)
         assert len(parts_times) == len(parts_cumulative_times)
+        if match_info is not None:
+            part_note_names = [midi_to_name_lookup[tt] if tt != 0 else "0" for tt in parts]
+            def contains(sub, pri):
+                # print (contains((1,2,3),(1,2,3)))
+                # https://stackoverflow.com/questions/3847386/how-to-test-if-a-list-contains-another-list
+                M, N = len(pri), len(sub)
+                i, LAST = 0, M-N+1
+                while True:
+                    try:
+                        found = pri.index(sub[0], i, LAST) # find first elem in sub
+                    except ValueError:
+                        return False
+                    if pri[found:found+N] == sub:
+                        return [found, found+N-1]
+                    else:
+                        i = found+1
+            # try to do subsequence match here
+            search_res = contains(match_info[0], part_note_names)
+
         for _s in range(len(parts)):
             # should be ok to skip rests...
             if parts[_s] == 0:
                 continue
             d = parts_times[_s]
             l.append((parts[_s], parts_cumulative_times[_s] - d, d))
+            if match_info is not None and search_res is not False:
+                match_steps = list(range(search_res[0], search_res[1] + 1))
+                if _s in match_steps:
+                    marked_l.append(True)
+                else:
+                    marked_l.append(False)
+            else:
+                marked_l.append(False)
 
     last_step = max([t[1] for t in l])
     last_step_dur = max([t[2] for t in l if t[1] == last_step])
     end_time = last_step + last_step_dur
 
-    r = make_plot_json(l)
+    r = make_plot_json(l, notes_to_highlight=marked_l)
 
     """
     # write out the json + javascript
@@ -739,7 +768,14 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                                 info_tag = ""
                                 info_tag += "\n<br>Source report report{}\n<br>Source file: {}\n<br>This is the data we matched against!<br>\n".format(report_index_value, midi_or_musicjson_file_path)
                                 # do we need to convert midi to musicjson here
-                                write_html_report_for_musicjson(midi_or_musicjson_file_path, subsubfolder, report_index_value=report_index_value,
+
+                                el_vals = [int(el) for el in (":".join(ki[0].split("->"))).split(":")]
+                                step_el = ki[1]
+                                match_note_names = [midi_to_name_lookup[el_i] for el_i in el_vals]
+
+                                write_html_report_for_musicjson(midi_or_musicjson_file_path, subsubfolder,
+                                                                match_info=(match_note_names, step_el),
+                                                                report_index_value=report_index_value,
                                                                 info_tag=info_tag)
                                 report_index_value += 1
                                 lcl_name = midi_or_musicjson_file_path.split(os.sep)[-1]
@@ -754,7 +790,12 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                             info_tag = ""
                             info_tag += "\n<br>Report report{}\n<br>Checker: {}\n<br>Match sequence: {}\n<br>Matched against file: {}\n<br>Match start step: {}\n<br>Query file: {}\n<br>Query start step: {}\n<br>".format(report_index_value, k, ki[0], match_fname, match_step, midi_or_musicjson_file_path, ki[1])
                             # TODO: TAG EVERYTHING WITH THE REPORT ID FOR UNIQUE MATCH/TOGGLE, WRITE OUT UNIQUE JS PER DIV... OY
-                            write_html_report_for_musicjson(match_fpath, subsubfolder, report_index_value=report_index_value,
+                            el_vals = [int(el) for el in (":".join(ki[0].split("->"))).split(":")]
+                            step_el = ki[1]
+                            match_note_names = [midi_to_name_lookup[el_i] for el_i in el_vals]
+                            write_html_report_for_musicjson(match_fpath, subsubfolder,
+                                                            match_info=(match_note_names, step_el),
+                                                            report_index_value=report_index_value,
                                                             info_tag=info_tag)
                             report_index_value += 1
                             report_index_names.append(match_fname)

@@ -153,13 +153,13 @@ def _create_code_stub_combine():
 
 code_stub_combine = _create_code_stub_combine()
 
-def make_chunk(note_tuple):
+def make_chunk(note_tuple, highlight=False):
     midi = note_tuple[0]
     name = midi_to_name_lookup[midi]
     start_time = note_tuple[1]
     velocity = 1.0
     duration = note_tuple[2]
-    if name == "Ab4":
+    if highlight == True:
         highlight = "yes"
     else:
         highlight = "no"
@@ -167,11 +167,15 @@ def make_chunk(note_tuple):
     return s
 
 code_stub = code_stub_pre + code_stub_init + code_stub_functions + code_stub_combine
-def make_plot_json(list_of_notes):
+def make_plot_json(list_of_notes, notes_to_highlight=None):
+    # notes to highlight should be the same length as list_of_notes, each entry True or False 
     cur = pre
     # voice track?
-    for note in list_of_notes:
-        c = make_chunk(note)
+    for _n, note in enumerate(list_of_notes):
+        if notes_to_highlight is not None:
+            c = make_chunk(note, highlight=notes_to_highlight[_n])
+        else:
+            c = make_chunk(note, highlight=False)
         cur = cur + c
     return cur[:-2] + post + code_stub
 

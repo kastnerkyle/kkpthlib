@@ -34,17 +34,17 @@
         }
 
         .miniItem {
-            fill: slategray;
+            fill: black;
             fill-opacity: .7;
             stroke: black;
-            stroke-width: 2;
+            stroke-width: .5;
         }
 
         .miniItemHighlight {
             fill: red;
             fill-opacity: .7;
             stroke: red;
-            stroke-width: 2;
+            stroke-width: .5;
         }
 
         .brush .extent {
@@ -122,7 +122,8 @@ $INFO_TAG
         .attr("y1", function(d) {return y2(d.lane);})
         .attr("x2", w)
         .attr("y2", function(d) {return y2(d.lane);})
-        .attr("stroke", "lightgray");
+        .attr("stroke", "lightgray")
+        .attr("stroke-width", .1);
 
     mini.append("g").selectAll(".laneText")
         .data(lanes)
