@@ -179,7 +179,7 @@ def make_plot_json(list_of_notes, notes_to_highlight=None):
         cur = cur + c
     return cur[:-2] + post + code_stub
 
-def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot", end_time=60, info_tag=None, report_index_value=0):
+def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot", end_time=120, info_tag=None, report_index_value=0):
     from string import Template
     plot_module_path = __file__
     plot_module_dir = str(os.sep).join(os.path.split(plot_module_path)[:-1])

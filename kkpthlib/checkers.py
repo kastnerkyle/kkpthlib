@@ -498,6 +498,8 @@ def build_music_plagiarism_checkers(metajson_files, roman_reduced_max_order=10, 
             "bass_pitch_duration_checker": bass_pitch_duration_checker}
 
 def write_html_report_for_musicjson(midi_or_musicjson_file_path, html_report_write_directory, match_info=None, report_index_value=0, info_tag=None):
+    # match_info[0] is the key itself
+    # match_info[1] is the "number" of the match, if the match occurs multiple times we need to know which match to color
     tmp_midi_path = "_rpttmp.midi"
     tmp_json_path = "_rpttmp.json"
     if os.path.exists(tmp_midi_path):
@@ -542,7 +544,17 @@ def write_html_report_for_musicjson(midi_or_musicjson_file_path, html_report_wri
                     else:
                         i = found+1
             # try to do subsequence match here
-            search_res = contains(match_info[0], part_note_names)
+            # need to use match_info because there can be multiple matches in a file... don't rematch first over and over
+            start_step = 0
+            matched_at = []
+            run_steps = 0
+            while start_step <= (len(part_note_names) - len(match_info[0])):
+                search_res = contains(match_info[0], part_note_names[start_step:])
+                if search_res is not False:
+                    matched_at.append((start_step + search_res[0], start_step + search_res[1]))
+                    start_step = start_step + search_res[0] + 1
+                else:
+                    break
 
         for _s in range(len(parts)):
             # should be ok to skip rests...
@@ -550,18 +562,25 @@ def write_html_report_for_musicjson(midi_or_musicjson_file_path, html_report_wri
                 continue
             d = parts_times[_s]
             l.append((parts[_s], parts_cumulative_times[_s] - d, d))
-            if match_info is not None and search_res is not False:
-                match_steps = list(range(search_res[0], search_res[1] + 1))
-                if _s in match_steps:
-                    marked_l.append(True)
+            if match_info is not None:
+                if len(matched_at) > 0:
+                    which_match = matched_at[match_info[1]]
+                    match_steps = list(range(which_match[0], which_match[1] + 1))
+                    if _s in match_steps:
+                        marked_l.append(True)
+                    else:
+                        marked_l.append(False)
                 else:
                     marked_l.append(False)
             else:
                 marked_l.append(False)
 
-    last_step = max([t[1] for t in l])
-    last_step_dur = max([t[2] for t in l if t[1] == last_step])
-    end_time = last_step + last_step_dur
+    # want them all to end at the same place
+    #last_step = max([t[1] for t in l])
+    #last_step_dur = max([t[2] for t in l if t[1] == last_step])
+    #end_time = last_step + last_step_dur
+
+    end_time = 120
 
     r = make_plot_json(l, notes_to_highlight=marked_l)
 
@@ -769,17 +788,28 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                                 info_tag += "\n<br>Source report report{}\n<br>Source file: {}\n<br>This is the data we matched against!<br>\n".format(report_index_value, midi_or_musicjson_file_path)
                                 # do we need to convert midi to musicjson here
 
-                                el_vals = [int(el) for el in (":".join(ki[0].split("->"))).split(":")]
-                                step_el = ki[1]
-                                match_note_names = [midi_to_name_lookup[el_i] for el_i in el_vals]
+                                # loop through all keys?
+                                reduced_match_strings = []
+                                for _ki, _vi in v[last_key].items():
+                                    el_vals = [int(el) for el in (":".join(_ki[0].split("->"))).split(":")]
+                                    step_el = _ki[1]
+                                    match_note_names = [midi_to_name_lookup[el_i] for el_i in el_vals]
+                                    match_str = ":".join(match_note_names)
+                                    if match_str in reduced_match_strings:
+                                        # skip strings that we already handled
+                                        continue
+                                    else:
+                                        # which match will always be 0
+                                        # write out 1 file for every match type
+                                        reduced_match_strings.append(match_str)
 
-                                write_html_report_for_musicjson(midi_or_musicjson_file_path, subsubfolder,
-                                                                match_info=(match_note_names, step_el),
-                                                                report_index_value=report_index_value,
-                                                                info_tag=info_tag)
-                                report_index_value += 1
-                                lcl_name = midi_or_musicjson_file_path.split(os.sep)[-1]
-                                report_index_names.append(lcl_name)
+                                        write_html_report_for_musicjson(midi_or_musicjson_file_path, subsubfolder,
+                                                                        match_info=(match_note_names, 0),
+                                                                        report_index_value=report_index_value,
+                                                                        info_tag=info_tag)
+                                        report_index_value += 1
+                                        lcl_name = midi_or_musicjson_file_path.split(os.sep)[-1]
+                                        report_index_names.append(lcl_name)
 
                             if not os.path.exists(maxorder_match_dir):
                                 os.mkdir(maxorder_match_dir)
@@ -790,11 +820,28 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                             info_tag = ""
                             info_tag += "\n<br>Report report{}\n<br>Checker: {}\n<br>Match sequence: {}\n<br>Matched against file: {}\n<br>Match start step: {}\n<br>Query file: {}\n<br>Query start step: {}\n<br>".format(report_index_value, k, ki[0], match_fname, match_step, midi_or_musicjson_file_path, ki[1])
                             # TODO: TAG EVERYTHING WITH THE REPORT ID FOR UNIQUE MATCH/TOGGLE, WRITE OUT UNIQUE JS PER DIV... OY
+
+                            # find the number of matches for this key, and send "which one" to the html writer... kinda hacky
                             el_vals = [int(el) for el in (":".join(ki[0].split("->"))).split(":")]
                             step_el = ki[1]
                             match_note_names = [midi_to_name_lookup[el_i] for el_i in el_vals]
+
+                            which_match = 0
+                            n_matches = 0
+                            # first get total number of matches
+                            for _el in vi:
+                                if el[0] == _el[0]:
+                                    n_matches += 1
+
+                            for _el in vi:
+                                if el[0] == _el[0]:
+                                    if el[1] != _el[1]:
+                                        which_match += 1
+                                    if el[1] == _el[1]:
+                                        break
+
                             write_html_report_for_musicjson(match_fpath, subsubfolder,
-                                                            match_info=(match_note_names, step_el),
+                                                            match_info=(match_note_names, which_match),
                                                             report_index_value=report_index_value,
                                                             info_tag=info_tag)
                             report_index_value += 1
