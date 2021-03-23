@@ -8,6 +8,7 @@ import shutil
 from operator import itemgetter
 from itertools import groupby
 import json
+import base64
 try:
     import cPickle as pickle
 except ImportError:
@@ -581,7 +582,6 @@ def write_html_report_for_musicjson(midi_or_musicjson_file_path, html_report_wri
     #end_time = last_step + last_step_dur
 
     end_time = 120
-
     r = make_plot_json(l, notes_to_highlight=marked_l)
 
     """
@@ -595,7 +595,16 @@ def write_html_report_for_musicjson(midi_or_musicjson_file_path, html_report_wri
         os.mkdir(report_dir)
 
     # write out the html with minor modifications for lane names
-    w = make_website_string(javascript_note_data_string=r, end_time=end_time, info_tag=info_tag, report_index_value=report_index_value)
+    with open(tmp_midi_path, "rb") as f:
+         base64_midi = base64.b64encode(f.read()).decode("utf-8")
+
+    if midi_or_musicjson_file_path.endswith(".json"):
+        raise ValueError("Need to use midi file for report generation for now! got {}".format(midi_or_musicjson_file_path))
+
+    midi_name = midi_or_musicjson_file_path.split(os.sep)[-1]
+    w = make_website_string(javascript_note_data_string=r, end_time=end_time, info_tag=info_tag, report_index_value=report_index_value,
+                            midi_name=midi_name, base64_midi=base64_midi)
+
     with open(report_dir + os.sep + "report{}.html".format(report_index_value), "w") as f:
         f.write(w)
 

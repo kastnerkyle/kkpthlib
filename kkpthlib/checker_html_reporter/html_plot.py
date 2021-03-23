@@ -179,7 +179,7 @@ def make_plot_json(list_of_notes, notes_to_highlight=None):
         cur = cur + c
     return cur[:-2] + post + code_stub
 
-def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot", end_time=120, info_tag=None, report_index_value=0):
+def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot", end_time=120, info_tag=None, report_index_value=0, base64_midi=None, midi_name=None):
     from string import Template
     plot_module_path = __file__
     plot_module_dir = str(os.sep).join(os.path.split(plot_module_path)[:-1])
@@ -207,7 +207,29 @@ def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot"
         info_tag += info_tag_core
     info_tag += '\n</div>\n'
     # if we reverse the list, we reverse the axis
-    return t.substitute(PAGE_NAME=page_name, JAVASCRIPT_NOTE_DATA=javascript_note_data_string, LANE_NAMES=str([LANES_LOOKUP[i] for i in range(N_LANES)]), LANE_TIME_END=end_time, INFO_TAG=info_tag, BUTTON_HTML=button_html, BUTTON_FUNCTION=button_function, REPORT_NAME="report{}".format(report_index_value))
+    report_string = t.substitute(PAGE_NAME=page_name, JAVASCRIPT_NOTE_DATA=javascript_note_data_string, LANE_NAMES=str([LANES_LOOKUP[i] for i in range(N_LANES)]), LANE_TIME_END=end_time, INFO_TAG=info_tag, BUTTON_HTML=button_html, BUTTON_FUNCTION=button_function, REPORT_NAME="report{}".format(report_index_value))
+
+    with open(plot_module_dir + os.sep + "midi_player_template.html", "r") as f:
+        l = f.read()
+    t2 = Template(l)
+
+    option_file_str = ''
+    if midi_name is not None:
+        option_file_str += '<option value="{}">{}</option>\n'.format(base64_midi, midi_name)
+        midi_player_string = t2.substitute(MIDI_FILES_OPTION_LIST=option_file_str)
+    else:
+        midi_player_string = ''
+
+    midijs_str = '<script type="text/javascript">\n'
+    with open(plot_module_dir + os.sep + "MIDIFile.js", "r") as f:
+        midijs_str += f.read()
+    midijs_str += '</script>\n'
+
+    webaudio_str = '<script type="text/javascript">\n'
+    with open(plot_module_dir + os.sep + "WebAudioFontPlayer.js", "r") as f:
+        webaudio_str += f.read()
+    webaudio_str += '</script>\n'
+    return midijs_str + webaudio_str + midi_player_string + report_string
 
 
 def make_index_html_string(list_of_report_file_base_name_tuples):
