@@ -292,36 +292,121 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info):
             } else {
                 x.style.display = "none";
             }
-            var x = document.getElementById("animated_vertical");
-            if (x.style.display === "none") {
-                x.style.display = "block";
-            } else {
-                x.style.display = "none";
+
+            var els = document.getElementsByClassName('vertical');
+            for (var i = 0; i < els.length; i++) {
+                x = els.item(i)
+                if (x.style.display === "none") {
+                    x.style.display = "block";
+                }
             }
         }
 
         function reportChangeFunc1() {
-                    var reportBox = document.getElementById("reportBox1");
-                    eval(reportBox.options[reportBox.selectedIndex].value + "();")
+            var reportBoxShadow = document.getElementById('reportBoxShadow');
+            var reportBox1 = document.getElementById('reportBox1');
+            var reportBox2 = document.getElementById('reportBox2');
+            var reportBox3 = document.getElementById('reportBox3');
+            for(i = 1; i < reportBoxShadow.length; i++) {
+                // resets the values to defaults before setting new changes
+                // skip 0 elem
+                reportBox1.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
+                reportBox2.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
+                reportBox3.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
+            }
+
+            reportBox2.options[reportBox1.selectedIndex].innerHTML = "--";
+            reportBox3.options[reportBox1.selectedIndex].innerHTML = "---";
+
+            reportBox1.options[reportBox2.selectedIndex].innerHTML = "-";
+            reportBox3.options[reportBox2.selectedIndex].innerHTML = "---";
+
+            reportBox1.options[reportBox3.selectedIndex].innerHTML = "-";
+            reportBox2.options[reportBox3.selectedIndex].innerHTML = "--";
+
+            eval(reportBox1.options[reportBox1.selectedIndex].value + "();");
         }
 
         function reportChangeFunc2() {
-                    var reportBox = document.getElementById("reportBox2");
-                    eval(reportBox.options[reportBox.selectedIndex].value + "();")
+            var reportBoxShadow = document.getElementById('reportBoxShadow');
+            var reportBox1 = document.getElementById('reportBox1');
+            var reportBox2 = document.getElementById('reportBox2');
+            var reportBox3 = document.getElementById('reportBox3');
+            for(i = 1; i < reportBoxShadow.length; i++) {
+                // resets the values to defaults before setting new changes
+                // skip 0 element
+                reportBox1.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
+                reportBox2.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
+                reportBox3.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
+            }
+
+            reportBox2.options[reportBox1.selectedIndex].innerHTML = "--";
+            reportBox3.options[reportBox1.selectedIndex].innerHTML = "---";
+
+            reportBox1.options[reportBox2.selectedIndex].innerHTML = "-";
+            reportBox3.options[reportBox2.selectedIndex].innerHTML = "---";
+
+            reportBox1.options[reportBox3.selectedIndex].innerHTML = "-";
+            reportBox2.options[reportBox3.selectedIndex].innerHTML = "--";
+
+            eval(reportBox2.options[reportBox2.selectedIndex].value + "();");
         }
 
         function reportChangeFunc3() {
-                    var reportBox = document.getElementById("reportBox3");
-                    eval(reportBox.options[reportBox.selectedIndex].value + "();")
-        }
+            var reportBoxShadow = document.getElementById('reportBoxShadow');
+            var reportBox1 = document.getElementById('reportBox1');
+            var reportBox2 = document.getElementById('reportBox2');
+            var reportBox3 = document.getElementById('reportBox3');
+            for(i = 1; i < reportBoxShadow.length; i++) {
+                // resets the values to defaults before setting new changes
+                // skip 0 "select" elem
+                reportBox1.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
+                reportBox2.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
+                reportBox3.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
+            }
+
+            reportBox2.options[reportBox1.selectedIndex].innerHTML = "--";
+            reportBox3.options[reportBox1.selectedIndex].innerHTML = "---";
+
+            reportBox1.options[reportBox2.selectedIndex].innerHTML = "-";
+            reportBox3.options[reportBox2.selectedIndex].innerHTML = "---";
+
+            reportBox1.options[reportBox3.selectedIndex].innerHTML = "-";
+            reportBox2.options[reportBox3.selectedIndex].innerHTML = "--";
+
+            eval(reportBox3.options[reportBox3.selectedIndex].value + "();");
+        };
+
+        function clearReportFunction() {
+            var reportBox1 = document.getElementById('reportBox1');
+            var reportBox2 = document.getElementById('reportBox2');
+            var reportBox3 = document.getElementById('reportBox3');
+            eval(reportBox1.options[reportBox1.selectedIndex].value + "();");
+            eval(reportBox2.options[reportBox2.selectedIndex].value + "();");
+            eval(reportBox3.options[reportBox3.selectedIndex].value + "();");
+
+            var reportBoxShadow = document.getElementById('reportBoxShadow');
+            for(i = 1; i < reportBoxShadow.length; i++) {
+                // resets the values to defaults before setting new changes
+                // skip 0 "select" elem
+                reportBox1.options[i].innerHTML = reportBoxShadow.options[i].innerHTML;
+                reportBox2.options[i].innerHTML = reportBoxShadow.options[i].innerHTML;
+                reportBox3.options[i].innerHTML = reportBoxShadow.options[i].innerHTML;
+            };
+
+            reportBox1.selectedIndex = 0;
+            reportBox2.selectedIndex = 0;
+            reportBox3.selectedIndex = 0;
+        };
+
+        var x = document.getElementById("reportBoxShadow");
+        x.style.display = "none";
 
         var x = document.getElementById("biggrid$REPORT_NAME");
         x.style.display = "none";
         var x = document.getElementById("bigchart$REPORT_NAME");
         x.style.display = "none";
         var x = document.getElementById("bigvert$REPORT_NAME");
-        x.style.display = "none";
-        var x = document.getElementById("animated_vertical");
         x.style.display = "none";
         """ % (str(report_index_value))
         bt = Template(button_function)
@@ -344,6 +429,12 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info):
         report_string = t.substitute(PAGE_NAME=page_name, JAVASCRIPT_NOTE_DATA=javascript_note_data_string, LANE_NAMES=str([LANES_LOOKUP[i] for i in range(N_LANES)]), LANE_TIME_END=end_time, INFO_TAG=info_tag, BUTTON_HTML=button_html, BUTTON_FUNCTION=button_function, REPORT_NAME="report{}".format(report_index_value))
         final_report_string += report_string
 
+    invis_selection_dropdown_string_pre = """
+	<div id="dropdown" display="none">
+        <select id="reportBox%s" onchange="reportChangeFunc%s();" display="none">
+            <option value="Select a preset report" display="none">Select a report</option>
+    """
+
     selection_dropdown_string_pre = """
 	<div id="dropdown" display="inline-block">
         <select id="reportBox%s" onchange="reportChangeFunc%s();">
@@ -358,11 +449,15 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info):
     selection_dropdown_string1 = selection_dropdown_string_pre % (str(1), str(1)) + selection_dropdown_string_core + selection_dropdown_string_post
     selection_dropdown_string2 = selection_dropdown_string_pre % (str(2), str(2)) + selection_dropdown_string_core + selection_dropdown_string_post
     selection_dropdown_string3 = selection_dropdown_string_pre % (str(3), str(3)) + selection_dropdown_string_core + selection_dropdown_string_post
+    shadow_selection_dropdown_string = invis_selection_dropdown_string_pre % ("Shadow", "Shadow") + selection_dropdown_string_core + selection_dropdown_string_post + "\n"
 
-    selection_dropdown_string = '\n<table>\n    <tr>\n    <td>\n' + selection_dropdown_string1 + "\n"
-    selection_dropdown_string += '    </td>\n' + '    <td>\n' + selection_dropdown_string2 + "\n"
-    selection_dropdown_string += '    </td>\n' + '    <td>\n' + selection_dropdown_string3 + "\n"
-    selection_dropdown_string += '    </td>\n' + '    </td>\n' + '</table>\n'
+    selection_dropdown_string = shadow_selection_dropdown_string
+    selection_dropdown_string += '\n<table>\n    <tr>\n'
+    selection_dropdown_string += '<td><button onclick="clearReportFunction()">Clear Reports</button></td>\n'
+    selection_dropdown_string += '    <td>\n' + selection_dropdown_string1 + "\n    </td>\n"
+    selection_dropdown_string += '    <td>\n' + selection_dropdown_string2 + "\n    </td>\n"
+    selection_dropdown_string += '    <td>\n' + selection_dropdown_string3 + "\n    </td>\n"
+    selection_dropdown_string += '    </tr>\n' + '</table>\n'
     return midijs_str + webaudio_str + midi_player_string + selection_dropdown_string + final_report_string
 
 

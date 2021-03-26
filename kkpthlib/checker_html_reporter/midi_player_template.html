@@ -4,14 +4,16 @@
     <meta http-equiv="Content-Type" content="text/html;charset=utf-8">
     <script>
         function move_bar(leftStart = '0') {
-            var el = document.getElementById('animated_vertical');
-            var maxLS = String(Math.max(0, Math.min(parseFloat(leftStart), 100)))
+            var els = document.getElementsByClassName('vertical');
+            for (var i = 0; i < els.length; i++) {
+                el = els.item(i)
+                var maxLS = String(Math.max(0, Math.min(parseFloat(leftStart), 100)))
+                el.style.setProperty('--leftStart', maxLS + '%')
 
-            el.style.setProperty('--leftStart', maxLS + '%')
-
-            el.style.animation = 'none';
-            el.offsetHeight; /* trigger reflow */
-            el.style.animation = null; 
+                el.style.animation = 'none';
+                el.offsetHeight; /* trigger reflow */
+                el.style.animation = null; 
+            }
         }
     </script>
     <script>
@@ -202,8 +204,9 @@
 			audioContext.resume();
 			var o = document.getElementById('cntls');
 			var html = ''
-            html = html + '<h2 id="title"></h2>';
+            //html = html + '<h2 id="title"></h2>';
             //html = html + '<h2 id="wrng">Controls</h2>';
+            html = html + '<small id="title"></small>';
 			html = html + '<div display="flex"><button id="tmr" onclick="go();">Play (Tempo)</button><input name="tempobox1" value="160" type="text" id="tmpo1"/></div>';
 			html = html + '<p><input id="position" type="range" min="0" max="100" value="0" step="1" /></p>';
 
