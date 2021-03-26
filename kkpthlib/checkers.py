@@ -20,6 +20,7 @@ from .core import get_cache_dir
 from .datasets import music_json_to_midi
 from .datasets import music21_parse_and_save_json
 from .checker_html_reporter import make_index_html_string
+from .checker_html_reporter import make_index_html_string2
 from .checker_html_reporter import make_website_string
 from .checker_html_reporter import make_plot_json
 from .checker_html_reporter import midi_to_name_lookup 
@@ -498,6 +499,95 @@ def build_music_plagiarism_checkers(metajson_files, roman_reduced_max_order=10, 
             "tenor_pitch_duration_checker": tenor_pitch_duration_checker,
             "bass_pitch_duration_checker": bass_pitch_duration_checker}
 
+
+def extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=None):
+    # match_info[0] is the key itself
+    # match_info[1] is the "number" of the match, if the match occurs multiple times we need to know which match to color
+    tmp_midi_path = "_rpttmp.midi"
+    tmp_json_path = "_rpttmp.json"
+    if os.path.exists(tmp_midi_path):
+        os.remove(tmp_midi_path)
+    if os.path.exists(tmp_json_path):
+        os.remove(tmp_json_path)
+
+    f = midi_or_musicjson_file_path
+    if f.endswith(".json"):
+        music_json_to_midi(f, tmp_midi_path)
+    elif f.endswith(".midi") or f.endswith(".mid"):
+        shutil.copy2(f, tmp_midi_path)
+
+    p = music21_from_midi(tmp_midi_path)
+    core_name = tmp_json_path
+    music21_parse_and_save_json(p, core_name, tempo_factor=1)
+
+    with open(tmp_json_path, "r") as f:
+        music_json_data = json.load(f)
+    l = []
+    marked_l = []
+    for _p in range(len(music_json_data["parts"])):
+        parts = music_json_data["parts"][_p]
+        parts_times = music_json_data["parts_times"][_p]
+        parts_cumulative_times = music_json_data["parts_cumulative_times"][_p]
+        assert len(parts) == len(parts_times)
+        assert len(parts_times) == len(parts_cumulative_times)
+        if match_info is not None:
+            part_note_names = [midi_to_name_lookup[tt] if tt != 0 else "0" for tt in parts]
+            def contains(sub, pri):
+                # print (contains((1,2,3),(1,2,3)))
+                # https://stackoverflow.com/questions/3847386/how-to-test-if-a-list-contains-another-list
+                M, N = len(pri), len(sub)
+                i, LAST = 0, M-N+1
+                while True:
+                    try:
+                        found = pri.index(sub[0], i, LAST) # find first elem in sub
+                    except ValueError:
+                        return False
+                    if pri[found:found+N] == sub:
+                        return [found, found+N-1]
+                    else:
+                        i = found+1
+            # try to do subsequence match here
+            # need to use match_info because there can be multiple matches in a file... don't rematch first over and over
+            start_step = 0
+            matched_at = []
+            run_steps = 0
+            while start_step <= (len(part_note_names) - len(match_info[0])):
+                search_res = contains(match_info[0], part_note_names[start_step:])
+                if search_res is not False:
+                    matched_at.append((start_step + search_res[0], start_step + search_res[1]))
+                    start_step = start_step + search_res[0] + 1
+                else:
+                    break
+
+        for _s in range(len(parts)):
+            # should be ok to skip rests...
+            if parts[_s] == 0:
+                continue
+            d = parts_times[_s]
+            l.append((parts[_s], parts_cumulative_times[_s] - d, d))
+            if match_info is not None:
+                if len(matched_at) > 0:
+                    which_match = matched_at[match_info[1]]
+                    match_steps = list(range(which_match[0], which_match[1] + 1))
+                    if _s in match_steps:
+                        marked_l.append(True)
+                    else:
+                        marked_l.append(False)
+                else:
+                    marked_l.append(False)
+            else:
+                marked_l.append(False)
+
+    # want them all to end at the same place
+    #last_step = max([t[1] for t in l])
+    #last_step_dur = max([t[2] for t in l if t[1] == last_step])
+    #end_time = last_step + last_step_dur
+
+    end_time = 120
+    r = make_plot_json(l, notes_to_highlight=marked_l)
+    return [r, l, marked_l]
+
+
 def write_html_report_for_musicjson(midi_or_musicjson_file_path, html_report_write_directory, match_info=None, report_index_value=0, info_tag=None):
     # match_info[0] is the key itself
     # match_info[1] is the "number" of the match, if the match occurs multiple times we need to know which match to color
@@ -776,6 +866,8 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                 raise ValueError("Currently only supports maxorder_violations = 0 aka report the highest maxorder violations from check")
 
             # if there are violations, iterate them and copy the files to "maxorder_match_dir"
+            every_match_file = [midi_or_musicjson_file_path]
+            every_match_tree = {}
             if len(v[last_key]) > 0:
                 report_index_value = 0
                 report_index_names = []
@@ -785,6 +877,7 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                     for el in vi:
                         match_fpath = el[0]
                         match_step = el[1]
+                        every_match_file.append(match_fpath)
                         if os.path.exists(match_fpath):
                             if not os.path.exists(check_file_copy_dir):
                                 os.mkdir(check_file_copy_dir)
@@ -849,6 +942,10 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                                     if el[1] == _el[1]:
                                         break
 
+                            if match_fpath not in every_match_tree:
+                                every_match_tree[match_fpath] = []
+                            every_match_tree[match_fpath].append([ki[0], ki[1], which_match, n_matches])
+
                             write_html_report_for_musicjson(match_fpath, subsubfolder,
                                                             match_info=(match_note_names, which_match),
                                                             report_index_value=report_index_value,
@@ -859,9 +956,45 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                             print("path fail?")
                             from IPython import embed; embed(); raise ValueError()
 
+                # dedupe every_match
+                dedupe = []
+                for em in every_match_file:
+                    if em in dedupe:
+                        continue
+                    else:
+                        dedupe.append(em)
+                every_match_file = dedupe
+
+                base64_midis = []
+                for em in every_match_file:
+                    # write out the html with minor modifications for lane names
+                    with open(em, "rb") as f:
+                         base64_midi = base64.b64encode(f.read()).decode("utf-8")
+                    base64_midis.append(base64_midi)
+
+                all_javascript_note_info = []
+                for em in every_match_file:
+                    if em in every_match_tree:
+                        match_str = every_match_tree[em][0][0]
+                        el_vals = [int(el) for el in (":".join(match_str.split("->"))).split(":")]
+                        match_note_names = [midi_to_name_lookup[el_i] for el_i in el_vals]
+                        which_match = every_match_tree[em][0][2]
+                        match_info = (match_note_names, which_match)
+                    else:
+                        match_info = None
+                    r, l, marked_l = extract_plot_info_from_file(em, match_info=match_info)
+                    all_javascript_note_info.append(r)
+                #r, l, marked_l = extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=None)
+
+                w = make_index_html_string2(base64_midis, [em.split(os.sep)[-1] for em in every_match_file], all_javascript_note_info)
+                with open(subsubfolder + os.sep + "test_report" + os.sep + "0_index.html", "w") as f:
+                    f.write(w)
+
+                """
                 w = make_index_html_string([("report{}".format(i), report_index_names[i]) for i in range(report_index_value)])
                 with open(subsubfolder + os.sep + "test_report" + os.sep + "0_index.html", "w") as f:
                     f.write(w)
+                """
         print("report complete")
         from IPython import embed; embed(); raise ValueError()
 

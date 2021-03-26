@@ -179,6 +179,7 @@ def make_plot_json(list_of_notes, notes_to_highlight=None):
         cur = cur + c
     return cur[:-2] + post + code_stub
 
+
 def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot", end_time=120, info_tag=None, report_index_value=0, base64_midi=None, midi_name=None):
     from string import Template
     plot_module_path = __file__
@@ -230,6 +231,216 @@ def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot"
         webaudio_str += f.read()
     webaudio_str += '</script>\n'
     return midijs_str + webaudio_str + midi_player_string + report_string
+
+
+def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info):
+    from string import Template
+    plot_module_path = __file__
+    plot_module_dir = str(os.sep).join(os.path.split(plot_module_path)[:-1])
+    with open(plot_module_dir + os.sep + "midi_player_template.html", "r") as f:
+        l = f.read()
+    t2 = Template(l)
+
+    option_file_str = ''
+    for _i in range(len(midi_names)):
+        midi_name = midi_names[_i]
+        base64_midi = base64_midis[_i]
+        option_file_str += '<option value="{}">{}</option>\n'.format(base64_midi, midi_name)
+    midi_player_string = t2.substitute(MIDI_FILES_OPTION_LIST=option_file_str)
+
+    midijs_str = '<script type="text/javascript">\n'
+    with open(plot_module_dir + os.sep + "MIDIFile.js", "r") as f:
+        midijs_str += f.read()
+    midijs_str += '</script>\n'
+
+    webaudio_str = '<script type="text/javascript">\n'
+    with open(plot_module_dir + os.sep + "WebAudioFontPlayer.js", "r") as f:
+        webaudio_str += f.read()
+    webaudio_str += '</script>\n'
+    # need to do midi player first, with ALL audio file names...
+    # then div + buttons
+
+    with open(plot_module_dir + os.sep + "report_template.html", "r") as f:
+        l = f.read()
+    t = Template(l)
+    final_report_string = ""
+    selection_dropdown_string_core = ""
+    for _i in range(len(all_javascript_note_info)):
+        report_index_value = _i
+        info_tag = None
+        page_name="Piano Roll Plot"
+        end_time=120
+        javascript_note_data_string=all_javascript_note_info[_i]
+
+        button_function = """
+        function toggleReport%sFunction() {
+            var x = document.getElementById("biggrid$REPORT_NAME");
+            if (x.style.display === "none") {
+                x.style.display = "block";
+            } else {
+                x.style.display = "none";
+            }
+            var x = document.getElementById("bigchart$REPORT_NAME");
+            if (x.style.display === "none") {
+                x.style.display = "block";
+            } else {
+                x.style.display = "none";
+            }
+            var x = document.getElementById("bigvert$REPORT_NAME");
+            if (x.style.display === "none") {
+                x.style.display = "block";
+            } else {
+                x.style.display = "none";
+            }
+            var x = document.getElementById("animated_vertical");
+            if (x.style.display === "none") {
+                x.style.display = "block";
+            } else {
+                x.style.display = "none";
+            }
+        }
+
+        function reportChangeFunc1() {
+                    var reportBox = document.getElementById("reportBox1");
+                    eval(reportBox.options[reportBox.selectedIndex].value + "();")
+        }
+
+        function reportChangeFunc2() {
+                    var reportBox = document.getElementById("reportBox2");
+                    eval(reportBox.options[reportBox.selectedIndex].value + "();")
+        }
+
+        function reportChangeFunc3() {
+                    var reportBox = document.getElementById("reportBox3");
+                    eval(reportBox.options[reportBox.selectedIndex].value + "();")
+        }
+
+        var x = document.getElementById("biggrid$REPORT_NAME");
+        x.style.display = "none";
+        var x = document.getElementById("bigchart$REPORT_NAME");
+        x.style.display = "none";
+        var x = document.getElementById("bigvert$REPORT_NAME");
+        x.style.display = "none";
+        var x = document.getElementById("animated_vertical");
+        x.style.display = "none";
+        """ % (str(report_index_value))
+        bt = Template(button_function)
+        button_function = bt.substitute(REPORT_NAME="report{}".format(report_index_value))
+
+        selection_dropdown_string_core += '        <option value="toggleReport%sFunction">Report %s</option>\n' % (str(report_index_value), str(report_index_value))
+
+        button_html = '<button position="relative" onclick="toggleReport%sFunction()">Toggle Report %s Info</button>' % (str(report_index_value), str(report_index_value))
+        button_html = ''
+
+        info_tag_core = info_tag
+
+        info_tag = '<div class="section" id="biginforeport%s" display="block">\n' % str(report_index_value)
+        if info_tag_core is None:
+            info_tag += ""
+        else:
+            info_tag += info_tag_core
+        info_tag += '\n</div>\n'
+        # if we reverse the list, we reverse the axis
+        report_string = t.substitute(PAGE_NAME=page_name, JAVASCRIPT_NOTE_DATA=javascript_note_data_string, LANE_NAMES=str([LANES_LOOKUP[i] for i in range(N_LANES)]), LANE_TIME_END=end_time, INFO_TAG=info_tag, BUTTON_HTML=button_html, BUTTON_FUNCTION=button_function, REPORT_NAME="report{}".format(report_index_value))
+        final_report_string += report_string
+
+    selection_dropdown_string_pre = """
+	<div id="dropdown" display="inline-block">
+        <select id="reportBox%s" onchange="reportChangeFunc%s();">
+            <option value="Select a preset report">Select a report</option>
+    """
+
+    selection_dropdown_string_post = """
+        </select>
+	</div>
+    """
+
+    selection_dropdown_string1 = selection_dropdown_string_pre % (str(1), str(1)) + selection_dropdown_string_core + selection_dropdown_string_post
+    selection_dropdown_string2 = selection_dropdown_string_pre % (str(2), str(2)) + selection_dropdown_string_core + selection_dropdown_string_post
+    selection_dropdown_string3 = selection_dropdown_string_pre % (str(3), str(3)) + selection_dropdown_string_core + selection_dropdown_string_post
+
+    selection_dropdown_string = '\n<table>\n    <tr>\n    <td>\n' + selection_dropdown_string1 + "\n"
+    selection_dropdown_string += '    </td>\n' + '    <td>\n' + selection_dropdown_string2 + "\n"
+    selection_dropdown_string += '    </td>\n' + '    <td>\n' + selection_dropdown_string3 + "\n"
+    selection_dropdown_string += '    </td>\n' + '    </td>\n' + '</table>\n'
+    return midijs_str + webaudio_str + midi_player_string + selection_dropdown_string + final_report_string
+
+
+def hodl():
+    from string import Template
+    plot_module_path = __file__
+    plot_module_dir = str(os.sep).join(os.path.split(plot_module_path)[:-1])
+    with open(plot_module_dir + os.sep + "index_template.html", "r") as f:
+        l = f.read()
+
+    report_first_div_template = '\n<div class="first-container" id="big{}_index" display="none"></div>\n'
+    report_secondary_div_template = '\n<div class="secondary-container" id="big{}_index" display="none"></div>\n'
+    report_load_template = "<script>\n$('#big{}_index').load('{}.html');"
+    report_load_template += '$("#big{}_index").hide();\n</script>\n'
+    report_button_function_template = """
+    <script>
+    function toggleBig%sIndexFunction() {
+        var btn = document.getElementById("toggleBig%sIndex")
+        var x = document.getElementById("big%s_index");
+        btn.style.borderStyle = (btn.style.borderStyle!=='inset' ? 'inset' : 'outset')
+        if (x.style.display === "none") {
+            x.style.display = "block";
+        } else {
+            x.style.display = "none";
+        }
+    }
+    </script>
+    """
+    report_button_html_template = '<button id="toggleBig%sIndex" onclick="toggleBig%sIndexFunction()">%s (%s)</button>'
+    index_chunk = "\n"
+    # do buttons, then divsm then functions
+    for tup in list_of_report_file_base_name_tuples:
+        name = tup[0]
+        data_fname = tup[1]
+        index_chunk = index_chunk + report_button_function_template % (name, name, name)
+        index_chunk = index_chunk + report_button_html_template % (name, name, name, data_fname)
+
+    for _i, tup in enumerate(list_of_report_file_base_name_tuples):
+        name = tup[0]
+        if _i == 0:
+            index_chunk = index_chunk + report_first_div_template.format(name)
+        else:
+            index_chunk = index_chunk + report_secondary_div_template.format(name)
+
+    for tup in list_of_report_file_base_name_tuples:
+        name = tup[0]
+        index_chunk = index_chunk + report_load_template.format(name, name, name)
+        index_chunk = index_chunk + "\n"
+    '''
+    report_div_template = '<div id="{}"></div>\n'
+    report_load_template = "    $('#{}').load('{}.html');\n"
+    index_chunk = "\n"
+    # do divs
+    for name in list_of_report_file_base_names:
+        index_chunk = index_chunk + report_div_template.format(name)
+    # do script tag
+    index_chunk = index_chunk + "<script>\n"
+    # do loads
+    for name in list_of_report_file_base_names:
+        index_chunk = index_chunk + report_load_template.format(name, name)
+    # end script
+    index_chunk = index_chunk + "</script>\n"
+    '''
+
+    # unused example of what it should look like
+    """
+    example_index_chunk = '''
+    <div id="report1"></div>
+    <div id="report2"></div>
+
+    <script>
+        $('#report1').load('report1.html');
+        $('#report2').load('report2.html');
+    </script>
+    '''
+    """
+    t = Template(l)
+    return t.substitute(INDEX_BODY=index_chunk)
 
 
 def make_index_html_string(list_of_report_file_base_name_tuples):

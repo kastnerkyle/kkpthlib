@@ -9,11 +9,32 @@
     </script>
 
     <style type="text/css">
+        .full-container {
+            position: relative;
+        }
+
         .grid-container {
+            position: relative;
             display: grid;
             grid-template-columns: 1000px 200px;
             grid-gap: 20px;
         }
+
+        .container {
+            height: 225px;
+            width: 818px;
+            position: absolute;
+            top: 0px;
+            left: 118px;
+        }
+
+        .vertical { 
+            --leftStart: 0%;
+            border-left: 2px solid gray; 
+            height: 225px; 
+            position: absolute;
+            left: var(--leftStart);
+        } 
 
         .section {
             display: flex;
@@ -55,12 +76,20 @@
 
     </style>
 </head>
-<body>
 
-<div class="grid-container">
-<div class="section" id="big$REPORT_NAME" display="none"></div>
-$BUTTON_HTML
+<div id="big$REPORT_NAME" class="full-container">
+
+<div id="biggrid$REPORT_NAME" class="grid-container">
+<div class="section" id="bigchart$REPORT_NAME"></div>
 $INFO_TAG
+</div>
+
+<div id="bigvert$REPORT_NAME" class="container">
+    <div id="animated_vertical" class= "vertical"></div>
+</div>
+
+$BUTTON_HTML
+
 </div>
 
 <script type="text/javascript">
@@ -97,7 +126,7 @@ $INFO_TAG
         drag = d3.behavior.drag() //when moving rect from left side, other components of rectangle need to be resized   //so we must include this...i think
             .on("drag", dragmove);
 
-    chart = d3.select("#big$REPORT_NAME")
+    chart = d3.select("#bigchart$REPORT_NAME")
     //chart = d3.select("body")
         .append("svg")
         .attr("width", w + m[1] + m[3])
@@ -196,8 +225,4 @@ $INFO_TAG
     $BUTTON_FUNCTION
 
 </script>
-<div id="vertical_container" class="container">
-    <div id="animated_vertical" class= "vertical"></div> 
-</div>
-</body>
 </html>

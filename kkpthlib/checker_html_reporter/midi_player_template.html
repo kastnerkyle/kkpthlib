@@ -2,24 +2,6 @@
 <html>
 <head>
     <meta http-equiv="Content-Type" content="text/html;charset=utf-8">
-    <!-- border-left property is used to 
-        create vertical line -->
-    <style> 
-        .container {
-            height: 225px;
-            width: 818px;
-            position: relative;
-            top:-300px;
-            left: 118px;
-        }
-        .vertical { 
-            --leftStart: 0%;
-            border-left: 2px solid gray; 
-            height: 225px; 
-            position: relative;
-            left: var(--leftStart);
-        } 
-    </style> 
     <script>
         function move_bar(leftStart = '0') {
             var el = document.getElementById('animated_vertical');
@@ -89,6 +71,7 @@
              $MIDI_FILES_OPTION_LIST
         </select>
 	</div>
+    <div id="songref"></div>
 	<div id='cntls'>
 		<p><input type="file" id="filesinput" name="filesarr[]" />v1.16</p>
 	</div>
@@ -106,6 +89,21 @@
 				document.getElementById('tmr').innerHTML = 'error ' + expt;
 			}
 		}
+
+        function mutechannel0(checkboxElem) {
+            if (checkboxElem.checked) {
+                var song = document.getElementById('songref').value
+                var vlm = document.getElementById('channel0');
+                vlm.value = 0.000001;
+				song.tracks[0].volume = 0.0;
+            } else {
+                var song = document.getElementById('songref').value
+                var vlm = document.getElementById('channel0');
+                vlm.value = 100;
+                song.tracks[0].volume = 1.0;
+            }
+        }
+
 		function startPlay(song) {
 			currentSongTime = 0;
 			songStart = audioContext.currentTime;
@@ -113,6 +111,7 @@
 			var stepDuration = 44 / 1000;
 			tick(song, stepDuration);
 		}
+
 		function tick(song, stepDuration) {
 			if (audioContext.currentTime > nextStepTime - stepDuration) {
 				sendNotes(song, songStart, currentSongTime, currentSongTime + stepDuration, audioContext, input, player);
@@ -172,6 +171,7 @@
 			}
 		}
 		function startLoad(song) {
+            document.getElementById('songref').value = song
 			console.log(song);
 			var AudioContextFunc = window.AudioContext || window.webkitAudioContext;
 			audioContext = new AudioContextFunc();
@@ -202,26 +202,46 @@
 			audioContext.resume();
 			var o = document.getElementById('cntls');
 			var html = ''
-            html = html + '<h3 id="title"></h3>';
-            html = html + '<h3 id="wrng">Controls</h3>';
+            html = html + '<h2 id="title"></h2>';
+            //html = html + '<h2 id="wrng">Controls</h2>';
 			html = html + '<div display="flex"><button id="tmr" onclick="go();">Play (Tempo)</button><input name="tempobox1" value="160" type="text" id="tmpo1"/></div>';
 			html = html + '<p><input id="position" type="range" min="0" max="100" value="0" step="1" /></p>';
 
-			html = html + '<h4>Channels</h4>';
+			//html = html + '<h2>Channels</h2>';
+			//for (var i = 0; i < song.tracks.length; i++) {
+			//	var v = 100 * song.tracks[i].volume;
+			//	html = html + '<p>' + chooserIns(song.tracks[i].id, i) + '<input id="channel' + i + '" type="range" min="0" max="100" value="' + v + '" step="1" /></p>';
+			//}
+
+			//html = html + '<h2>Drums</h2>';
+			//for (var i = 0; i < song.beats.length; i++) {
+			//	var v = 100 * song.beats[i].volume;
+			//	html = html + '<p>' + chooserDrum(song.beats[i].id, i) + '<input id="drum' + i + '" type="range" min="0" max="100" value="' + v + '" step="1" /></p>';
+			//}
+
+            html = html + '<table>\n    <tr>\n';
 			for (var i = 0; i < song.tracks.length; i++) {
 				var v = 100 * song.tracks[i].volume;
-				html = html + '<p>' + chooserIns(song.tracks[i].id, i) + '<input id="channel' + i + '" type="range" min="0" max="100" value="' + v + '" step="1" /></p>';
+				html = html + '\n    <td>\n    ' + chooserIns(song.tracks[i].id, i) + '\n    </td>\n';
 			}
-			html = html + '<h4>Drums</h4>';
+            html = html + '\n    </tr>\n    <tr>\n';
+
+			for (var i = 0; i < song.tracks.length; i++) {
+				var v = 100 * song.tracks[i].volume;
+				html = html + '<td><input id="channel' + i + '" type="range" min="0" max="100" value="' + v + '" step="1" />';
+                html = html + '<input type="checkbox" name="checkfield' + i + '" id="mute' + i + '"/>Mute</td>';
+			}
+            html = html + '\n    </tr>\n    </table>\n';
+
 			for (var i = 0; i < song.beats.length; i++) {
 				var v = 100 * song.beats[i].volume;
 				html = html + '<p>' + chooserDrum(song.beats[i].id, i) + '<input id="drum' + i + '" type="range" min="0" max="100" value="' + v + '" step="1" /></p>';
 			}
+
 			o.innerHTML = html;
 			console.log('Loaded');
 
             document.getElementById("position").style.display = "none";
-
             var tmp = document.getElementById('title')
             var selectBox = document.getElementById("selectBox");
             var selectedValue = selectBox.options[selectBox.selectedIndex].value;
@@ -237,6 +257,7 @@
 			};
 			console.log('Tracks');
 			for (var i = 0; i < song.tracks.length; i++) {
+                setMuteAction(i, song);
 				setVolumeAction(i, song);
 			}
 			console.log('Drums');
@@ -245,6 +266,35 @@
 			}
 			loadedsong = song;
 		}
+
+		function setMuteAction(i, song) {
+			var ck = document.getElementById('mute' + i);
+			ck.onclick = function (e) {
+				player.cancelQueue(audioContext);
+                var v = 1.0;
+                if (ck.checked) {
+				    v = 0.0;
+                }
+				if (v < 0.000001) {
+					v = 0.000001;
+				}
+				song.tracks[i].volume = v;
+                var vlm = document.getElementById('channel' + i);
+                vlm.value = 100 * v;
+			};
+			var sl = document.getElementById('selins' + i);
+			sl.onchange = function (e) {
+				var nn = sl.value;
+				var info = player.loader.instrumentInfo(nn);
+				player.loader.startLoad(audioContext, info.url, info.variable);
+				player.loader.waitLoad(function () {
+					console.log('loaded');
+					song.tracks[i].info = info;
+					song.tracks[i].id = nn;
+				});
+			};
+		}
+
 		function setVolumeAction(i, song) {
 			var vlm = document.getElementById('channel' + i);
 			vlm.oninput = function (e) {
