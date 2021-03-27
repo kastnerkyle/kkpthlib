@@ -476,7 +476,12 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info, 
         selection_dropdown_string_core += '        <option value="toggleReport%sFunction">%s</option>\n' % (str(report_index_value), match_info[0].split(os.sep)[-1])
 
         button_html = '<button position="relative" onclick="toggleReport%sFunction()">Toggle Report %s Info</button>' % (str(report_index_value), str(report_index_value))
-        button_html = ''
+        if report_index_value == 0:
+            vert = """<div id="bigvertreport0" class="container">
+                          <div id="biganimatedvertreport0" class= "vertical"></div>\n</div>\n"""
+            button_html = vert
+        else:
+            button_html = ""
 
         info_tag = '<div class="section" id="biginforeport%s">\n' % str(report_index_value)
         if match_info[1] == "":
