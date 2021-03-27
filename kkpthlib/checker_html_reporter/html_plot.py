@@ -310,6 +310,28 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info, 
             }
         }
 
+        function clearReport%sFunction() {
+            var x = document.getElementById("biggrid$REPORT_NAME");
+            x.style.display = "none";
+
+            var x = document.getElementById("bigchart$REPORT_NAME");
+            x.style.display = "none";
+
+            var x = document.getElementById("biginfo$REPORT_NAME");
+            x.style.display = "none";
+
+            var x = document.getElementById("bigvert$REPORT_NAME");
+            x.style.display = "none";
+
+            var els = document.getElementsByClassName('vertical');
+            for (var i = 0; i < els.length; i++) {
+                x = els.item(i)
+                if (x.style.display === "block") {
+                    x.style.display = "none";
+                }
+            }
+        }
+
         function reportChangeFunc1() {
             var reportBoxShadow = document.getElementById('reportBoxShadow');
             var reportBox1 = document.getElementById('reportBox1');
@@ -318,6 +340,13 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info, 
             for(i = 1; i < reportBoxShadow.length; i++) {
                 // resets the values to defaults before setting new changes
                 // skip 0 elem
+                if ((i != reportBox2.selectedIndex) && (i != reportBox3.selectedIndex)) {
+                    try {
+                        eval("clearReport" + (i - 1) + "Function();");
+                    } catch(err) {
+
+                    };
+                }
                 reportBox1.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
                 reportBox2.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
                 reportBox3.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
@@ -343,6 +372,13 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info, 
             for(i = 1; i < reportBoxShadow.length; i++) {
                 // resets the values to defaults before setting new changes
                 // skip 0 element
+                if ((i != reportBox1.selectedIndex) && (i != reportBox3.selectedIndex)) {
+                    try {
+                        eval("clearReport" + (i - 1) + "Function();");
+                    } catch(err) {
+
+                    };
+                }
                 reportBox1.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
                 reportBox2.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
                 reportBox3.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
@@ -365,9 +401,17 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info, 
             var reportBox1 = document.getElementById('reportBox1');
             var reportBox2 = document.getElementById('reportBox2');
             var reportBox3 = document.getElementById('reportBox3');
+
             for(i = 1; i < reportBoxShadow.length; i++) {
                 // resets the values to defaults before setting new changes
                 // skip 0 "select" elem
+                if ((i != reportBox1.selectedIndex) && (i != reportBox2.selectedIndex)) {
+                    try {
+                        eval("clearReport" + (i - 1) + "Function();");
+                    } catch(err) {
+
+                    };
+                }
                 reportBox1.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
                 reportBox2.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
                 reportBox3.options[i].innerHTML = reportBoxShadow.options[i].innerHTML
@@ -422,7 +466,7 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info, 
         x.style.display = "none";
         var x = document.getElementById("biginfo$REPORT_NAME");
         x.style.display = "none";
-        """ % (str(report_index_value))
+        """ % (str(report_index_value), str(report_index_value))
 
         bt = Template(button_function)
         button_function = bt.substitute(REPORT_NAME="report{}".format(report_index_value))
