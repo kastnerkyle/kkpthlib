@@ -233,7 +233,7 @@ def make_website_string(javascript_note_data_string, page_name="Piano Roll Plot"
     return midijs_str + webaudio_str + midi_player_string + report_string
 
 
-def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info):
+def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info, all_match_info):
     from string import Template
     plot_module_path = __file__
     plot_module_dir = str(os.sep).join(os.path.split(plot_module_path)[:-1])
@@ -267,7 +267,6 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info):
     selection_dropdown_string_core = ""
     for _i in range(len(all_javascript_note_info)):
         report_index_value = _i
-        info_tag = None
         page_name="Piano Roll Plot"
         end_time=120
         javascript_note_data_string=all_javascript_note_info[_i]
@@ -280,12 +279,21 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info):
             } else {
                 x.style.display = "none";
             }
+
             var x = document.getElementById("bigchart$REPORT_NAME");
             if (x.style.display === "none") {
                 x.style.display = "block";
             } else {
                 x.style.display = "none";
             }
+
+            var x = document.getElementById("biginfo$REPORT_NAME");
+            if (x.style.display === "none") {
+                x.style.display = "block";
+            } else {
+                x.style.display = "none";
+            }
+
             var x = document.getElementById("bigvert$REPORT_NAME");
             if (x.style.display === "none") {
                 x.style.display = "block";
@@ -381,9 +389,13 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info):
             var reportBox1 = document.getElementById('reportBox1');
             var reportBox2 = document.getElementById('reportBox2');
             var reportBox3 = document.getElementById('reportBox3');
-            eval(reportBox1.options[reportBox1.selectedIndex].value + "();");
-            eval(reportBox2.options[reportBox2.selectedIndex].value + "();");
-            eval(reportBox3.options[reportBox3.selectedIndex].value + "();");
+            try {
+                eval(reportBox1.options[reportBox1.selectedIndex].value + "();");
+                eval(reportBox2.options[reportBox2.selectedIndex].value + "();");
+                eval(reportBox3.options[reportBox3.selectedIndex].value + "();");
+            } catch (err) {
+
+            };
 
             var reportBoxShadow = document.getElementById('reportBoxShadow');
             for(i = 1; i < reportBoxShadow.length; i++) {
@@ -408,29 +420,34 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info):
         x.style.display = "none";
         var x = document.getElementById("bigvert$REPORT_NAME");
         x.style.display = "none";
+        var x = document.getElementById("biginfo$REPORT_NAME");
+        x.style.display = "none";
         """ % (str(report_index_value))
+
         bt = Template(button_function)
         button_function = bt.substitute(REPORT_NAME="report{}".format(report_index_value))
 
-        selection_dropdown_string_core += '        <option value="toggleReport%sFunction">Report %s</option>\n' % (str(report_index_value), str(report_index_value))
+        match_info = all_match_info[_i]
+
+        selection_dropdown_string_core += '        <option value="toggleReport%sFunction">%s</option>\n' % (str(report_index_value), match_info[0].split(os.sep)[-1])
 
         button_html = '<button position="relative" onclick="toggleReport%sFunction()">Toggle Report %s Info</button>' % (str(report_index_value), str(report_index_value))
         button_html = ''
 
-        info_tag_core = info_tag
-
-        info_tag = '<div class="section" id="biginforeport%s" display="block">\n' % str(report_index_value)
-        if info_tag_core is None:
-            info_tag += ""
+        info_tag = '<div class="section" id="biginforeport%s">\n' % str(report_index_value)
+        if match_info[1] == "":
+            info_tag_core = "\nSource file: {}<br>\nThis is the data we matched against!<br>\n".format(match_info[0].split(os.sep)[-1])
         else:
-            info_tag += info_tag_core
+            info_tag_core = "\nMatched against file: {}<br>\nMatch sequence: {}<br>\n".format(match_info[0].split(os.sep)[-1], match_info[1])
+
+        info_tag += info_tag_core
         info_tag += '\n</div>\n'
         # if we reverse the list, we reverse the axis
         report_string = t.substitute(PAGE_NAME=page_name, JAVASCRIPT_NOTE_DATA=javascript_note_data_string, LANE_NAMES=str([LANES_LOOKUP[i] for i in range(N_LANES)]), LANE_TIME_END=end_time, INFO_TAG=info_tag, BUTTON_HTML=button_html, BUTTON_FUNCTION=button_function, REPORT_NAME="report{}".format(report_index_value))
         final_report_string += report_string
 
     invis_selection_dropdown_string_pre = """
-	<div id="dropdown" display="none">
+	<div id="dropdown_invis" display="none">
         <select id="reportBox%s" onchange="reportChangeFunc%s();" display="none">
             <option value="Select a preset report" display="none">Select a report</option>
     """

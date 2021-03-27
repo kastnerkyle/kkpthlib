@@ -973,6 +973,7 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                     base64_midis.append(base64_midi)
 
                 all_javascript_note_info = []
+                all_match_info = []
                 for em in every_match_file:
                     if em in every_match_tree:
                         match_str = every_match_tree[em][0][0]
@@ -984,9 +985,14 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                         match_info = None
                     r, l, marked_l = extract_plot_info_from_file(em, match_info=match_info)
                     all_javascript_note_info.append(r)
+                    if match_info is None:
+                        match_info = (em, "", 0)
+                    else:
+                        match_info = (em,) + match_info
+                    all_match_info.append(match_info)
                 #r, l, marked_l = extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=None)
 
-                w = make_index_html_string2(base64_midis, [em.split(os.sep)[-1] for em in every_match_file], all_javascript_note_info)
+                w = make_index_html_string2(base64_midis, [em.split(os.sep)[-1] for em in every_match_file], all_javascript_note_info, all_match_info)
                 with open(subsubfolder + os.sep + "test_report" + os.sep + "0_index.html", "w") as f:
                     f.write(w)
 
