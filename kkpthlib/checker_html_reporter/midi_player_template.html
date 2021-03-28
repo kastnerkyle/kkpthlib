@@ -86,7 +86,19 @@
 			try {
 				startPlay(loadedsong);
 				document.getElementById('tmr').innerHTML = 'playing...';
-                move_bar("0")
+                //move_bar("0")
+
+                var els = document.getElementsByClassName('vertical');
+                var leftStart = 0.0
+                for (var i = 0; i < els.length; i++) {
+                    el = els.item(i)
+                    var maxLS = String(Math.max(0, Math.min(parseFloat(leftStart), 100)))
+                    el.style.setProperty('--leftStart', maxLS + '%')
+
+                    el.style.animation = 'none';
+                    el.offsetHeight; /* trigger reflow */
+                    el.style.animation = null; 
+                }
 			} catch (expt) {
 				document.getElementById('tmr').innerHTML = 'error ' + expt;
 			}
@@ -128,11 +140,34 @@
 			if (nextPositionTime < audioContext.currentTime) {
 				var o = document.getElementById('position');
                 var userTempo = parseInt(document.getElementById('tmpo1').value)
-                var mult = (120.0 / userTempo)
+
+                var mult = (userTempo / 120.0)
+
 				o.value = 100 * currentSongTime / song.duration;
+
                 var pct = Math.min(100, Math.round((100 * currentSongTime) / (song.duration * mult)))
+
 				document.getElementById('tmr').innerHTML = 'Restart (' + pct + '%)';
-                move_bar((100.0 * currentSongTime) / (song.duration * mult))
+
+                //move_bar((100.0 * currentSongTime) / (song.duration * mult))
+
+                var els = document.getElementsByClassName('vertical');
+                for (var i = 0; i < els.length; i++) {
+                    el = els.item(i)
+
+                    var cht = parseFloat(el.getAttribute("data-charttime"))
+                    leftStart = 100.0 * (currentSongTime / cht) * mult * 2.0;
+
+                    var res = leftStart
+
+                    var maxLS = String(Math.max(0, Math.min(res, 100)))
+                    el.style.setProperty('--leftStart', maxLS + '%')
+
+                    el.style.animation = 'none';
+                    el.offsetHeight; /* trigger reflow */
+                    el.style.animation = null; 
+                }
+
 				//nextPositionTime = audioContext.currentTime + 3;
 				nextPositionTime = audioContext.currentTime + .0001;
 			}

@@ -268,7 +268,7 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info, 
     for _i in range(len(all_javascript_note_info)):
         report_index_value = _i
         page_name="Piano Roll Plot"
-        end_time=120
+        end_time=240
         javascript_note_data_string=all_javascript_note_info[_i]
 
         button_function = """
@@ -476,12 +476,22 @@ def make_index_html_string2(base64_midis, midi_names, all_javascript_note_info, 
         selection_dropdown_string_core += '        <option value="toggleReport%sFunction">%s</option>\n' % (str(report_index_value), match_info[0].split(os.sep)[-1])
 
         button_html = '<button position="relative" onclick="toggleReport%sFunction()">Toggle Report %s Info</button>' % (str(report_index_value), str(report_index_value))
+
+        '''
+        if report_index_value != 0:
+            # this is NOT constant... need to dig on the data
+            # for now, don't show the bar for anything but the "base sample"
+            scroll_speed = 0.0
+        '''
+        vert = """<div id="bigvertreport%s" class="container">
+                      <div id="biganimatedvertreport%s" class= "vertical" data-charttime=%s></div>\n</div>\n"""
+        button_html = vert % (str(report_index_value), str(report_index_value), end_time)
+
+        '''
         if report_index_value == 0:
-            vert = """<div id="bigvertreport0" class="container">
-                          <div id="biganimatedvertreport0" class= "vertical"></div>\n</div>\n"""
-            button_html = vert
         else:
             button_html = ""
+        '''
 
         info_tag = '<div class="section" id="biginforeport%s">\n' % str(report_index_value)
         if match_info[1] == "":
