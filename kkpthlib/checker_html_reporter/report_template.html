@@ -148,7 +148,7 @@ $BUTTON_HTML
 
     //mini lanes and texts
     mini.append("g").selectAll(".laneLines")
-        .data(minimalNotesFinal)
+        .data(minimalNotesFinal.concat(minimalNotesHighlightFinal))
         //.data(notes)
         .enter().append("line")
         .attr("x1", 0)
