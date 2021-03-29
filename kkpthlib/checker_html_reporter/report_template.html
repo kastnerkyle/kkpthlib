@@ -181,6 +181,8 @@ $BUTTON_HTML
         .data(minimalNotesFinal)
         .enter().append("rect") //"brush"
         .attr("class", function(d) {return "miniItem";}) //midi
+        .style("fill", function(d) {return d.color;})
+        .style("stroke", function(d) {return d.color;})
         .attr("x", function(d) {return x(d.time);}) //time
         .attr("y", function(d) {return y2(d.lane + .5) - 1;}) //midi
         .attr("width", function(d) {
@@ -194,6 +196,8 @@ $BUTTON_HTML
         .data(minimalNotesHighlightFinal)
         .enter().append("rect") //"brush"
         .attr("class", function(d) {return "miniItemHighlight";}) //midi
+        .style("fill", function(d) {return d.color;})
+        .style("stroke", function(d) {return d.color;})
         .attr("x", function(d) {return x(d.time);}) //time
         .attr("y", function(d) {return y2(d.lane + .5) - 1;}) //midi
         .attr("width", function(d) {

@@ -6,7 +6,7 @@ from music21 import roman, stream, chord, midi, corpus, interval, pitch
 import json
 import shutil
 from operator import itemgetter
-from itertools import groupby
+from itertools import groupby, cycle
 import json
 import base64
 try:
@@ -500,7 +500,7 @@ def build_music_plagiarism_checkers(metajson_files, roman_reduced_max_order=10, 
             "bass_pitch_duration_checker": bass_pitch_duration_checker}
 
 
-def extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=None):
+def extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=None, match_note_color="red"):
     # match_info[0] is the key itself
     # match_info[1] is the "number" of the match, if the match occurs multiple times we need to know which match to color
     tmp_midi_path = "_rpttmp.midi"
@@ -584,7 +584,7 @@ def extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=None):
     #end_time = last_step + last_step_dur
 
     end_time = 120
-    r = make_plot_json(l, notes_to_highlight=marked_l)
+    r = make_plot_json(l, notes_to_highlight=marked_l, match_note_color=match_note_color)
     return [r, l, marked_l]
 
 
@@ -867,7 +867,9 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
 
             # if there are violations, iterate them and copy the files to "maxorder_match_dir"
             every_match_file = [midi_or_musicjson_file_path]
-            every_match_tree = {}
+            every_match_tree = OrderedDict()
+            colorlist = ["yellow", "red", "green", "blue", "darkorange", "purple", "saddlebrown", "coral", "darkcyan"]
+            colorlist = cycle(colorlist)
             if len(v[last_key]) > 0:
                 report_index_value = 0
                 report_index_names = []
@@ -974,6 +976,8 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
 
                 all_javascript_note_info = []
                 all_match_info = []
+                all_marked_l = []
+                all_marked_color = []
                 for em in every_match_file:
                     if em in every_match_tree:
                         match_str = every_match_tree[em][0][0]
@@ -983,14 +987,55 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                         match_info = (match_note_names, which_match)
                     else:
                         match_info = None
-                    r, l, marked_l = extract_plot_info_from_file(em, match_info=match_info)
+                    this_color = next(colorlist)
+                    r, l, marked_l = extract_plot_info_from_file(em, match_info=match_info, match_note_color=this_color)
                     all_javascript_note_info.append(r)
+
+                    all_marked_l.append(marked_l)
+                    all_marked_color.append((em, this_color))
+
                     if match_info is None:
                         match_info = (em, "", 0)
                     else:
                         match_info = (em,) + match_info
                     all_match_info.append(match_info)
-                #r, l, marked_l = extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=None)
+
+                # the first element in the list is always the original file, we can override with the "copymarked" file
+                if len(every_match_tree) > 0:
+                    all_match_keys = OrderedDict()
+                    for _k in every_match_tree.keys():
+                        for _v in every_match_tree[_k]:
+                            all_match_keys[_v[0]] = []
+                            for _c in all_marked_color:
+                                if _c[0] == _k:
+                                    all_match_keys[_v[0]].append(_c)
+
+                    # back match into the source file to make the final plot
+                    all_marked_l = []
+                    all_marked_l_color = []
+                    for _k in all_match_keys.keys():
+                        match_str = _k
+                        el_vals = [int(el) for el in (":".join(match_str.split("->"))).split(":")]
+                        match_note_names = [midi_to_name_lookup[el_i] for el_i in el_vals]
+                        match_info = (match_note_names, 0)
+                        this_color = all_match_keys[_k][0][-1]
+                        r, l, marked_l = extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=match_info, match_note_color=this_color)
+                        all_marked_l.append(marked_l)
+                        all_marked_l_color.append(this_color)
+
+                    final_marked_l = []
+                    for _n in range(len(all_marked_l[0])):
+                        step_colors = []
+                        for _j in range(len(all_marked_l)):
+                            if all_marked_l[_j][_n] != False:
+                                step_colors.append(all_marked_l_color[_j])
+                        if len(step_colors) > 0:
+                            final_marked_l.append(step_colors[0])
+                        else:
+                            final_marked_l.append(False)
+                    r = make_plot_json(l, notes_to_highlight=final_marked_l, match_note_color="magenta")
+                    # replace 0th element with the colored version
+                    all_javascript_note_info[0] = r
 
                 w = make_index_html_string2(base64_midis, [em.split(os.sep)[-1] for em in every_match_file], all_javascript_note_info, all_match_info)
                 with open(subsubfolder + os.sep + "test_report" + os.sep + "0_index.html", "w") as f:

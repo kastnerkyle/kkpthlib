@@ -15,6 +15,7 @@ chunk = '''    "name": "{}",
     "time": {},
     "velocity": {},
     "duration": {},
+    "color": "{}",
     "highlight": "{}"
 '''
 
@@ -153,7 +154,7 @@ def _create_code_stub_combine():
 
 code_stub_combine = _create_code_stub_combine()
 
-def make_chunk(note_tuple, highlight=False):
+def make_chunk(note_tuple, highlight=False, highlight_color="red"):
     midi = note_tuple[0]
     name = midi_to_name_lookup[midi]
     start_time = note_tuple[1]
@@ -161,21 +162,28 @@ def make_chunk(note_tuple, highlight=False):
     duration = note_tuple[2]
     if highlight == True:
         highlight = "yes"
+        color = highlight_color
     else:
         highlight = "no"
-    s = pre_chunk + chunk.format(name, midi, start_time, velocity, duration, highlight) + post_chunk
+        color = "black"
+    s = pre_chunk + chunk.format(name, midi, start_time, velocity, duration, color, highlight) + post_chunk
     return s
 
 code_stub = code_stub_pre + code_stub_init + code_stub_functions + code_stub_combine
-def make_plot_json(list_of_notes, notes_to_highlight=None):
-    # notes to highlight should be the same length as list_of_notes, each entry True or False 
+def make_plot_json(list_of_notes, notes_to_highlight=None, match_note_color="red"):
+    # notes to highlight should be the same length as list_of_notes, each entry True, False, or the name of a specific color
     cur = pre
     # voice track?
     for _n, note in enumerate(list_of_notes):
         if notes_to_highlight is not None:
-            c = make_chunk(note, highlight=notes_to_highlight[_n])
+            if notes_to_highlight[_n] == False:
+                c = make_chunk(note, highlight=notes_to_highlight[_n], highlight_color=match_note_color)
+            elif notes_to_highlight[_n] == True:
+                c = make_chunk(note, highlight=notes_to_highlight[_n], highlight_color=match_note_color)
+            else:
+                c = make_chunk(note, highlight=True, highlight_color=notes_to_highlight[_n])
         else:
-            c = make_chunk(note, highlight=False)
+            c = make_chunk(note, highlight=False, highlight_color=match_note_color)
         cur = cur + c
     return cur[:-2] + post + code_stub
 
