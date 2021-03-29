@@ -500,7 +500,7 @@ def build_music_plagiarism_checkers(metajson_files, roman_reduced_max_order=10, 
             "bass_pitch_duration_checker": bass_pitch_duration_checker}
 
 
-def extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=None, match_note_color="red"):
+def extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=None, match_type=None, match_note_color="red"):
     # match_info[0] is the key itself
     # match_info[1] is the "number" of the match, if the match occurs multiple times we need to know which match to color
     tmp_midi_path = "_rpttmp.midi"
@@ -531,7 +531,11 @@ def extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=None, ma
         assert len(parts) == len(parts_times)
         assert len(parts_times) == len(parts_cumulative_times)
         if match_info is not None:
-            part_note_names = [midi_to_name_lookup[tt] if tt != 0 else "0" for tt in parts]
+            if match_type == "pitch_duration":
+                el_vals = list(zip(parts, parts_times))
+                part_note_names = [(midi_to_name_lookup[el_i[0]] if el_i[0] != 0 else "0", el_i[1]) for el_i in el_vals]
+            elif match_type == "pitch":
+                part_note_names = [midi_to_name_lookup[tt] if tt != 0 else "0" for tt in parts]
             def contains(sub, pri):
                 # print (contains((1,2,3),(1,2,3)))
                 # https://stackoverflow.com/questions/3847386/how-to-test-if-a-list-contains-another-list
@@ -588,7 +592,7 @@ def extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=None, ma
     return [r, l, marked_l]
 
 
-def write_html_report_for_musicjson(midi_or_musicjson_file_path, html_report_write_directory, match_info=None, report_index_value=0, info_tag=None):
+def write_html_report_for_musicjson(midi_or_musicjson_file_path, html_report_write_directory, match_info=None, match_type=None, report_index_value=0, info_tag=None):
     # match_info[0] is the key itself
     # match_info[1] is the "number" of the match, if the match occurs multiple times we need to know which match to color
     tmp_midi_path = "_rpttmp.midi"
@@ -619,7 +623,13 @@ def write_html_report_for_musicjson(midi_or_musicjson_file_path, html_report_wri
         assert len(parts) == len(parts_times)
         assert len(parts_times) == len(parts_cumulative_times)
         if match_info is not None:
-            part_note_names = [midi_to_name_lookup[tt] if tt != 0 else "0" for tt in parts]
+            if match_type == "pitch_duration":
+                el_vals = list(zip(parts, parts_times))
+                part_note_names = [(midi_to_name_lookup[el_i[0]] if el_i[0] != 0 else "0", el_i[1]) for el_i in el_vals]
+            elif match_type == "pitch":
+                part_note_names = [midi_to_name_lookup[tt] if tt != 0 else "0" for tt in parts]
+            else:
+                raise ValueError("Unknown match_type specified in write_html_report_for_musicjson")
             def contains(sub, pri):
                 # print (contains((1,2,3),(1,2,3)))
                 # https://stackoverflow.com/questions/3847386/how-to-test-if-a-list-contains-another-list
@@ -866,8 +876,8 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
             if report_maxorder_violations != 0:
                 raise ValueError("Currently only supports maxorder_violations = 0 aka report the highest maxorder violations from check")
 
-            if "names" in k or "duration" in k:
-                # skip both name and duration for now...
+            if "names" in k:
+                # skip fancy plots for 'name' analysis for now...
                 if len(v[last_key]) > 0:
                     for ki, vi in v[last_key].items():
                         for el in vi:
@@ -886,6 +896,10 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                                 shutil.copy2(match_fpath, maxorder_match_dir)
                 continue
 
+            if "duration" in k:
+                match_type = "pitch_duration"
+            else:
+                match_type = "pitch"
 
             # if there are violations, iterate them and copy the files to "maxorder_match_dir"
             every_match_file = [midi_or_musicjson_file_path]
@@ -922,10 +936,16 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                                 # loop through all keys?
                                 reduced_match_strings = []
                                 for _ki, _vi in v[last_key].items():
-                                    el_vals = [int(el) for el in (":".join(_ki[0].split("->"))).split(":")]
-                                    step_el = _ki[1]
-                                    match_note_names = [midi_to_name_lookup[el_i] if el_i != 0 else "0" for el_i in el_vals]
-                                    match_str = ":".join(match_note_names)
+                                    if match_type == "pitch_duration":
+                                        el_vals = [eval(el) for el in (":".join(_ki[0].split("->"))).split(":")]
+                                        step_el = _ki[1]
+                                        match_note_names = [(midi_to_name_lookup[el_i[0]] if el_i[0] != 0 else "0", el_i[1]) for el_i in el_vals]
+                                        match_str = ":".join([str(e) for e in match_note_names])
+                                    elif match_type == "pitch":
+                                        el_vals = [int(el) for el in (":".join(_ki[0].split("->"))).split(":")]
+                                        step_el = _ki[1]
+                                        match_note_names = [midi_to_name_lookup[el_i] if el_i != 0 else "0" for el_i in el_vals]
+                                        match_str = ":".join(match_note_names)
                                     if match_str in reduced_match_strings:
                                         # skip strings that we already handled
                                         continue
@@ -936,6 +956,7 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
 
                                         write_html_report_for_musicjson(midi_or_musicjson_file_path, subsubfolder,
                                                                         match_info=(match_note_names, 0),
+                                                                        match_type=match_type,
                                                                         report_index_value=report_index_value,
                                                                         info_tag=info_tag)
                                         report_index_value += 1
@@ -946,12 +967,20 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                             match_fname = match_fpath.split(os.sep)[-1]
                             info_tag = ""
                             info_tag += "\n<br>Report report{}\n<br>Checker: {}\n<br>Match sequence: {}\n<br>Matched against file: {}\n<br>Match start step: {}\n<br>Query file: {}\n<br>Query start step: {}\n<br>".format(report_index_value, k, ki[0], match_fname, match_step, midi_or_musicjson_file_path, ki[1])
-                            # TODO: TAG EVERYTHING WITH THE REPORT ID FOR UNIQUE MATCH/TOGGLE, WRITE OUT UNIQUE JS PER DIV... OY
+                            if match_type == "pitch_duration":
+                                # ki NOT _ki!
+                                el_vals = [eval(el) for el in (":".join(ki[0].split("->"))).split(":")]
+                                step_el = ki[1]
+                                match_note_names = [(midi_to_name_lookup[el_i[0]] if el_i[0] != 0 else "0", el_i[1]) for el_i in el_vals]
+                            elif match_type == "pitch":
+                                el_vals = [int(el) for el in (":".join(ki[0].split("->"))).split(":")]
+                                step_el = ki[1]
+                                match_note_names = [midi_to_name_lookup[el_i] if el_i != 0 else "0" for el_i in el_vals]
 
                             # find the number of matches for this key, and send "which one" to the html writer... kinda hacky
-                            el_vals = [int(el) for el in (":".join(ki[0].split("->"))).split(":")]
-                            step_el = ki[1]
-                            match_note_names = [midi_to_name_lookup[el_i] if el_i != 0 else "0" for el_i in el_vals]
+                            #el_vals = [int(el) for el in (":".join(ki[0].split("->"))).split(":")]
+                            #step_el = ki[1]
+                            #match_note_names = [midi_to_name_lookup[el_i] if el_i != 0 else "0" for el_i in el_vals]
 
                             which_match = 0
                             n_matches = 0
@@ -973,6 +1002,7 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
 
                             write_html_report_for_musicjson(match_fpath, subsubfolder,
                                                             match_info=(match_note_names, which_match),
+                                                            match_type=match_type,
                                                             report_index_value=report_index_value,
                                                             info_tag=info_tag)
                             report_index_value += 1
@@ -1007,13 +1037,17 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
 
                         for _s in range(len(every_match_tree[em])):
                             match_str = every_match_tree[em][_s][0]
-                            el_vals = [int(el) for el in (":".join(match_str.split("->"))).split(":")]
-                            match_note_names = [midi_to_name_lookup[el_i] if el_i != 0 else "0" for el_i in el_vals]
+                            if match_type == "pitch_duration":
+                                el_vals = [eval(el) for el in (":".join(match_str.split("->"))).split(":")]
+                                match_note_names = [(midi_to_name_lookup[el_i[0]] if el_i[0] != 0 else "0", el_i[1]) for el_i in el_vals]
+                            elif match_type == "pitch":
+                                el_vals = [int(el) for el in (":".join(match_str.split("->"))).split(":")]
+                                match_note_names = [midi_to_name_lookup[el_i] if el_i != 0 else "0" for el_i in el_vals]
                             which_match = every_match_tree[em][_s][2]
                             match_info = (match_note_names, which_match)
 
                             this_color = next(colorlist)
-                            r, l, marked_l = extract_plot_info_from_file(em, match_info=match_info, match_note_color=this_color)
+                            r, l, marked_l = extract_plot_info_from_file(em, match_info=match_info, match_type=match_type, match_note_color=this_color)
                             all_javascript_note_info.append(r)
 
                             all_marked_l.append(marked_l)
@@ -1027,7 +1061,7 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                     else:
                         match_info = None
                         this_color = next(colorlist)
-                        r, l, marked_l = extract_plot_info_from_file(em, match_info=match_info, match_note_color=this_color)
+                        r, l, marked_l = extract_plot_info_from_file(em, match_info=match_info, match_type=match_type, match_note_color=this_color)
                         all_javascript_note_info.append(r)
 
                         all_marked_l.append(marked_l)
@@ -1053,11 +1087,15 @@ def evaluate_music_against_checkers(midi_or_musicjson_file_path, checkers, write
                     all_marked_l_color = []
                     for _k in all_match_keys.keys():
                         match_str = _k
-                        el_vals = [int(el) for el in (":".join(match_str.split("->"))).split(":")]
-                        match_note_names = [midi_to_name_lookup[el_i] if el_i != 0 else "0" for el_i in el_vals]
+                        if match_type == "pitch_duration":
+                            el_vals = [eval(el) for el in (":".join(match_str.split("->"))).split(":")]
+                            match_note_names = [(midi_to_name_lookup[el_i[0]] if el_i[0] != 0 else "0", el_i[1]) for el_i in el_vals]
+                        else:
+                            el_vals = [int(el) for el in (":".join(match_str.split("->"))).split(":")]
+                            match_note_names = [midi_to_name_lookup[el_i] if el_i != 0 else "0" for el_i in el_vals]
                         match_info = (match_note_names, 0)
                         this_color = all_match_keys[_k][0][-1]
-                        r, l, marked_l = extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=match_info, match_note_color=this_color)
+                        r, l, marked_l = extract_plot_info_from_file(midi_or_musicjson_file_path, match_info=match_info, match_type=match_type, match_note_color=this_color)
                         all_marked_l.append(marked_l)
                         all_marked_l_color.append(this_color)
 
