@@ -2,7 +2,7 @@ import numpy as np
 
 class ListIterator(object):
     def __init__(self, list_of_iteration_args, batch_size,
-                 random_state=None):
+                 random_state=None, infinite_iterator=False):
         """
         one_hot_size
         should be either None, or a list of one hot size desired
@@ -12,6 +12,9 @@ class ListIterator(object):
         """
         self.list_of_iteration_args = list_of_iteration_args
         self.batch_size = batch_size
+
+        self.infinite_iterator = infinite_iterator
+        replace = True if self.infinite_iterator else False
 
         self.random_state = random_state
         if random_state is None:

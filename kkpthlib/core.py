@@ -741,7 +741,7 @@ def run_loop(train_loop_function, train_itr,
         for a_ch in and_checks:
             if a_ch[0] not in t:
                 passes_check = False
-                reasons_failed.append(ch[1])
+                reasons_failed.append(a_ch[1])
 
         all_or_passed = False
         or_failed_reason = ""
@@ -756,7 +756,7 @@ def run_loop(train_loop_function, train_itr,
             reasons_failed.append(or_failed_reason)
 
     if not passes_check:
-        raise ValueError("Script file {} failed the following format checks".format(full_script_file, reasons_failed))
+        raise ValueError("Script file {} failed the following format checks: {}".format(full_script_path, reasons_failed))
 
     break_outer = False
     while True:
@@ -920,6 +920,8 @@ def run_loop(train_loop_function, train_itr,
                     overall_train_summaries[k] = []
                 overall_train_summaries[k] += this_train_summaries[k]
 
+        copy_this_train_loss = copy.deepcopy(this_train_loss)
+
         extras["train"] = False
         if n_valid_steps_per > 0:
             this_valid_loss = []
@@ -977,17 +979,21 @@ def run_loop(train_loop_function, train_itr,
                         logger.info("valid loss {} {}, overall valid average {}".format(n, vl, np.mean(overall_valid_loss[n] + this_valid_loss[n])))
                     logger.info(" ")
                     last_status = time.time()
-            for i in range(len(this_valid_loss)):
+            for _vv in range(len(this_valid_loss)):
                 _fill = fill_fn(this_valid_loss)
-                valid_interpd = [vi for vi in this_valid_loss[i]] + [_fill for _ in range(len(this_train_loss[i]) - len(this_valid_loss[i]))]
-                overall_valid_loss[i] += valid_interpd
+                # assume all losses are the same length
+                valid_interpd = [vi for vi in this_valid_loss[_vv]]
+
+                valid_interpd = valid_interpd + [_fill for _ in range(len(this_train_loss[_vv]) - len(this_valid_loss[_vv]))]
+                overall_valid_loss[_vv] += valid_interpd
 
             if len(this_valid_summaries) > 0:
                 for k in this_valid_summaries:
                     if k not in overall_valid_summaries:
                         overall_valid_summaries[k] = []
                     _fill = fill_fn(this_valid_summaries[k])
-                    valid_interpd = [vi for vi in this_valid_summaries[k]] + [_fill for _ in range(len(this_train_loss[i]) - len(this_valid_loss[i]))]
+                    # assume here all losses are the same length
+                    valid_interpd = [vi for vi in this_valid_summaries[k]] + [_fill for _ in range(len(this_train_loss[0]) - len(this_valid_loss[0]))]
                     overall_valid_summaries[k] += valid_interpd
 
         if train_itr_steps_taken > 1E9:

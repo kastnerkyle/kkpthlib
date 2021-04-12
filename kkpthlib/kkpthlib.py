@@ -409,6 +409,11 @@ def softmax_np(x):
     return out
 
 
+def log_softmax(x):
+    e_x = torch.exp(x - torch.max(x, axis=-1, keepdim=True)[0])
+    return torch.log(e_x / e_x.sum(axis=-1, keepdim=True))
+
+
 def make_tensor(arr, dtype, device, requires_grad=True):
     if device == "default":
         device = get_device_default()
@@ -796,8 +801,9 @@ class Conv2d(torch.nn.Module):
                  dtype="default", device="default"):
         super(Conv2d, self).__init__()
 
-        if strides != [1, 1]:
-            raise ValueError("Alternate strides not yet supported in conv2d")
+        #if strides != [1, 1]:
+        #    raise ValueError("Alternate strides not yet supported in conv2d")
+
         if dilation != [1, 1]:
             raise ValueError("Alternate dilation not yet supported in conv2d")
         # kernel is H, W
@@ -858,7 +864,7 @@ class Conv2d(torch.nn.Module):
         try:
             weight = _get_shared(name_w)
         except NameError:
-            weight = make_tensor(weight_values, dtype=dtype, device=device)
+            weight = make_tensor(weight_values, dtype=dtype, device=device).contiguous()
             _set_shared(name_w, weight)
 
         self.weight = torch.nn.Parameter(weight)
@@ -889,7 +895,7 @@ class Conv2d(torch.nn.Module):
             try:
                 biases = _get_shared(name_b)
             except NameError:
-                biases = make_tensor(b, dtype=dtype, device=device)
+                biases = make_tensor(b, dtype=dtype, device=device).contiguous()
                 _set_shared(name_b, biases)
             self.biases = torch.nn.Parameter(biases)
 
@@ -914,8 +920,9 @@ class Conv2d(torch.nn.Module):
         biases = self.biases
         kernel_size = self.kernel_size
 
-        if strides != [1, 1]:
-            raise ValueError("Alternate strides not yet supported in conv2d")
+        #if strides != [1, 1]:
+        #    raise ValueError("Alternate strides not yet supported in conv2d")
+
         if dilation != [1, 1]:
             raise ValueError("Alternate dilation not yet supported in conv2d")
         # kernel is H, W
@@ -947,7 +954,7 @@ class Conv2d(torch.nn.Module):
             else:
                 try:
                     int(pad)
-                    strides = [int(strides), int(strides)]
+                    strides = [int(strides[0]), int(strides[1])]
                 except:
                     raise ValueError("Pad must be integer, tuple of integer (hpad, wpad), or string 'same', 'valid'")
 
@@ -994,6 +1001,245 @@ class Conv2d(torch.nn.Module):
             padding_after = p - padding_before
             return padding_before, padding_after
 
+        if pad == "same":
+            ph = pad_same(input_t.shape[-2], kernel_size[0], strides[-2], dilation[-2])[0]
+            pw = pad_same(input_t.shape[-1], kernel_size[1], strides[-1], dilation[-1])[0]
+        elif pad == "valid":
+            raise ValueError("valid pad NYI")
+            from IPython import embed; embed(); raise ValueError()
+        else:
+            if hasattr(pad, "__len__") and len(pad) == 2:
+                ph = pad[0]
+                pw = pad[1]
+            else:
+                int(pad)
+                ph = pad
+                pw = pad
+
+        # NCHW input, weights are out_chan, in_chan, H, W
+        out = torch.nn.functional.conv2d(input_t, weight, stride=strides, dilation=dilation, padding=(ph, pw), bias=biases)
+        return out
+
+
+class Conv2dTranspose(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_dims,
+                 num_feature_maps,
+                 kernel_size=(3, 3),
+                 dilation=[1, 1],
+                 strides=[1, 1],
+                 input_height_width_init_tuple=(1, 1),
+                 border_mode="same",
+                 output_padding=(0, 0),
+                 custom_weight_mask=None,
+                 init=None, scale="default",
+                 biases=True, bias_offset=0.,
+                 name=None,
+                 random_state=None, strict=None,
+                 dtype="default", device="default"):
+        super(Conv2dTranspose, self).__init__()
+
+        #if strides != [1, 1]:
+        #    raise ValueError("Alternate strides not yet supported in conv2d")
+
+        if dilation != [1, 1]:
+            raise ValueError("Alternate dilation not yet supported in conv2d")
+        # kernel is H, W
+        # input assumption is N C H W
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass instance of np.random.RandomState!")
+
+        if strides != [1, 1]:
+            if hasattr(strides, "__len__") and len(strides) == 2:
+                pass
+            else:
+                try:
+                    int(strides)
+                    strides = [int(strides), int(strides)]
+                except:
+                    raise ValueError("Changing strides by non-int not yet supported")
+
+        if dilation != [1, 1]:
+            raise ValueError("Changing dilation not yet supported")
+
+        input_channels = sum(list_of_input_dims)
+        #input_height, input_width = input_height_width_tuple
+        # these numbers don't matter
+        input_height, input_width = input_height_width_init_tuple
+
+        if type(name) is str:
+            name_w = name + "_conv2d_transpose_w"
+            name_b = name + "_conv2d_transpose_b"
+            name_out = name + "_conv2d_transpose_out"
+            name_mask = name + "_conv2d_transpose_mask"
+
+        if strict is None:
+            strict = get_strict_mode_default()
+
+        if strict:
+            cur_defs = get_params_dict()
+            if name_w in cur_defs:
+                raise ValueError("Name {} already created in params dict!".format(name_w))
+
+            if name_b in cur_defs:
+                raise ValueError("Name {} already created in params dict!".format(name_b))
+
+        if init is None or type(init) is str:
+            weight_values, = make_numpy_weights((input_channels, input_width, input_height),
+                                                [(num_feature_maps, kernel_size[0], kernel_size[1])],
+                                                init=init,
+                                                scale=scale,
+                                                random_state=random_state, name=name_w)
+        else:
+            weight_values = init[0]
+            name_w = name[0]
+        weight_values = weight_values.transpose(2, 3, 0, 1)
+        #weight_values = weight_values[::-1, ::-1].copy()
+
+        try:
+            weight = _get_shared(name_w)
+        except NameError:
+            weight = make_tensor(weight_values, dtype=dtype, device=device).contiguous()
+            _set_shared(name_w, weight)
+
+        self.weight = torch.nn.Parameter(weight)
+
+        if custom_weight_mask is not None:
+            """
+            try:
+                mask = _get_shared(name_mask)
+            except NameError:
+                mask = tf.Variable(custom_weight_mask, trainable=False, name=name_mask)
+                _set_shared(name_mask, mask)
+            """
+            raise ValueError("custom_weight_mask not yet implemented in conv")
+            weight = tf.constant(custom_weight_mask) * weight
+
+
+        # need to custom handle SAME and VALID
+        # rip
+        # NCHW input, weights are out_chan, in_chan, H, W
+        if biases:
+            if (init is None) or (type(init) is str):
+                b, = make_numpy_biases([num_feature_maps], name=name_b)
+            else:
+                b = init[1]
+                name_b = name[1]
+                name_out = name[2]
+            b = b + bias_offset
+            try:
+                biases = _get_shared(name_b)
+            except NameError:
+                biases = make_tensor(b, dtype=dtype, device=device).contiguous()
+                _set_shared(name_b, biases)
+            self.biases = torch.nn.Parameter(biases)
+
+        self.strides = strides
+        self.dilation = dilation
+        self.input_channels = input_channels
+        # these numbers don't matter
+        self.input_height = input_height
+        self.input_width = input_width
+        self.border_mode = border_mode
+        self.kernel_size = kernel_size
+        self.output_padding = output_padding
+
+    def forward(self,
+                list_of_inputs):
+        dilation = self.dilation
+        strides = self.strides
+        input_channels = self.input_channels
+        input_height = self.input_height
+        input_width = self.input_width
+        border_mode = self.border_mode
+        weight = self.weight
+        biases = self.biases
+        kernel_size = self.kernel_size
+        output_padding = self.output_padding
+
+        #if strides != [1, 1]:
+        #    raise ValueError("Alternate strides not yet supported in conv2d")
+
+        if dilation != [1, 1]:
+            raise ValueError("Alternate dilation not yet supported in conv2d")
+        # kernel is H, W
+        # input assumption is N C H W
+
+        if strides != [1, 1]:
+            if hasattr(strides, "__len__") and len(strides) == 2:
+                pass
+            else:
+                try:
+                    int(strides)
+                    strides = [int(strides), int(strides)]
+                except:
+                    raise ValueError("Changing strides by non-int not yet supported")
+
+        if dilation != [1, 1]:
+            raise ValueError("Changing dilation not yet supported")
+
+        input_t = torch.cat(list_of_inputs, dim=-1)
+
+        if border_mode == "same":
+            pad = "same"
+        elif border_mode == "valid":
+            pad = "valid"
+        else:
+            pad = border_mode
+            if hasattr(pad, "__len__") and len(pad) == 2:
+                pass
+            else:
+                try:
+                    int(pad)
+                    strides = [int(strides[0]), int(strides[1])]
+                except:
+                    raise ValueError("Pad must be integer, tuple of integer (hpad, wpad), or string 'same', 'valid'")
+
+        # https://github.com/pytorch/pytorch/issues/3867
+        # credit to @mirceamironenco
+        def conv_outdim(in_dim, padding, ks, stride, dilation):
+            if isinstance(padding, int) or isinstance(padding, tuple):
+                return conv_outdim_general(in_dim, padding, ks, stride, dilation)
+            elif isinstance(padding, str):
+                assert padding in ['same', 'valid']
+                if padding == 'same':
+                    return conv_outdim_samepad(in_dim, stride)
+                else:
+                    return conv_outdim_general(in_dim, 0, ks, stride, dilation)
+            else:
+                raise TypeError('Padding can be int/tuple or str=same/valid')
+
+        # https://github.com/pytorch/pytorch/issues/3867
+        # credit to @mirceamironenco
+        def conv_outdim_general(in_dim, padding, ks, stride, dilation=1):
+            # See https://arxiv.org/pdf/1603.07285.pdf, eq (15)
+            return ((in_dim + 2 * padding - ks - (ks - 1) * (dilation - 1)) // stride) + 1
+
+        # https://github.com/pytorch/pytorch/issues/3867
+        # credit to @mirceamironenco
+        def conv_outdim_samepad(in_dim, stride):
+            return (in_dim + stride - 1) // stride
+
+        # https://github.com/pytorch/pytorch/issues/3867
+        # credit to @mirceamironenco
+        def pad_same(in_dim, ks, stride, dilation=1):
+            """
+            References:
+                  https://github.com/tensorflow/tensorflow/blob/master/tensorflow/core/framework/common_shape_fns.h
+                  https://github.com/tensorflow/tensorflow/blob/master/tensorflow/core/framework/common_shape_fns.cc#L21
+            """
+            assert stride > 0
+            assert dilation >= 1
+            effective_ks = (ks - 1) * dilation + 1
+            out_dim = (in_dim + stride - 1) // stride
+            p = max(0, (out_dim - 1) * stride + effective_ks - in_dim)
+
+            padding_before = p // 2
+            padding_after = p - padding_before
+            return padding_before, padding_after
 
         if pad == "same":
             ph = pad_same(input_t.shape[-2], kernel_size[0], strides[-2], dilation[-2])[0]
@@ -1001,9 +1247,18 @@ class Conv2d(torch.nn.Module):
         elif pad == "valid":
             raise ValueError("valid pad NYI")
             from IPython import embed; embed(); raise ValueError()
+        else:
+            if hasattr(pad, "__len__") and len(pad) == 2:
+                ph = pad[0]
+                pw = pad[1]
+            else:
+                int(pad)
+                ph = pad
+                pw = pad
 
         # NCHW input, weights are out_chan, in_chan, H, W
-        out = torch.nn.functional.conv2d(input_t, weight, stride=strides, dilation=dilation, padding=(ph, pw), bias=biases)
+        out = torch.nn.functional.conv_transpose2d(input_t, weight, stride=strides, dilation=dilation, padding=(ph, pw), bias=biases,
+                                                   output_padding=output_padding)
         return out
 
 

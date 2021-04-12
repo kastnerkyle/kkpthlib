@@ -1,10 +1,11 @@
 from __future__ import print_function
-from music21 import corpus, interval, pitch
+from music21 import corpus, interval, pitch, converter, note, chord
 from music21.midi import MidiTrack, MidiFile, MidiEvent, DeltaTime
 import os
 import json
 import time
 import struct
+import fnmatch
 import numpy as np
 import itertools
 import copy
@@ -20,7 +21,168 @@ from .midi_instrument_map import midi_instruments_number_to_name
 from .midi_instrument_map import midi_instruments_name_to_number
 import collections
 
+# https://www.audiolabs-erlangen.de/resources/MIR/FMP/C1/C1S2_MIDI.html
+import pretty_midi
+
 logger = get_logger()
+
+def midi_parse_and_save_json(midi_path, fpath, tempo_factor=1, quarter_quantization_factor=0.015625, transpose=0,
+                             instrument_names_keeplist=None, instrument_names_droplist=None):
+    # quantization is for forming "parts" / "voices"
+    piece_container = {}
+    piece_container["parts"] = []
+    piece_container["parts_times"] = []
+    piece_container["parts_cumulative_times"] = []
+    piece_container["parts_names"] = []
+
+    midi_data = pretty_midi.PrettyMIDI(midi_path)
+
+    if instrument_names_keeplist is not None:
+        assert instrument_names_droplist is None
+
+    if instrument_names_droplist is not None:
+        assert instrument_names_keeplist is None
+
+    last = -1
+    all_note_list = []
+    for instrument in midi_data.instruments:
+        if instrument_names_keeplist is not None:
+            if instrument.name not in instrument_names_keeplist:
+                continue
+        elif instrument_names_droplist is not None:
+            if instrument.name in instrument_names_droplist:
+                continue
+        note_list = []
+        for note in instrument.notes:
+            note_list.append(note)
+
+            start = note.start
+            end = note.end
+            if end > last:
+                last = end
+            pitch = note.pitch
+            velocity = note.velocity
+        all_note_list.append(note_list)
+
+    spq = -1
+    qbpm = -1
+
+    # set ppq to 220 to line up with magenta and pretty_midi
+    ppq = 220
+    #https://stackoverflow.com/questions/2038313/converting-midi-ticks-to-actual-playback-seconds
+    piece_container["seconds_per_quarter"] = spq
+    piece_container["quarter_beats_per_minute"] = qbpm
+    piece_container["pulses_per_quarter"] = ppq
+
+    every_possible_quantization_break = []
+    cur = 0.0
+    q_v = quarter_quantization_factor
+    while True:
+        if cur > last + (last * .05):
+            break
+        every_possible_quantization_break.append(cur)
+        cur += q_v
+
+    all_parts = []
+    all_parts_times = []
+    all_parts_cumulative_times = []
+
+    max_voices = 100
+    all_el_lu = collections.OrderedDict()
+    active_el_lu = [collections.OrderedDict() for _ in range(max_voices)]
+    active_el = [[None] * len(every_possible_quantization_break) for _ in range(max_voices)]
+    # quantize and bucket so we can form approximate "voices"
+    for _i, ni in enumerate(all_note_list):
+        for _j, el_n in enumerate(note_list):
+
+            def quantize_round(raw_v):
+                if float(raw_v) % q_v == 0:
+                    ind = int(float(raw_v) // q_v)
+                else:
+                    lower_ind = int(float(raw_v) / q_v)
+                    upper_ind = int(float(raw_v) / q_v) + 1
+                    nq_ind = float(raw_v) / q_v
+                    if abs(nq_ind - lower_ind) < abs(upper_ind - nq_ind):
+                        ind = lower_ind
+                    else:
+                        ind = upper_ind
+                return ind
+
+            ind = quantize_round(el_n.start)
+            e_ind = quantize_round(el_n.end)
+
+            for _v in range(max_voices):
+                empty = True
+                overlaps = []
+                for _q in range(ind, e_ind + 1):
+                    if active_el[_v][_q] != None:
+                        empty = False
+                    overlaps.append(_q)
+
+                if empty:
+                    for _q in range(ind, e_ind + 1):
+                        if _q not in all_el_lu:
+                            all_el_lu[_q] = []
+                        all_el_lu[_q].append((_v, el_n))
+
+                        active_el[_v][_q] = _j
+                    active_el_lu[_v][ind] = _j
+                    break
+                else:
+                    if _v == (max_voices - 1):
+                        print("all non empty")
+                        from IPython import embed; embed(); raise ValueError()
+
+    def _mk_parts(lu, el, all_lu, voice_match):
+        this_parts = []
+        this_parts_times = []
+        this_parts_cumulative_times = []
+
+        last_note_boundary = 0
+        for _key in sorted(lu.keys()):
+            sounding_at = all_lu[_key]
+            sounding_note = [sa for sa in sounding_at if sa[0] == voice_match]
+            if len(sounding_note) > 1:
+                print("multiple matches????")
+                from IPython import embed; embed(); raise ValueError()
+            elif len(sounding_note) == 0:
+                print("no matches????")
+                from IPython import embed; embed(); raise ValueError()
+            else:
+                sounding_note = sounding_note[0][1]
+
+            if sounding_note.start != last_note_boundary:
+                this_parts.append(0)
+                this_parts_times.append(sounding_note.start - last_note_boundary)
+                this_parts_cumulative_times.append(sounding_note.start)
+
+            time_length = float(sounding_note.end - sounding_note.start) #len(matched) * q_v
+            offset = float(sounding_note.start) #matched[0] * q_v
+            extent = float(sounding_note.end)
+            this_parts.append(sounding_note.pitch + transpose)
+            this_parts_times.append(time_length)
+            this_parts_cumulative_times.append(extent)
+            last_note_boundary = sounding_note.end
+        return this_parts, this_parts_times, this_parts_cumulative_times
+
+    for _v in range(max_voices):
+        if len(active_el_lu[_v].keys()) > 0:
+            this_alt_parts, this_alt_parts_times, this_alt_parts_cumulative_times = _mk_parts(active_el_lu[_v],
+                                                                                              active_el[_v],
+                                                                                              all_el_lu,
+                                                                                              _v)
+            all_parts.append(this_alt_parts)
+            all_parts_times.append(this_alt_parts_times)
+            all_parts_cumulative_times.append(this_alt_parts_cumulative_times)
+
+    piece_container["parts"] = all_parts
+    piece_container["parts_times"] = all_parts_times
+    piece_container["parts_cumulative_times"] = all_parts_cumulative_times
+
+    j = json.dumps(piece_container, indent=4)
+    with open(fpath, "w") as f:
+         print(j, file=f)
+
 
 def music21_parse_and_save_json(p, fpath, tempo_factor=1):
     piece_container = {}
@@ -53,6 +215,808 @@ def music21_parse_and_save_json(p, fpath, tempo_factor=1):
         piece_container["parts"][i] += part
         piece_container["parts_times"][i] += part_time
         piece_container["parts_cumulative_times"][i] += list(np.cumsum(part_time))
+    j = json.dumps(piece_container, indent=4)
+    with open(fpath, "w") as f:
+         print(j, file=f)
+
+
+def music21_parse_and_save_json_qqq(p, fpath, tempo_factor=1, quarter_quantization_factor=0.015625):
+    piece_container = {}
+    piece_container["parts"] = []
+    piece_container["parts_times"] = []
+    piece_container["parts_cumulative_times"] = []
+    piece_container["parts_names"] = []
+    # we check for multiple timings when loading files, usually
+    spq = p.metronomeMarkBoundaries()[0][-1].secondsPerQuarter()
+    qbpm = p.metronomeMarkBoundaries()[0][-1].getQuarterBPM()
+    # set ppq to 220 to line up with magenta and pretty_midi
+    ppq = 220
+    #https://stackoverflow.com/questions/2038313/converting-midi-ticks-to-actual-playback-seconds
+    piece_container["seconds_per_quarter"] = spq
+    piece_container["quarter_beats_per_minute"] = qbpm
+    piece_container["pulses_per_quarter"] = ppq
+
+    """
+    # looks like there should be 5 slots...
+    # but get 1, 3, and 6 for verticality?
+    for _i, pi in enumerate(p.parts):
+        n_sounding_parts = 0
+        pt = pi.asTimespans()
+        iv = pt.getVerticalityAt(0.0)
+        while True:
+            max_notes = len(iv.pitchSet)
+            n_sounding_parts = max(max_notes, n_sounding_parts)
+            iv_new = iv.nextVerticality
+            if max_notes > 4:
+                pass
+                #print("wut")
+                #from IPython import embed; embed(); raise ValueError()
+            if iv_new is None:
+                break
+            iv = iv_new
+        print(n_sounding_parts)
+    """
+
+    last = -1
+    for _i, pi in enumerate(p.parts):
+        for el_n in pi.flat.notesAndRests:
+            last = float(el_n.offset) + float(el_n.duration.quarterLength)
+
+    every_possible_quantization_break = []
+    cur = 0.0
+    q_v = quarter_quantization_factor
+    while True:
+        if cur > last:
+            break
+        every_possible_quantization_break.append(cur)
+        cur += q_v
+
+    these_parts = []
+    for _i, pi in enumerate(p.parts):
+        corrected_parts = []
+        for _j, el_n in enumerate(pi.flat.notesAndRests):
+            if el_n.duration.quarterLength == 0:
+                continue
+
+            # skip chords?
+            if el_n.isChord:
+                for notes_el in el_n.notes:
+                    corrected_parts.append(notes_el)
+                    corrected_parts[-1].offset = el_n.offset
+            else:
+                corrected_parts.append(el_n)
+        these_parts.append(corrected_parts)
+
+    all_parts = []
+    all_parts_times = []
+    all_parts_cumulative_times = []
+
+    max_voices = 12
+    all_el_lu = collections.OrderedDict()
+    active_el_lu = [collections.OrderedDict() for _ in range(max_voices)]
+    active_el = [[None] * len(every_possible_quantization_break) for _ in range(max_voices)]
+    for _i, pi in enumerate(these_parts):
+        for _j, el_n in enumerate(pi):
+            if el_n.duration.quarterLength == 0:
+                continue
+            if el_n.isRest:
+                continue
+
+            # skip chords?
+            if el_n.isChord:
+                continue
+
+            ind = None
+            e_ind = None
+
+            def quantize_round(raw_v):
+                if float(raw_v) % q_v == 0:
+                    ind = int(float(raw_v) // q_v)
+                else:
+                    lower_ind = int(float(raw_v) / q_v)
+                    upper_ind = int(float(raw_v) / q_v) + 1
+                    nq_ind = float(raw_v) / q_v
+                    if abs(nq_ind - lower_ind) < abs(upper_ind - nq_ind):
+                        ind = lower_ind
+                    else:
+                        ind = upper_ind
+                return ind
+
+            ind = quantize_round(el_n.offset)
+            e_ind = quantize_round(float(el_n.offset) + float(el_n.duration.quarterLength))
+
+            for _v in range(max_voices):
+                empty = True
+                overlaps = []
+                for _q in range(ind, e_ind + 1):
+                    if active_el[_v][_q] != None:
+                        empty = False
+                    overlaps.append(_q)
+
+                if empty:
+                    for _q in range(ind, e_ind + 1):
+                        if _q not in all_el_lu:
+                            all_el_lu[_q] = []
+                        all_el_lu[_q].append((_v, el_n))
+
+                        active_el[_v][_q] = _j
+                    active_el_lu[_v][ind] = _j
+                    break
+                else:
+                    if _v == (max_voices - 1):
+                        print("all non empty")
+                        from IPython import embed; embed(); raise ValueError()
+
+    # max cardinality
+    mk = [len(all_el_lu[k]) for k in all_el_lu.keys()]
+    mm = max(mk)
+    mok = [k for k in all_el_lu.keys() if len(all_el_lu[k]) == mm]
+
+    def _mk_parts(lu, el, all_lu, voice_match):
+        this_parts = []
+        this_parts_times = []
+        this_parts_cumulative_times = []
+
+        s = 0
+        last_boundary = 0
+        for _key in sorted(lu.keys()):
+            # add rest part 
+            if s != _key:
+                last_boundary = s
+                while True:
+                    if s < _key:
+                        s += 1
+                    else:
+                        break
+                matched = [m for m in range(last_boundary, s)]
+                # what is with all these super short rests
+                time_length = len(matched) * q_v
+                offset = matched[0] * q_v
+                extent = offset + time_length
+                #this_parts.append(0)
+                #this_parts_times.append(time_length)
+                #this_parts_cumulative_times.append(extent)
+
+            if s != _key:
+                s = _key
+
+            while True:
+                if s >= len(el):
+                    break
+
+                if el[s] == lu[_key]:
+                    s += 1
+                else:
+                    break
+            matched = [m for m in range(_key, s)]
+            if len(matched) == 0:
+                print("0 length note dur")
+                from IPython import embed; embed(); raise ValueError()
+            sounding_at = all_lu[_key]
+            sounding_note = [sa for sa in sounding_at if sa[0] == voice_match]
+            if len(sounding_note) > 1:
+                print("multiple matches????")
+                from IPython import embed; embed(); raise ValueError()
+            elif len(sounding_note) == 0:
+                print("no matches????")
+                from IPython import embed; embed(); raise ValueError()
+            else:
+                sounding_note = sounding_note[0][1]
+
+            time_length = float(sounding_note.duration.quarterLength) #len(matched) * q_v
+            offset = float(sounding_note.offset) #matched[0] * q_v
+            extent = offset + time_length
+            this_parts.append(sounding_note.pitch.midi)
+            this_parts_times.append(time_length)
+            this_parts_cumulative_times.append(extent)
+        return this_parts, this_parts_times, this_parts_cumulative_times
+
+    for _v in range(max_voices):
+        if len(active_el_lu[_v].keys()) > 0:
+            this_alt_parts, this_alt_parts_times, this_alt_parts_cumulative_times = _mk_parts(active_el_lu[_v],
+                                                                                              active_el[_v],
+                                                                                              all_el_lu,
+                                                                                              _v)
+            all_parts.append(this_alt_parts)
+            all_parts_times.append(this_alt_parts_times)
+            all_parts_cumulative_times.append(this_alt_parts_cumulative_times)
+
+    piece_container["parts"] = all_parts
+    piece_container["parts_times"] = all_parts_times
+    piece_container["parts_cumulative_times"] = all_parts_cumulative_times
+
+    j = json.dumps(piece_container, indent=4)
+    with open(fpath, "w") as f:
+         print(j, file=f)
+
+
+def music21_parse_and_save_json_squog(p, fpath, tempo_factor=1, quarter_quantization_factor=0.015625):
+    piece_container = {}
+    piece_container["parts"] = []
+    piece_container["parts_times"] = []
+    piece_container["parts_cumulative_times"] = []
+    piece_container["parts_names"] = []
+    # we check for multiple timings when loading files, usually
+    spq = p.metronomeMarkBoundaries()[0][-1].secondsPerQuarter()
+    qbpm = p.metronomeMarkBoundaries()[0][-1].getQuarterBPM()
+    # set ppq to 220 to line up with magenta and pretty_midi
+    ppq = 220
+    #https://stackoverflow.com/questions/2038313/converting-midi-ticks-to-actual-playback-seconds
+    piece_container["seconds_per_quarter"] = spq
+    piece_container["quarter_beats_per_minute"] = qbpm
+    piece_container["pulses_per_quarter"] = ppq
+
+    """
+    # looks like there should be 5 slots...
+    # but get 1, 3, and 6 for verticality?
+    for _i, pi in enumerate(p.parts):
+        n_sounding_parts = 0
+        pt = pi.asTimespans()
+        iv = pt.getVerticalityAt(0.0)
+        while True:
+            max_notes = len(iv.pitchSet)
+            n_sounding_parts = max(max_notes, n_sounding_parts)
+            iv_new = iv.nextVerticality
+            if max_notes > 4:
+                pass
+                #print("wut")
+                #from IPython import embed; embed(); raise ValueError()
+            if iv_new is None:
+                break
+            iv = iv_new
+        print(n_sounding_parts)
+    """
+
+    last = -1
+    for _i, pi in enumerate(p.parts):
+        for el_n in pi.flat.notesAndRests:
+            last = float(el_n.offset) + float(el_n.duration.quarterLength)
+
+    every_possible_quantization_break = []
+    cur = 0.0
+    q_v = quarter_quantization_factor
+    while True:
+        if cur > last:
+            break
+        every_possible_quantization_break.append(cur)
+        cur += q_v
+
+    these_parts = []
+    for _i, pi in enumerate(p.parts):
+        corrected_parts = []
+        for _j, el_n in enumerate(pi.flat.notesAndRests):
+            if el_n.duration.quarterLength == 0:
+                continue
+
+            # skip chords?
+            if el_n.isChord:
+                for notes_el in el_n.notes:
+                    corrected_parts.append(notes_el)
+                    corrected_parts[-1].offset = el_n.offset
+            else:
+                corrected_parts.append(el_n)
+        these_parts.append(corrected_parts)
+
+    all_parts = []
+    all_parts_times = []
+    all_parts_cumulative_times = []
+
+    max_voices = 12
+    all_el_lu = collections.OrderedDict()
+    active_el_lu = [collections.OrderedDict() for _ in range(max_voices)]
+    active_el = [[None] * len(every_possible_quantization_break) for _ in range(max_voices)]
+    for _i, pi in enumerate(these_parts):
+        for _j, el_n in enumerate(pi):
+            if el_n.duration.quarterLength == 0:
+                continue
+            if el_n.isRest:
+                continue
+
+            # skip chords?
+            if el_n.isChord:
+                continue
+
+            ind = None
+            e_ind = None
+
+            def quantize_round(raw_v):
+                if float(raw_v) % q_v == 0:
+                    ind = int(float(raw_v) // q_v)
+                else:
+                    lower_ind = int(float(raw_v) / q_v)
+                    upper_ind = int(float(raw_v) / q_v) + 1
+                    nq_ind = float(raw_v) / q_v
+                    if abs(nq_ind - lower_ind) < abs(upper_ind - nq_ind):
+                        ind = lower_ind
+                    else:
+                        ind = upper_ind
+                return ind
+
+            ind = quantize_round(el_n.offset)
+            e_ind = quantize_round(float(el_n.offset) + float(el_n.duration.quarterLength))
+
+            for _v in range(max_voices):
+                empty = True
+                overlaps = []
+                for _q in range(ind, e_ind + 1):
+                    if active_el[_v][_q] != None:
+                        empty = False
+                    overlaps.append(_q)
+
+                if empty:
+                    for _q in range(ind, e_ind + 1):
+                        if _q not in all_el_lu:
+                            all_el_lu[_q] = []
+                        all_el_lu[_q].append((_v, el_n))
+
+                        active_el[_v][_q] = _j
+                    active_el_lu[_v][ind] = _j
+                    break
+                else:
+                    if _v == (max_voices - 1):
+                        print("all non empty")
+                        from IPython import embed; embed(); raise ValueError()
+
+    # max cardinality
+    mk = [len(all_el_lu[k]) for k in all_el_lu.keys()]
+    mm = max(mk)
+    mok = [k for k in all_el_lu.keys() if len(all_el_lu[k]) == mm]
+
+    def _mk_parts(lu, el, all_lu, voice_match):
+        this_parts = []
+        this_parts_times = []
+        this_parts_cumulative_times = []
+
+        s = 0
+        last_boundary = 0
+        for _key in sorted(lu.keys()):
+            # add rest part 
+            if s != _key:
+                last_boundary = s
+                while True:
+                    if s < _key:
+                        s += 1
+                    else:
+                        break
+                matched = [m for m in range(last_boundary, s)]
+                # what is with all these super short rests
+                time_length = len(matched) * q_v
+                offset = matched[0] * q_v
+                extent = offset + time_length
+                this_parts.append(0)
+                this_parts_times.append(time_length)
+                this_parts_cumulative_times.append(extent)
+
+            if s != _key:
+                s = _key
+
+            while True:
+                if s >= len(el):
+                    break
+
+                if el[s] == lu[_key]:
+                    s += 1
+                else:
+                    break
+            matched = [m for m in range(_key, s)]
+            if len(matched) == 0:
+                print("0 length note dur")
+                from IPython import embed; embed(); raise ValueError()
+            time_length = len(matched) * q_v
+            offset = matched[0] * q_v
+            extent = offset + time_length
+            sounding_at = all_lu[_key]
+            sounding_note = [sa for sa in sounding_at if sa[0] == voice_match]
+            if len(sounding_note) > 1:
+                print("multiple matches????")
+                from IPython import embed; embed(); raise ValueError()
+            elif len(sounding_note) == 0:
+                print("no matches????")
+                from IPython import embed; embed(); raise ValueError()
+            else:
+                sounding_note = sounding_note[0][1]
+            this_parts.append(sounding_note.pitch.midi)
+            this_parts_times.append(time_length)
+            this_parts_cumulative_times.append(extent)
+        return this_parts, this_parts_times, this_parts_cumulative_times
+
+    for _v in range(max_voices):
+        if len(active_el_lu[_v].keys()) > 0:
+            this_alt_parts, this_alt_parts_times, this_alt_parts_cumulative_times = _mk_parts(active_el_lu[_v],
+                                                                                              active_el[_v],
+                                                                                              all_el_lu,
+                                                                                              _v)
+            all_parts.append(this_alt_parts)
+            all_parts_times.append(this_alt_parts_times)
+            all_parts_cumulative_times.append(this_alt_parts_cumulative_times)
+
+    piece_container["parts"] = all_parts
+    piece_container["parts_times"] = all_parts_times
+    piece_container["parts_cumulative_times"] = all_parts_cumulative_times
+
+    j = json.dumps(piece_container, indent=4)
+    with open(fpath, "w") as f:
+         print(j, file=f)
+
+
+def music21_parse_and_save_json_squig(p, fpath, tempo_factor=1, max_possible_voices=5, quarter_quantization_factor=.041666666):
+    piece_container = {}
+    piece_container["parts"] = []
+    piece_container["parts_times"] = []
+    piece_container["parts_cumulative_times"] = []
+    piece_container["parts_names"] = []
+    # we check for multiple timings when loading files, usually
+    spq = p.metronomeMarkBoundaries()[0][-1].secondsPerQuarter()
+    qbpm = p.metronomeMarkBoundaries()[0][-1].getQuarterBPM()
+    # set ppq to 220 to line up with magenta and pretty_midi
+    ppq = 220
+    #https://stackoverflow.com/questions/2038313/converting-midi-ticks-to-actual-playback-seconds
+    piece_container["seconds_per_quarter"] = spq
+    piece_container["quarter_beats_per_minute"] = qbpm
+    piece_container["pulses_per_quarter"] = ppq
+
+    """
+    # looks like there should be 5 slots...
+    # but get 1, 3, and 6 for verticality?
+    for _i, pi in enumerate(p.parts):
+        n_sounding_parts = 0
+        pt = pi.asTimespans()
+        iv = pt.getVerticalityAt(0.0)
+        while True:
+            max_notes = len(iv.pitchSet)
+            n_sounding_parts = max(max_notes, n_sounding_parts)
+            iv_new = iv.nextVerticality
+            if max_notes > 4:
+                pass
+                #print("wut")
+                #from IPython import embed; embed(); raise ValueError()
+            if iv_new is None:
+                break
+            iv = iv_new
+        print(n_sounding_parts)
+    """
+
+    last = -1
+    for _i, pi in enumerate(p.parts):
+        for el_n in pi.flat.notesAndRests:
+            last = float(el_n.offset) + float(el_n.duration.quarterLength)
+
+    every_possible_quantization_break = []
+    cur = 0.0
+    q_v = quarter_quantization_factor
+    while True:
+        if cur > last:
+            break
+        every_possible_quantization_break.append(cur)
+        cur += q_v
+
+    all_parts = []
+    all_parts_times = []
+    all_parts_cumulative_times = []
+
+    leftovers = []
+
+    these_parts = []
+    for _i, pi in enumerate(p.parts):
+        corrected_parts = []
+        for _j, el_n in enumerate(pi.flat.notesAndRests):
+            if el_n.duration.quarterLength == 0:
+                continue
+
+            # skip chords?
+            if el_n.isChord:
+                for notes_el in el_n.notes:
+                    corrected_parts.append(notes_el)
+                    corrected_parts[-1].offset = el_n.offset
+            else:
+                corrected_parts.append(el_n)
+        these_parts.append(corrected_parts)
+
+    # should we even use snap gravity
+    snap_gravity = [-1] * len(every_possible_quantization_break)
+
+    # for now lets just make a ton of parts and see how many there are...
+    carryover_all_el_lu = None
+    carryover_active_el_lu = None
+    carryover_active_el = None
+    for _i, pi in enumerate(these_parts):
+        # attempt to "pack" each voice using leftovers from the last
+        if carryover_all_el_lu is not None:
+            all_el_lu = carryover_all_el_lu
+            active_el_lu = carryover_active_el_lu
+            active_el = carryover_active_el
+        else:
+            all_el_lu = collections.OrderedDict()
+            active_el_lu = collections.OrderedDict()
+            active_el = [None] * len(every_possible_quantization_break)
+
+        max_voices = 5
+        alt_active_el_lu = [collections.OrderedDict() for _ in range(max_voices)]
+        alt_active_el = [[None] * len(every_possible_quantization_break) for _ in range(max_voices)]
+
+        for _j, el_n in enumerate(pi):
+            if el_n.duration.quarterLength == 0:
+                continue
+            if el_n.isRest:
+                continue
+
+            # skip chords?
+            if el_n.isChord:
+                continue
+
+            all_el_lu[_j] = el_n
+
+            ind = None
+            e_ind = None
+            if float(el_n.offset) % q_v == 0:
+                ind = int(float(el_n.offset) // q_v)
+
+            if (float(el_n.offset) + float(el_n.duration.quarterLength)) % q_v == 0:
+                e_ind = int((float(el_n.offset) + float(el_n.duration.quarterLength)) // q_v)
+
+            if ind is not None and e_ind is not None:
+                skip = False
+                for _q in range(ind, e_ind + 1):
+                    if active_el[_q] is not None:
+                        skip = True
+                if not skip:
+                    for _q in range(ind, e_ind + 1):
+                        active_el[_q] = _j
+                    active_el_lu[ind] = _j
+
+        for _j, el_n in enumerate(pi):
+            if el_n.duration.quarterLength == 0:
+                continue
+            if el_n.isRest:
+                continue
+            if _j in active_el:
+                continue
+
+            # skip chords?
+            if el_n.isChord:
+                continue
+
+            ind = int(float(el_n.offset) // q_v)
+            e_ind = int((float(el_n.offset) + float(el_n.duration.quarterLength)) // q_v)
+
+            # if all the slots are empty just smash it in there
+            empty = True
+            overlaps = []
+            for _q in range(ind, e_ind + 1):
+                if active_el[_q] != None:
+                    empty = False
+                    overlaps.append(_q)
+
+            '''
+            if _i > 1:
+                if _j > 1:
+                    print("got here")
+                    from IPython import embed; embed(); raise ValueError()
+            '''
+
+            if empty:
+                for _q in range(ind, e_ind + 1):
+                    active_el[_q] = _j
+                active_el_lu[ind] = _j
+            else:
+                multiple = False
+                if len(overlaps) <= 2:
+                    if overlaps[0] == ind:
+                        # if theres only a 1 or 2 step overlap at the start, and the overlapper is a multistep note, just overwrrite (prefer to preserve onsets to endings) 
+
+                        st = e_ind + 1
+                        if active_el[e_ind] != None:
+                            st = e_ind
+
+                        if active_el[ind] == active_el[ind - 1]:
+                            for _q in range(ind, st):
+                                active_el[_q] = _j
+                            active_el_lu[ind] = _j
+                    elif overlaps[0] == e_ind:
+                        # if there's only one overlap at the end, just truncate
+                        for _q in range(ind, e_ind):
+                            active_el[_q] = _j
+                        active_el_lu[ind] = _j
+                    else:
+                        multiple = True
+
+                if multiple:
+                    # need to use multiple active_els now, no way around it
+                    # there was an overlap
+                    filled = False
+                    for _v in range(max_voices):
+                        empty = True
+                        overlaps = []
+                        for _q in range(ind, e_ind + 1):
+                            if alt_active_el[_v][_q] != None:
+                                empty = False
+                                overlaps.append(_q)
+
+                        if empty:
+                            for _q in range(ind, e_ind + 1):
+                                alt_active_el[_v][_q] = _j
+                            alt_active_el_lu[_v][ind] = _j
+                            filled = True
+                            break
+                        else:
+                            if len(overlaps) == 1:
+                                if overlaps[0] == ind:
+                                    # if theres only a 1 step overlap at the start, and the overlapper is a multistep note, just overwrrite (prefer to preserve onsets to endings) 
+
+                                    st = e_ind + 1
+                                    if alt_active_el[_v][ind] == alt_active_el[_v][ind - 1]:
+                                        for _q in range(ind, st):
+                                            alt_active_el[_v][_q] = _j
+                                        alt_active_el_lu[_v][ind] = _j
+                                    filled = True
+                                    break
+                                else:
+                                    print("secondary non start but singular overlap")
+                                    from IPython import embed; embed(); raise ValueError()
+                            else:
+                                pass
+                                # wasn't empty, continue...
+                                #print("secondary multi overlap")
+                                #from IPython import embed; embed(); raise ValueError()
+
+                    if filled == False:
+                        print("none open?")
+                        from IPython import embed; embed(); raise ValueError()
+
+        '''
+        # now that we have a sequential part,
+        # stick into a parts, parts_times, parts_cumulative_times structure with rests to fill the gaps
+        this_parts = []
+        this_parts_times = []
+        this_parts_cumulative_times = []
+
+        s = 0
+        last_boundary = 0
+        for _key in sorted(active_el_lu.keys()):
+            # add rest part
+            if s != _key:
+                last_boundary = s
+                while True:
+                    if s < _key:
+                        s += 1
+                    else:
+                        break
+                matched = [m for m in range(last_boundary, s)]
+                if len(matched) <= 2:
+                    # 2 means no rest <= 16th
+                    # just stretch? instead of all these minimal time rests
+                    this_parts_times[-1] += len(matched) * q_v
+                    this_parts_cumulative_times[-1] += len(matched) * q_v
+                elif len(matched) == 0:
+                    print("0 length match rest")
+                    from IPython import embed; embed(); raise ValueError()
+                    pass
+                else:
+                    # what is with all these super short rests
+                    time_length = len(matched) * q_v
+                    offset = matched[0] * q_v
+                    extent = offset + time_length
+                    this_parts.append(0)
+                    this_parts_times.append(time_length)
+                    this_parts_cumulative_times.append(extent)
+
+            if s != _key:
+                s = _key
+
+            while True:
+                if active_el[s] == active_el_lu[_key]:
+                    s += 1
+                else:
+                    break
+            matched = [m for m in range(_key, s)]
+            if len(matched) == 0:
+                print("0 length note dur")
+                from IPython import embed; embed(); raise ValueError()
+            time_length = len(matched) * q_v
+            offset = matched[0] * q_v
+            extent = offset + time_length
+            this_parts.append(all_el_lu[active_el_lu[_key]].pitch.midi)
+            this_parts_times.append(time_length)
+            this_parts_cumulative_times.append(extent)
+
+        '''
+
+        def _mk_parts(lu, el, all_lu):
+            this_parts = []
+            this_parts_times = []
+            this_parts_cumulative_times = []
+
+            s = 0
+            last_boundary = 0
+            for _key in sorted(lu.keys()):
+                # add rest part 
+                if s != _key:
+                    last_boundary = s
+                    while True:
+                        if s < _key:
+                            s += 1
+                        else:
+                            break
+                    matched = [m for m in range(last_boundary, s)]
+                    if len(matched) <= 2:
+                        # 2 means no rest <= 16th
+                        # just stretch? instead of all these minimal time rests
+                        this_parts_times[-1] += len(matched) * q_v
+                        this_parts_cumulative_times[-1] += len(matched) * q_v
+                    elif len(matched) == 0:
+                        print("0 length match rest")
+                        from IPython import embed; embed(); raise ValueError()
+                        pass
+                    else:
+                        # what is with all these super short rests
+                        time_length = len(matched) * q_v
+                        offset = matched[0] * q_v
+                        extent = offset + time_length
+                        this_parts.append(0)
+                        this_parts_times.append(time_length)
+                        this_parts_cumulative_times.append(extent)
+
+                if s != _key:
+                    s = _key
+
+                while True:
+                    if s >= len(el):
+                        break
+
+                    if el[s] == lu[_key]:
+                        s += 1
+                    else:
+                        break
+                matched = [m for m in range(_key, s)]
+                if len(matched) == 0:
+                    print("0 length note dur")
+                    from IPython import embed; embed(); raise ValueError()
+                time_length = len(matched) * q_v
+                offset = matched[0] * q_v
+                extent = offset + time_length
+                this_parts.append(all_lu[lu[_key]].pitch.midi)
+                this_parts_times.append(time_length)
+                this_parts_cumulative_times.append(extent)
+            return this_parts, this_parts_times, this_parts_cumulative_times
+
+        this_parts, this_parts_times, this_parts_cumulative_times = _mk_parts(active_el_lu, active_el, all_el_lu)
+        all_parts.append(this_parts)
+        all_parts_times.append(this_parts_times)
+        all_parts_cumulative_times.append(this_parts_cumulative_times)
+
+        # see if there's any non-zero length alt keys
+        n_leftover = 0
+        for _v in range(max_voices):
+            if len(alt_active_el_lu[_v].keys()) > 0:
+                this_alt_parts, this_alt_parts_times, this_alt_parts_cumulative_times = _mk_parts(alt_active_el_lu[_v],
+                                                                                                  alt_active_el[_v],
+                                                                                                  all_el_lu)
+                all_parts.append(this_alt_parts)
+                all_parts_times.append(this_alt_parts_times)
+                all_parts_cumulative_times.append(this_alt_parts_cumulative_times)
+                # for now, don't carryover / collapse
+                #n_leftover += 1
+
+        if n_leftover > 1:
+            print("more than one leftover alt there")
+            from IPython import embed; embed(); raise ValueError()
+
+            this_alt_parts, this_alt_parts_times, this_alt_parts_cumulative_times = _mk_parts(alt_active_el_lu[_v],
+                                                                                              alt_active_el[_v],
+                                                                                              all_el_lu)
+        elif n_leftover == 1:
+            carryover_all_el_lu = copy.deepcopy(alt_active_el_lu[0])
+            carryover_active_el_lu = copy.deepcopy(alt_active_el_lu[0])
+            carryover_active_el = copy.deepcopy(alt_active_el[0])
+        elif n_leftover == 0:
+            carryover_all_el_lu = None
+            carryover_active_el_lu = None
+            carryover_active_el = None
+
+    piece_container["parts"] = all_parts
+    piece_container["parts_times"] = all_parts_times
+    piece_container["parts_cumulative_times"] = all_parts_cumulative_times
+
     j = json.dumps(piece_container, indent=4)
     with open(fpath, "w") as f:
          print(j, file=f)
@@ -131,6 +1095,141 @@ def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
                 logger.info("Skipping {} due to unknown error".format(p_bach))
             continue
     return dataset_path
+
+
+def fetch_jsb_chorales():
+    jsb_dataset_path = check_fetch_jsb_chorales()
+    json_files = [jsb_dataset_path + os.sep + fname for fname in sorted(os.listdir(jsb_dataset_path)) if ".json" in fname]
+    return {"files": json_files}
+
+
+def check_fetch_pop909(verbose=True):
+    if False and os.path.exists(get_kkpthlib_dataset_dir() + os.sep + "pop909_json"):
+        dataset_path = get_kkpthlib_dataset_dir("pop909_json")
+        # if the dataset already exists, assume the preprocessing is already complete
+        return dataset_path
+
+    pop_base_dataset_path = get_kkpthlib_dataset_dir() + os.sep + "POP909-Dataset"
+    if not os.path.exists(pop_base_dataset_path):
+        raise ValueError("POP909-Dataset directory not found at {}, retrive this from https://github.com/music-x-lab/POP909-Dataset".format(oio_base_dataset_path))
+    dataset_path = get_kkpthlib_dataset_dir("pop909_json")
+
+    # POP909-Dataset/POP909
+    pop_subpath = pop_base_dataset_path + os.sep + "POP909"
+    midifiles = [f
+                 for dirpath, dirnames, files in os.walk(pop_subpath)
+                 for f in fnmatch.filter(files, '*.mid')]
+    all_pop_paths = []
+    for m in midifiles:
+        if "-v" in m:
+            all_pop_paths.append(pop_subpath + os.sep + m[:3] + os.sep + "versions" + os.sep + m)
+        else:
+            all_pop_paths.append(pop_subpath + os.sep + m[:3] + os.sep + m)
+
+    all_pop_paths = sorted(all_pop_paths)
+
+    if verbose:
+        logger.info("POP909 not yet cached, processing...")
+        logger.info("Total number of POP909 pieces to process from music21: {}".format(len(all_pop_paths)))
+    for it, p_pop in enumerate(all_pop_paths):
+
+        try:
+            p = converter.parseFile(p_pop, format="midi")
+        except:
+            logger.info("Skipping file {}, {} music21 parse failed...".format(it, p_pop))
+
+        """
+        if len(p.parts) not in only_pieces_with_n_voices:
+            if verbose:
+                logger.info("Skipping file {}, {} due to undesired voice count...".format(it, p_pop))
+            continue
+        """
+
+        if len(p.metronomeMarkBoundaries()) != 1:
+            if verbose:
+                logger.info("Skipping file {}, {} due to unknown or multiple tempo changes...".format(it, p_pop))
+            continue
+
+        if verbose:
+            logger.info("Processing {}, {} ...".format(it, p_pop))
+
+        k = p.analyze('key')
+        if verbose:
+            logger.info("Original key: {}".format(k))
+        stripped_extension_name = ".".join(os.path.split(p_pop)[1].split(".")[:-1])
+        base_fpath = dataset_path + os.sep + stripped_extension_name
+
+        """
+        if os.path.exists(base_fpath + ".json"):
+            if verbose:
+                logger.info("File exists {}, skipping...".format(base_fpath))
+        else:
+            if 'major' in k.name:
+                kt = "major"
+            elif 'minor' in k.name:
+                kt = "minor"
+            core_name = base_fpath + ".{}-{}-original.json".format(k.name.split(" ")[0], kt)
+            midi_parse_and_save_json(p_pop, core_name, tempo_factor=1)
+            logger.info("Writing {}".format(core_name))
+        """
+
+        instruments_to_keep = ["PIANO"]
+        try:
+            if os.path.exists(base_fpath + ".json"):
+                if verbose:
+                    logger.info("File exists {}, skipping...".format(base_fpath))
+            else:
+                if 'major' in k.name:
+                    kt = "major"
+                elif 'minor' in k.name:
+                    kt = "minor"
+                core_name = base_fpath + ".{}-{}-original.json".format(k.name.split(" ")[0], kt)
+                midi_parse_and_save_json(p_pop, core_name, tempo_factor=1,
+                                         instrument_names_keeplist=instruments_to_keep)
+                logger.info("Writing {}".format(core_name))
+            orig_key = k
+            orig_key_type = kt
+            for t in ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]:
+                if 'major' in k.name:
+                    kt = "major"
+                elif 'minor' in k.name:
+                    kt = "minor"
+                else:
+                    raise AttributeError('Unknown key {}'.format(kn.name))
+
+                transpose_fpath = base_fpath + ".{}-{}-transposed.json".format(t, kt)
+                if os.path.exists(transpose_fpath):
+                    if verbose:
+                        logger.info("File exists {}, skipping...".format(transpose_fpath))
+                    continue
+
+                i = interval.Interval(k.tonic, pitch.Pitch(t))
+                pn = p.transpose(i)
+                #kn = pn.analyze('key')
+                dist = int(i.chromatic.cents // 100)
+                if abs(dist) > 6:
+                    if dist > 0:
+                        dist = -12 + dist
+                    else:
+                        dist = 12 + dist
+                midi_parse_and_save_json(p_pop, transpose_fpath, tempo_factor=1, transpose=dist)
+                #music21_parse_and_save_json(pn, transpose_fpath, tempo_factor=1)
+                if verbose:
+                    logger.info("Writing {} using transpose {} from base key {} to {}".format(transpose_fpath, dist, orig_key.name, t))
+        except Exception as e:
+            if verbose:
+                logger.info(e)
+                logger.info("Skipping {} due to unknown error".format(p_pop))
+            continue
+    return dataset_path
+
+
+def fetch_pop909():
+    dataset_base_path = check_fetch_pop909()
+    print("nhkjdwjakld")
+    from IPython import embed; embed(); raise ValueError()
+    json_files = [jsb_dataset_path + os.sep + fname for fname in sorted(os.listdir(jsb_dataset_path)) if ".json" in fname]
+    return {"files": json_files}
 
 
 def _populate_track_from_data(data, index, program_changes=None):
@@ -283,7 +1382,102 @@ _program_presets = {
                                         ("Bassoon", 40)],
                    }
 
+
 def music_json_to_midi(json_file, out_name, tempo_factor=.5,
+                       default_velocity=120,
+                       voice_program_map=None,
+                       verbose=True):
+    """
+    string (filepath) or json.dumps object
+
+    tempo factor .5, twice as slow
+    tempo factor 2, twice as fast
+
+    voice_program_map {0: [(instrument_name, time_in_quarters)],
+                       1: [(instrument_name, time_in_quarters)]}
+    voices ordered SATB by default
+
+    instrument names for program changes defined in kkpthlib/datasets/midi_instrument_map.py
+
+    An example program change, doing harpsichord the first 8 quarter notes then a special
+    mix as used by Music Transformer, Huang et. al.
+
+    and recommended by
+    https://musescore.org/en/node/109121
+
+    a = "Harpsichord"
+    b = "Harpsichord"
+    c = "Harpsichord"
+    d = "Harpsichord"
+
+    e = "Oboe"
+    f = "English Horn"
+    g = "Clarinet"
+    h = "Bassoon"
+
+    # key: voice
+    # values: list of tuples (instrument, time_in_quarter_notes_to_start_using) - optionally (instrument, time_in_quarters, global_amplitude)
+    # amplitude should be in [0 , 127]
+    m = {0: [(a, 0), (e, 8)],
+         1: [(b, 0), (f, 8)],
+         2: [(c, 0), (g, 8)],
+         3: [(d, 0), (h, 8)]}
+
+    or
+
+    m = {0: [(a, 0, 60), (e, 8, 40)],
+         1: [(b, 0, 30), (f, 8, 30)],
+         2: [(c, 0, 30), (g, 8, 30)],
+         3: [(d, 0, 40), (h, 8, 50)]}
+
+    Alternatively, support "auto" groups which set custom voices and amplitudes
+    a = "harpsichord_preset"
+    b = "woodwind_preset"
+    m = {0: [(a, 0), (b, 8)],
+         1: [(a, 0), (b, 8)],
+         2: [(a, 0), (b, 8)],
+         3: [(a, 0), (b, 8)]}
+
+    valid preset values:
+                "dreamy_r_preset"
+                "dreamy_preset"
+                "zelda_preset"
+                "nylon_preset"
+                "organ_preset"
+                "grand_piano_preset"
+                "electric_piano_preset"
+                "harpsichord_preset"
+                "woodwind_preset"
+    """
+    if json_file.endswith(".json"):
+        with open(json_file) as f:
+            data = json.load(f)
+    else:
+        data = json.loads(json_file)
+    #[u'parts', u'parts_names', u'parts_cumulative_times', u'parts_times']
+    #['parts_velocities'] optional
+
+    ppq = data["pulses_per_quarter"]
+    qbpm = data["quarter_beats_per_minute"]
+    spq = data["seconds_per_quarter"]
+
+    parts = data["parts"]
+    parts_times = data["parts_times"]
+    parts_cumulative_times = data["parts_cumulative_times"]
+
+    pm = pretty_midi.PrettyMIDI()
+    for _i in range(len(parts)):
+        inst = pretty_midi.Instrument(0)
+        pm.instruments.append(inst)
+        for _j in range(len(parts[_i])):
+            if parts[_i][_j] == 0:
+                continue
+            inst.notes.append(pretty_midi.Note(pitch=parts[_i][_j], velocity=100, start=parts_cumulative_times[_i][_j] - parts_times[_i][_j],
+                                               end=parts_cumulative_times[_i][_j]))
+    pm.write(out_name)
+
+
+def music_json_to_midi_old(json_file, out_name, tempo_factor=.5,
                        default_velocity=120,
                        voice_program_map=None,
                        verbose=True):
@@ -3532,12 +4726,6 @@ class MusicJSONVoiceIterator(object):
             return pitch_batch, time_batch, voice_batch, cumulative_time_batch, mask
         else:
             return pitch_batch, time_batch, voice_batch, cumulative_time_batch, mask, clock_batches
-
-
-def fetch_jsb_chorales():
-    jsb_dataset_path = check_fetch_jsb_chorales()
-    json_files = [jsb_dataset_path + os.sep + fname for fname in sorted(os.listdir(jsb_dataset_path)) if ".json" in fname]
-    return {"files": json_files}
 
 
 def convert_sampled_pkl_sequence_to_music_json_data(np_arr, corpus, measure_quarters=4, force_column=False, no_measure_mark=True, add_const=0,

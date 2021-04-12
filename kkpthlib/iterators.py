@@ -71,11 +71,13 @@ class ListIterator(object):
                     if self.truncate_if_ragged_last_batch:
                         batches = batches[:-1]
                 self.current_batches_ = batches
-            raise StopIteration("End of sequence")
-        else:
-            i = self.current_batches_[self.batches_index_]
-            this_batch = [np.array([ls[_ii] for _ii in i]) for ls in self.list_of_sequences]
-            self.batches_index_ += 1
+            if self.infinite_iterator:
+                pass
+            else:
+                raise StopIteration("End of sequence")
+        i = self.current_batches_[self.batches_index_]
+        this_batch = [np.array([ls[_ii] for _ii in i]) for ls in self.list_of_sequences]
+        self.batches_index_ += 1
         return this_batch
 
 
