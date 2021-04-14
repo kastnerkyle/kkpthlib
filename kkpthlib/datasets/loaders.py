@@ -556,6 +556,63 @@ def fetch_mnist():
             "test_indices": test_indices.astype(np.int32)}
 
 
+def check_fetch_binarized_mnist():
+    b_mnist_dir = get_kkpthlib_dataset_dir("binarized_mnist")
+    base = "http://www.cs.toronto.edu/~larocheh/public/datasets/binarized_mnist/"
+    zips = [base + "binarized_mnist_train.amat",
+            base + "binarized_mnist_valid.amat",
+            base + "binarized_mnist_test.amat"]
+
+    for z in zips:
+        fname = z.split("/")[-1]
+        full_path = os.path.join(b_mnist_dir, fname)
+        if not os.path.exists(full_path):
+            logger.info("{} not found, downloading...".format(full_path))
+            download(z, full_path)
+    return b_mnist_dir
+
+
+def fetch_binarized_mnist():
+    """
+    Flattened or image-shaped 28x28 mnist digits with binarized pixel values [0, 1]
+
+    n_samples : 70000
+    n_feature : 784
+
+    Returns
+    -------
+    summary : dict
+        A dictionary cantaining data and image statistics.
+
+        summary["data"] : float32 array, shape (70000, 784)
+        summary["target"] : int32 array, shape (70000,)
+        summary["images"] : float32 array, shape (70000, 28, 28, 1)
+        summary["train_indices"] : int32 array, shape (50000,)
+        summary["valid_indices"] : int32 array, shape (10000,)
+        summary["test_indices"] : int32 array, shape (10000,)
+
+    """
+    data_path = check_fetch_binarized_mnist()
+    train_image_amat = "binarized_mnist_train.amat"
+    valid_image_amat = "binarized_mnist_valid.amat"
+    test_image_amat = "binarized_mnist_test.amat"
+
+    out = []
+    for path in [train_image_amat, valid_image_amat, test_image_amat]:
+        d = np.loadtxt(os.path.join(data_path, path))
+        out.append(d)
+    train_indices = np.arange(0, 50000)
+    valid_indices = np.arange(50000, 60000)
+    test_indices = np.arange(60000, 70000)
+    data = np.concatenate((out[0], out[1], out[2]),
+                          axis=0).astype(np.float32)
+    return {"data": copy.deepcopy(data.reshape((data.shape[0], -1))),
+            "images": data[..., None],
+            "train_indices": train_indices.astype(np.int32),
+            "valid_indices": valid_indices.astype(np.int32),
+            "test_indices": test_indices.astype(np.int32)}
+
+
 def check_fetch_fashion_mnist():
     fashion_mnist_dir = get_kkpthlib_dataset_dir("fashion_mnist")
 

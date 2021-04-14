@@ -408,11 +408,19 @@ def softmax_np(x):
     out = e_x / e_x.sum(axis=-1, keepdims=True)
     return out
 
+def _lcl_logsumexp(x):
+    c = x.max()[0]
+    return c + torch.log(torch.sum(torch.exp(x - c), axis=-1, keepdim=True))
+
+def logsumexp(x, dim=0):
+    # http://www.cs.toronto.edu/~rfm/code/logreg.py
+    _max, _ = x.max(dim=-1, keepdims=True)
+    ds = x - _max
+    sum_exp = torch.exp(ds).sum(dim=dim, keepdims=True)
+    return _max + torch.log(sum_exp)
 
 def log_softmax(x):
-    e_x = torch.exp(x - torch.max(x, axis=-1, keepdim=True)[0])
-    return torch.log(e_x / e_x.sum(axis=-1, keepdim=True))
-
+    return x - logsumexp(x)
 
 def make_tensor(arr, dtype, device, requires_grad=True):
     if device == "default":
@@ -1780,6 +1788,60 @@ class GaussianAttentionCell(torch.nn.Module):
         return w_t, k_t, phi_t, state
 
 
+class BernoulliCrossEntropyFromLogits(torch.nn.Module):
+    """
+    Multinomial negative log likelihood of softmax predicted compared to one hot
+    true_values
+
+    Arguments to forward
+    prediction : tensor, shape 2D or 3D
+        The predicted class probabilities out of some layer,
+        normally the output of softmax_layer
+
+    targets : tensor, shape 2D or 3D
+        One hot ground truth values. Must be the same shape as
+        predicted_values. One hot representations can be achieved using
+        dagbldr.utils.convert_to_one_hot
+    eps : float, default 0
+        Epsilon to be added during log calculation to avoid NaN values.
+
+    Returns
+    -------
+    categorical_crossentropy : tensor, shape predicted_values.shape[1:]
+        The cost per sample, or per sample per step if 3D
+    """
+    def __init__(self):
+        super(BernoulliCrossEntropyFromLogits, self).__init__()
+
+    def forward(self, prediction, target, eps=0.):
+        if target.size(-1) != 1:
+            raise ValueError("Last dimension of target must be 1")
+
+        if len(prediction.size()) != len(target.size()):
+            raise ValueError("prediction and target must have the same number of dimensions! Got dimensions {} and {}".format(prediction.shape, target.shape))
+        if len(prediction.size()) not in [2, 3]:
+            raise ValueError("BernoulliCrossEntropy only supports 2D or 3D inputs, got prediction size {}".format(prediction.size()))
+
+        if len(target.size()) not in [2, 3]:
+            raise ValueError("BernoulliCrossEntropy only supports 2D or 3D inputs, got target size {}".format(target.size()))
+
+        shp = prediction.size()
+        if len(shp) == 3:
+            raise ValueError("NYI BernoulliCrossEntropy 3D inputs!")
+            # seq_length, batch, 1 -> seq_length * batch
+            target_t = target.permute(2, 1, 0).reshape((shp[0] * shp[1],))
+            # seq_length, batch, classes -> seq_length * batch, classes
+            prediction_t = prediction.permute(2, 1, 0).reshape((shp[2], shp[1] * shp[0],)).transpose(1, 0)
+            prediction_c = torch.gather(prediction_t, 1, target_t.long()[..., None])
+            per_step_batch_gathered = -torch.log(prediction_c.reshape((shp[1], shp[0])).transpose(1, 0))
+            return per_step_batch_gathered
+        else:
+            # https://github.com/pytorch/pytorch/pull/1792/commits/45d47cc9ad2b02bf71eeb4bc16457dbda0d70f35
+            neg_abs = -prediction.abs()
+            loss = prediction.clamp(min=0) - prediction * target + (1 + neg_abs.exp()).log()
+            return loss
+
+
 class CategoricalCrossEntropyFromSoftmax(torch.nn.Module):
     """
     Multinomial negative log likelihood of softmax predicted compared to one hot
@@ -1828,13 +1890,6 @@ class CategoricalCrossEntropyFromSoftmax(torch.nn.Module):
             return per_step_batch_gathered
         else:
             raise ValueError("NYI CategoricalCrossEntropy 2D inputs!")
-
-def logsumexp(x, dim=0):
-    # http://www.cs.toronto.edu/~rfm/code/logreg.py
-    _max, _ = x.max(dim=-1, keepdims=True)
-    ds = x - _max
-    sum_exp = torch.exp(ds).sum(dim=dim, keepdims=True)
-    return _max + torch.log(sum_exp)
 
 class CategoricalCrossEntropyFromLogits(torch.nn.Module):
     """
