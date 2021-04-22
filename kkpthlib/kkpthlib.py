@@ -464,7 +464,12 @@ def scan(fn, sequences, outputs_info):
     nonnone = [o for o in outputs_info if o is not None]
     sequences_and_nonnone = sequences + nonnone
     sliced = [s[0] for s in sequences] + nonnone
-    sig = (fn.func_code.co_filename,) + (fn.func_code.co_name,) + (fn.func_code.co_firstlineno,) + fn.func_code.co_varnames + (fn.func_code.co_code,)
+    if (sys.version_info > (3, 0)):
+        # need to figure out the code
+        sig = (fn.__code__.co_filename,) + (fn.__code__.co_name,) + (fn.__code__.co_firstlineno,) + fn.__code__.co_varnames + (fn.__code__.co_code,)
+    else:
+        sig = (fn.func_code.co_filename,) + (fn.func_code.co_name,) + (fn.func_code.co_firstlineno,) + fn.func_code.co_varnames + (fn.func_code.co_code,)
+
     lu = hash(sig)
     global _scan_infos
     if lu not in _scan_infos:
@@ -1323,9 +1328,12 @@ class BatchNorm2d(torch.nn.Module):
         self.dtype = dtype
         self.device = device
 
-    def forward(self, input_tensor, train_test_flag):
+    def forward(self, input_tensor, train_test_flag=None):
         # 0 train, 1 test
         # https://stackoverflow.com/questions/44887446/pytorch-nn-functional-batch-norm-for-2d-input
+        if train_test_flag == None:
+            train_test_flag = 0.
+
         scale = self.scale
         beta = self.beta
         eps = self.eps
@@ -1437,7 +1445,7 @@ class SequenceConv1dStack(torch.nn.Module):
             # cat along channel axis
             # off by one to account for bn layer last
             bn_l = self.layers[ii + 1][jj + 1](c_layer, batch_norm_flag)
-            r_l = ReLU(bn_l)
+            r_l = relu(bn_l)
             prev_layer = prev_layer + r_l
         post = self.layers[ii + 2][0]([prev_layer])
         return post[:, :, 0].permute(2, 0, 1)
@@ -1790,8 +1798,8 @@ class GaussianAttentionCell(torch.nn.Module):
 
 class BernoulliCrossEntropyFromLogits(torch.nn.Module):
     """
-    Multinomial negative log likelihood of softmax predicted compared to one hot
-    true_values
+    Multinomial negative log likelihood of sigmoid logits predicted compared to
+    binary (0. or 1.) true_values
 
     Arguments to forward
     prediction : tensor, shape 2D or 3D
