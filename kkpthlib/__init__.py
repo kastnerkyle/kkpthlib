@@ -1,4 +1,5 @@
 from .kkpthlib import *
+from .utils import *
 from .data import *
 from .core import *
 from .hparams import HParams
