@@ -29,7 +29,7 @@ def split(x, axis):
     if axis == 2:
         return x[:, :, 0::2, :], x[:, :, 1::2, :]
     elif axis == 3:
-        return x[:, :, :, 0::2], x[:, :, :, 1::2]
+        return x[:, :, :, 0::2].contiguous(), x[:, :, :, 1::2].contiguous()
 
 
 def interleave(x_1, x_2, axis):

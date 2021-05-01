@@ -55,6 +55,9 @@ def build_model(hp):
             self.conv1 = Conv2d([hp.input_dim], 200, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
                                 random_state=random_state, name="conv1")
 
+            self.centralized_proj = Linear([200 * 13], 200, random_state=random_state, name="centralized_proj")
+            self.centralized_proj2 = Linear([200 * 13], 200, random_state=random_state, name="centralized_proj2")
+
             self.conv2 = Conv2d([16], 32, kernel_size=(4, 4), strides=(2, 2), border_mode=(1, 1), random_state=random_state, name="conv2")
             self.conv3 = Conv2d([32], 64, kernel_size=(4, 4), strides=(1, 1), border_mode=0, random_state=random_state, name="conv3")
             self.conv4 = Conv2d([64], 32, kernel_size=(1, 1), strides=(1, 1), border_mode=0, random_state=random_state, name="conv4")
@@ -113,19 +116,11 @@ def build_model(hp):
             plt.savefig("tmp3.png")
 
             # unconditional first tier
-            def stepwise_conditional(tier_temp_base_t, tier_temp_base_f, condition_t=None, condition_f=None):
+            def stepwise_conditional(tier_temp_base_t, tier_temp_base_f, tier_temp_base_c=None,
+                                     condition_t=None, condition_f=None, condition_c=None):
                 # condidering axis 2 time 3 frequency
                 # do time
-                tier_temp_t = space2batch(tier_temp_base_t, axis=2)
-                def tier_step_time(inp_t):
-                    return [inp_t]
-
-                r = scan(tier_step_time, [tier_temp_t], [None])
-                tier_temp_t_res = r[0]
-
-                # some model here
-                tier_temp_revert_t = batch2space(tier_temp_t_res, n_batch=tier_temp_base_t.shape[0], axis=2)
-                tier_temp_revert_t_merge = tier_temp_base_t + tier_temp_revert_t
+                tier_temp_base_t_result = 0. * tier_temp_base_t + tier_temp_base_t
                 if condition_t is not None:
                     assert condition_f is not None
                     condition_temp_t = space2batch(condition_t, axis=2)
@@ -135,12 +130,61 @@ def build_model(hp):
                     r = scan(condition_step_time, [condition_temp_t], [None])
                     condition_temp_t_res = r[0]
                     condition_temp_revert_t = batch2space(condition_temp_t_res, n_batch=condition_t.shape[0], axis=2)
-                    tier_temp_revert_t_merge = tier_temp_revert_t_merge + condition_temp_revert_t
+                    tier_temp_base_t_result = tier_temp_base_t_result + condition_temp_revert_t
 
+                tier_temp_t = space2batch(tier_temp_base_t_result, axis=2)
+                def tier_step_time(inp_t):
+                    return [inp_t]
+
+                r = scan(tier_step_time, [tier_temp_t], [None])
+                tier_temp_t_res = r[0]
+                # post proj?
+
+                # some model here
+                tier_temp_revert_t = batch2space(tier_temp_t_res, n_batch=tier_temp_base_t.shape[0], axis=2)
+                # skip connection
+                tier_temp_revert_t_merge = tier_temp_base_t + tier_temp_revert_t
+
+                # do it like this so we don't modify the input
+                tier_temp_base_f_result = 0. * tier_temp_base_f + tier_temp_base_f
                 # do frequency, noting freq conditions on time...
-                tier_temp_base_f[:, :, :-1, :] = tier_temp_base_f[:, :, :-1, :] + tier_temp_revert_t_merge[:, :, :, :-1]
-                tier_temp_f = space2batch(tier_temp_base_f, axis=3)
+                tier_temp_base_f_result[:, :, :-1, :] = tier_temp_base_f_result[:, :, :-1, :] + tier_temp_revert_t_merge[:, :, :, :-1]
+                if tier_temp_base_c is not None:
+                    tier_temp_base_c_result = 0. * tier_temp_base_c + tier_temp_base_c
+                    if condition_c is not None:
+                        def condition_step_context(cond_c):
+                            return [cond_c]
 
+                        r = scan(condition_step_context, [condition_c], [None])
+                        condition_temp_c_res = r[0]
+                        tier_temp_base_c = tier_temp_base_c + condition_temp_c_res
+
+                    def tier_step_cent(cent_t):
+                        return [cent_t]
+
+                    tier_temp_c = tier_temp_base_c_result
+                    r = scan(tier_step_cent, [tier_temp_c], [None])
+                    # post proj?
+                    tier_temp_c_res = r[0]
+                    # skip connected
+                    tier_temp_revert_c_merge = tier_temp_c_res + tier_temp_c
+
+                    tier_temp_revert_c_mod = tier_temp_revert_c_merge.permute(1, 2, 0)[..., None].contiguous()
+                    tier_temp_base_f_result[:, :, :-1, :] = tier_temp_base_f_result[:, :,  :-1, :] + tier_temp_revert_c_mod
+
+                if condition_f is not None:
+                    assert condition_t is not None
+                    condition_temp_f = space2batch(condition_f, axis=3)
+                    def condition_step_freq(cond_f):
+                        return [cond_f]
+                    r = scan(condition_step_freq, [condition_temp_f], [None])
+                    condition_temp_f_res = r[0]
+                    # post proj?
+                    condition_temp_revert_f = batch2space(condition_temp_f_res, n_batch=condition_f.shape[0], axis=3)
+                    # skip connected
+                    tier_temp_base_f_result = tier_temp_base_f_result + condition_temp_revert_f
+
+                tier_temp_f = space2batch(tier_temp_base_f_result, axis=3)
                 def tier_step_freq(inp_f):
                     return [inp_f]
 
@@ -149,17 +193,13 @@ def build_model(hp):
 
                 # some model here
                 tier_temp_revert_f = batch2space(tier_temp_f_res, n_batch=tier_temp_base_f.shape[0], axis=3)
+                # skip connected
                 tier_temp_revert_f_merge = tier_temp_revert_f + tier_temp_base_f
-                if condition_f is not None:
-                    assert condition_t is not None
-                    condition_temp_f = space2batch(condition_f, axis=3)
-                    def condition_step_freq(cond_f):
-                        return [cond_f]
-                    r = scan(condition_step_freq, [condition_temp_f], [None])
-                    condition_temp_f_res = r[0]
-                    condition_temp_revert_f = batch2space(condition_temp_f_res, n_batch=condition_f.shape[0], axis=3)
-                    tier_temp_revert_f_merge = tier_temp_revert_f_merge + condition_temp_revert_f
-                return tier_temp_revert_t_merge, tier_temp_revert_f_merge
+                # add proj
+                if tier_temp_base_c is not None:
+                    return tier_temp_revert_t_merge, tier_temp_revert_f_merge, tier_temp_revert_c_merge
+                else:
+                    return tier_temp_revert_t_merge, tier_temp_revert_f_merge
 
             x_proj = self.conv1([x])
 
@@ -167,24 +207,46 @@ def build_model(hp):
             tier1_1, tier1_2 = split(x, axis=3)
             tier0_1, tier0_2 = split(tier1_1, axis=2)
 
+            x_proj_split1_1, x_proj_split1_2 = split(x_proj, axis=3)
+            x_proj_split0_1, x_proj_split0_2 = split(x_proj_split1_1, axis=2)
+
             # modeling order is - unconditional tier 0_1 , conditional tier0_2 on tier0_1
             # interleave the outputs for both, use to conditional tier1_1 on interleave(tier0_1, tier0_2)
             # repeat the chain
-            inp_shift_t = torch.cat((0. * tier0_1[:, :, :, :1], tier0_1), axis=3)
-            inp_shift_f = torch.cat((0. * tier0_1[:, :, :1, :], tier0_1), axis=2)
-            tier0_1_rec_t, tier0_1_rec_f = stepwise_conditional(inp_shift_t, inp_shift_f, condition_t=None, condition_f=None)
-            loss0_1 = (tier0_1 - tier0_1_rec_f[:, :, :-1, :]) ** 2
+            ii = x_proj_split0_1
+            inp_shift_t = torch.cat((0. * ii[:, :, :, :1], ii), axis=3)
+            inp_shift_f = torch.cat((0. * ii[:, :, :1, :], ii), axis=2)
 
-            # shift conditioning terms by post padding then slicing again
+            shp = inp_shift_t.shape
+            inp_shift_t_c_pre = inp_shift_t.permute(2, 0, 1, 3).reshape(shp[2], shp[0], -1)
+            inp_shift_t_c = self.centralized_proj2([inp_shift_t_c_pre])
+            
+            # down project this
+            tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = stepwise_conditional(inp_shift_t, inp_shift_f, tier_temp_base_c=inp_shift_t_c,
+                                                                               condition_t=None, condition_f=None, condition_c=None)
+            loss0_1 = (tier0_1 - tier0_1_rec_f[:, :, :-1, :]) ** 2
+            print("helo")
+            from IPython import embed; embed(); raise ValueError()
+
+            # shift conditioning terms "forward" by post padding then slicing again
             cond_t = torch.cat((tier0_1_rec_t, 0. * tier0_1_rec_t[:, :, :, :1]), axis=3)
             cond_f = torch.cat((tier0_1_rec_f, 0. * tier0_1_rec_f[:, :, :1, :]), axis=2)
+            cond_c = torch.cat((tier0_1_rec_c, 0. * tier0_1_rec_c[:1, :, :]), axis=0)
             cond_t = cond_t[:, :, :, 1:]
             cond_f = cond_f[:, :, 1:, :]
+            cond_c = cond_c[1:]
 
-            inp_shift_t = torch.cat((0. * tier0_2[:, :, :, :1], tier0_2), axis=3)
-            inp_shift_f = torch.cat((0. * tier0_2[:, :, :1, :], tier0_2), axis=2)
-            tier0_2_rec_t, tier0_2_rec_f = stepwise_conditional(inp_shift_t, inp_shift_f, condition_t=cond_t, condition_f=cond_f)
+            ii = x_proj_split0_2
+            inp_shift_t = torch.cat((0. * ii[:, :, :, :1], ii), axis=3)
+            inp_shift_f = torch.cat((0. * ii[:, :, :1, :], ii), axis=2)
+            shp = inp_shift_t.shape
+            inp_shift_t_c_pre = inp_shift_t.permute(2, 0, 1, 3).reshape(shp[2], shp[0], -1)
+            inp_shift_t_c = self.centralized_proj([inp_shift_t_c_pre])
+
+            tier0_2_rec_t, tier0_2_rec_f, tier0_2_rec_c = stepwise_conditional(inp_shift_t, inp_shift_f, tier_temp_base_c=inp_shift_t_c, condition_t=cond_t, condition_f=cond_f, condition_c=cond_c)
             loss0_2 = (tier0_2 - tier0_2_rec_f[:, :, :-1, :]) ** 2
+            print("2nd loss")
+            from IPython import embed; embed(); raise ValueError()
 
             # first "tier" done
             tier0_rec = interleave(tier0_1_rec_f[:, :, :-1, :], tier0_2_rec_f[:, :, :-1, :], axis=2)
