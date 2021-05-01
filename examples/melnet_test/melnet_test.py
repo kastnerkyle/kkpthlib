@@ -54,6 +54,8 @@ def build_model(hp):
             super(Model, self).__init__()
             self.conv1 = Conv2d([hp.input_dim], 200, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
                                 random_state=random_state, name="conv1")
+            self.out_conv1 = Conv2d([200], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
+                                    random_state=random_state, name="out_conv1")
 
             self.centralized_proj = Linear([200 * 13], 200, random_state=random_state, name="centralized_proj")
             self.centralized_proj2 = Linear([200 * 13], 200, random_state=random_state, name="centralized_proj2")
@@ -177,6 +179,7 @@ def build_model(hp):
                     condition_temp_f = space2batch(condition_f, axis=3)
                     def condition_step_freq(cond_f):
                         return [cond_f]
+
                     r = scan(condition_step_freq, [condition_temp_f], [None])
                     condition_temp_f_res = r[0]
                     # post proj?
@@ -224,7 +227,8 @@ def build_model(hp):
             # down project this
             tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = stepwise_conditional(inp_shift_t, inp_shift_f, tier_temp_base_c=inp_shift_t_c,
                                                                                condition_t=None, condition_f=None, condition_c=None)
-            loss0_1 = (tier0_1 - tier0_1_rec_f[:, :, :-1, :]) ** 2
+            out_pred = self.out_conv1([tier0_1_rec_f[:, :, :-1, :]])
+            loss0_1 = (tier0_1 / 255. - out_pred) ** 2
             print("helo")
             from IPython import embed; embed(); raise ValueError()
 
