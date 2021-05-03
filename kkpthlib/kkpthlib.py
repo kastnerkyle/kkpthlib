@@ -11,6 +11,8 @@ from torch.autograd import Variable
 import copy
 
 from .hparams import HParams
+from .utils import space2batch
+from .utils import batch2space
 
 def np_zeros(shape):
     """
@@ -3515,3 +3517,326 @@ class AWDXLNetDecoderBlock(nn.Module):
         else:
             output_g = None
         return output_h, output_g, new_mems
+
+
+class MelNetLayer(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_dims,
+                 output_dims,
+                 init=None, scale="default",
+                 biases=True, bias_offset=0.,
+                 name=None,
+                 cell_dropout=1.,
+                 random_state=None, strict=None,
+                 dtype="default", device="default"):
+        super(MelNetLayer, self).__init__()
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass instance of np.random.RandomState!")
+
+        if type(name) is str:
+            name_td_d = name + "_rnn_td_d"
+            name_td_u = name + "_rnn_td_u"
+            name_td_f = name + "_rnn_td_f"
+            name_td_c = name + "_rnn_td_c"
+            name_fd_f = name + "_rnn_fd_f"
+            name_proj = name + "_td_conv_proj"
+
+
+        if strict is None:
+            strict = get_strict_mode_default()
+
+        self.hidden_size = list_of_input_dims[0]
+        self.cell_dropout = cell_dropout
+        self.rnn_time_delayed_down = LSTMCell([self.hidden_size],
+                                               output_dims,
+                                               name=name_td_d,
+                                               init=init,
+                                               random_state=random_state)
+        self.rnn_time_delayed_up = LSTMCell([self.hidden_size],
+                                             output_dims,
+                                             name=name_td_u,
+                                             init=init,
+                                             random_state=random_state)
+
+        self.rnn_time_delayed_fwd = LSTMCell([self.hidden_size],
+                                              output_dims,
+                                              name=name_td_f,
+                                              init=init,
+                                              random_state=random_state)
+
+        self.rnn_time_delayed_cent = LSTMCell([self.hidden_size],
+                                              output_dims,
+                                              name=name_td_c,
+                                              init=init,
+                                              random_state=random_state)
+
+        self.rnn_freq_delayed_fwd = LSTMCell([self.hidden_size],
+                                              output_dims,
+                                              name=name_fd_f,
+                                              init=init,
+                                              random_state=random_state)
+
+        self.td_proj_conv = Conv2d([3 * self.hidden_size], self.hidden_size, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
+                                   random_state=random_state, name=name_proj)
+
+
+    # unconditional first tier
+    def forward(self, list_of_inputs):
+        # condidering axis 2 time 3 frequency
+        # do time
+        tier_temp_base_t = list_of_inputs[0]
+        tier_temp_base_f = list_of_inputs[1]
+        tier_temp_base_c = list_of_inputs[2]
+
+        tier_temp_base_t_result = 0. * tier_temp_base_t + tier_temp_base_t
+
+        tier_temp_t = space2batch(tier_temp_base_t_result, axis=2)
+        # flipped in freq
+        tier_temp_t_r = torch.flip(tier_temp_t, dims=(0,))
+
+        # make these learnable?
+        batch_size = tier_temp_t.shape[1]
+        inp_h_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        inp_c_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        inp_r_h_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        inp_r_c_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        def tier_step_time_freq(inp_t, inp_r_t, inp_h_tm1, inp_c_tm1, inp_r_h_tm1, inp_r_c_tm1):
+            output, s = self.rnn_time_delayed_down([inp_t],
+                                                   inp_h_tm1,
+                                                   inp_c_tm1,
+                                                   cell_dropout=self.cell_dropout)
+            inp_h_t = s[0]
+            inp_c_t = s[1]
+
+            output, s = self.rnn_time_delayed_up([inp_r_t],
+                                                  inp_r_h_tm1,
+                                                  inp_r_c_tm1,
+                                                  cell_dropout=self.cell_dropout)
+            inp_r_h_t = s[0]
+            inp_r_c_t = s[1]
+            return [inp_h_t, inp_c_t, inp_r_h_t, inp_r_c_t]
+
+        r = scan(tier_step_time_freq, [tier_temp_t, tier_temp_t_r], [inp_h_init, inp_c_init, inp_r_h_init, inp_r_c_init])
+        tier_temp_t_f_res = r[0]
+        # unflip
+        tier_temp_t_f_r_res = torch.flip(r[2], dims=(0,))
+
+
+        tier_temp_t_t = space2batch(tier_temp_base_t_result, axis=3)
+        batch_size = tier_temp_t_t.shape[1]
+        inp_h_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        inp_c_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        def tier_step_time_time(inp_t, inp_h_tm1, inp_c_tm1):
+            output, s = self.rnn_time_delayed_fwd([inp_t],
+                                                  inp_h_tm1,
+                                                  inp_c_tm1,
+                                                  cell_dropout=self.cell_dropout)
+            inp_h_t = s[0]
+            inp_c_t = s[1]
+            return [inp_h_t, inp_c_t]
+        r = scan(tier_step_time_time, [tier_temp_t_t], [inp_h_init, inp_c_init])
+        tier_temp_t_t_res = r[0]
+
+        # some model here
+        tier_temp_revert_t_f = batch2space(tier_temp_t_f_res, n_batch=tier_temp_base_t.shape[0], axis=2)
+        tier_temp_revert_t_f_r = batch2space(tier_temp_t_f_r_res, n_batch=tier_temp_base_t.shape[0], axis=2)
+        tier_temp_revert_t_t = batch2space(tier_temp_t_t_res, n_batch=tier_temp_base_t.shape[0], axis=3)
+
+        # down proj after concat
+        tier_temp_revert_t = self.td_proj_conv([torch.cat((tier_temp_revert_t_f, tier_temp_revert_t_f_r, tier_temp_revert_t_t), axis=1)])
+        # skip connection
+        tier_temp_revert_t_merge = tier_temp_base_t + tier_temp_revert_t
+
+        # do it like this so we don't modify the input
+        tier_temp_base_f_result = 0. * tier_temp_base_f + tier_temp_base_f
+        # do frequency, noting freq conditions on time...
+        tier_temp_base_f_result[:, :, :-1, :] = tier_temp_base_f_result[:, :, :-1, :] + tier_temp_revert_t_merge[:, :, :, :-1]
+
+        if tier_temp_base_c is not None:
+            tier_temp_base_c_result = 0. * tier_temp_base_c + tier_temp_base_c
+
+            batch_size = tier_temp_base_c_result.shape[1]
+            inp_h_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+            inp_c_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+            def tier_step_cent(inp_t, inp_h_tm1, inp_c_tm1):
+                output, s = self.rnn_time_delayed_cent([inp_t],
+                                                       inp_h_tm1,
+                                                       inp_c_tm1,
+                                                       cell_dropout=self.cell_dropout)
+                inp_h_t = s[0]
+                inp_c_t = s[1]
+                return [inp_h_t, inp_c_t]
+
+            tier_temp_c = tier_temp_base_c_result
+            r = scan(tier_step_cent, [tier_temp_c], [inp_h_init, inp_c_init])
+            # post proj?
+            tier_temp_c_res = r[0]
+            # skip connected
+            tier_temp_revert_c_merge = tier_temp_c_res + tier_temp_c
+
+            tier_temp_revert_c_mod = tier_temp_revert_c_merge.permute(1, 2, 0)[..., None].contiguous()
+
+            # all 3 are summed now
+            tier_temp_base_f_result[:, :, :-1, :] = tier_temp_base_f_result[:, :,  :-1, :] + tier_temp_revert_c_mod
+
+        tier_temp_f = space2batch(tier_temp_base_f_result, axis=3)
+        batch_size = tier_temp_f.shape[1]
+        inp_h_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        inp_c_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        def tier_step_freq(inp_t, inp_h_tm1, inp_c_tm1):
+            output, s = self.rnn_freq_delayed_fwd([inp_t],
+                                                  inp_h_tm1,
+                                                  inp_c_tm1,
+                                                  cell_dropout=self.cell_dropout)
+            inp_h_t = s[0]
+            inp_c_t = s[1]
+            return [inp_h_t, inp_c_t]
+
+        r = scan(tier_step_freq, [tier_temp_f], [inp_h_init, inp_c_init])
+        tier_temp_f_res = r[0]
+
+        tier_temp_revert_f = batch2space(tier_temp_f_res, n_batch=tier_temp_base_f.shape[0], axis=3)
+        # skip connected
+        tier_temp_revert_f_merge = tier_temp_revert_f + tier_temp_base_f
+        # add proj?
+        if tier_temp_base_c is not None:
+            return tier_temp_revert_t_merge, tier_temp_revert_f_merge, tier_temp_revert_c_merge
+        else:
+            return tier_temp_revert_t_merge, tier_temp_revert_f_merge
+
+
+class MelNetFullContextLayer(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_dims,
+                 output_dims,
+                 init=None, scale="default",
+                 biases=True, bias_offset=0.,
+                 name=None,
+                 cell_dropout=1.,
+                 random_state=None, strict=None,
+                 dtype="default", device="default"):
+        super(MelNetFullContextLayer, self).__init__()
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass instance of np.random.RandomState!")
+
+        if type(name) is str:
+            name_td_d = name + "_rnn_d"
+            name_td_u = name + "_rnn_u"
+            name_td_f = name + "_rnn_f"
+            name_td_b = name + "_rnn_b"
+            name_proj = name + "_td_conv_proj"
+
+        if strict is None:
+            strict = get_strict_mode_default()
+
+        self.hidden_size = list_of_input_dims[0]
+        self.cell_dropout = cell_dropout
+        self.rnn_down = LSTMCell([self.hidden_size],
+                                               output_dims,
+                                               name=name_td_d,
+                                               init=init,
+                                               random_state=random_state)
+        self.rnn_up = LSTMCell([self.hidden_size],
+                                             output_dims,
+                                             name=name_td_u,
+                                             init=init,
+                                             random_state=random_state)
+
+        self.rnn_fwd = LSTMCell([self.hidden_size],
+                                 output_dims,
+                                 name=name_td_f,
+                                 init=init,
+                                 random_state=random_state)
+
+        self.rnn_bwd = LSTMCell([self.hidden_size],
+                                 output_dims,
+                                 name=name_td_b,
+                                 init=init,
+                                 random_state=random_state)
+
+        self.proj_conv = Conv2d([4 * self.hidden_size], self.hidden_size, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
+                                 random_state=random_state, name=name_proj)
+
+
+    # unconditional first tier
+    def forward(self, list_of_inputs):
+        # condidering axis 2 time 3 frequency
+        # do time
+        tier_temp_base_t = list_of_inputs[0]
+
+        tier_temp_base_t_result = 0. * tier_temp_base_t + tier_temp_base_t
+
+        tier_temp_t = space2batch(tier_temp_base_t_result, axis=2)
+        # flipped in freq
+        tier_temp_t_r = torch.flip(tier_temp_t, dims=(0,))
+
+        # make these learnable?
+        batch_size = tier_temp_t.shape[1]
+        inp_h_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        inp_c_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        inp_r_h_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        inp_r_c_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        def tier_step_time_freq(inp_t, inp_r_t, inp_h_tm1, inp_c_tm1, inp_r_h_tm1, inp_r_c_tm1):
+            output, s = self.rnn_down([inp_t],
+                                      inp_h_tm1,
+                                      inp_c_tm1,
+                                      cell_dropout=self.cell_dropout)
+            inp_h_t = s[0]
+            inp_c_t = s[1]
+
+            output, s = self.rnn_up([inp_r_t],
+                                    inp_r_h_tm1,
+                                    inp_r_c_tm1,
+                                    cell_dropout=self.cell_dropout)
+            inp_r_h_t = s[0]
+            inp_r_c_t = s[1]
+            return [inp_h_t, inp_c_t, inp_r_h_t, inp_r_c_t]
+
+        r = scan(tier_step_time_freq, [tier_temp_t, tier_temp_t_r], [inp_h_init, inp_c_init, inp_r_h_init, inp_r_c_init])
+        tier_temp_t_f_res = r[0]
+        # unflip
+        tier_temp_t_f_r_res = torch.flip(r[2], dims=(0,))
+
+        tier_temp_t_t = space2batch(tier_temp_base_t_result, axis=3)
+        tier_temp_t_t_r = torch.flip(tier_temp_t_t, dims=(0,))
+
+        batch_size = tier_temp_t_t.shape[1]
+        inp_h_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        inp_c_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        inp_r_h_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        inp_r_c_init = torch.FloatTensor(np.zeros((batch_size, self.hidden_size)))
+        def tier_step_time_time(inp_t, inp_r_t, inp_h_tm1, inp_c_tm1, inp_r_h_tm1, inp_r_c_tm1):
+            output, s = self.rnn_fwd([inp_t],
+                                     inp_h_tm1,
+                                     inp_c_tm1,
+                                     cell_dropout=self.cell_dropout)
+            inp_h_t = s[0]
+            inp_c_t = s[1]
+
+            output, s = self.rnn_bwd([inp_r_t],
+                                     inp_r_h_tm1,
+                                     inp_r_c_tm1,
+                                     cell_dropout=self.cell_dropout)
+            inp_r_h_t = s[0]
+            inp_r_c_t = s[1]
+            return [inp_h_t, inp_c_t, inp_r_h_t, inp_r_c_t]
+        r = scan(tier_step_time_time, [tier_temp_t_t, tier_temp_t_t_r], [inp_h_init, inp_c_init, inp_r_h_init, inp_r_c_init])
+        tier_temp_t_t_res = r[0]
+        # unflip
+        tier_temp_t_t_r_res = torch.flip(r[2], dims=(0,))
+
+        # some model here
+        tier_temp_revert_t_f = batch2space(tier_temp_t_f_res, n_batch=tier_temp_base_t.shape[0], axis=2)
+        tier_temp_revert_t_f_r = batch2space(tier_temp_t_f_r_res, n_batch=tier_temp_base_t.shape[0], axis=2)
+        tier_temp_revert_t_t = batch2space(tier_temp_t_t_res, n_batch=tier_temp_base_t.shape[0], axis=3)
+        tier_temp_revert_t_t_r = batch2space(tier_temp_t_t_r_res, n_batch=tier_temp_base_t.shape[0], axis=3)
+
+        # down proj after concat
+        tier_temp_revert_t = self.proj_conv([torch.cat((tier_temp_revert_t_f, tier_temp_revert_t_f_r, tier_temp_revert_t_t, tier_temp_revert_t_t_r), axis=1)])
+        return tier_temp_revert_t
