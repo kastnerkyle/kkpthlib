@@ -26,6 +26,7 @@ from kkpthlib import Conv2dTranspose
 
 from kkpthlib import MelNetLayer
 from kkpthlib import MelNetFullContextLayer
+from kkpthlib import relu
 
 from kkpthlib import space2batch
 from kkpthlib import batch2space
@@ -44,6 +45,7 @@ hp = HParams(input_dim=1,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
              learning_rate=1E-4,
              clip=3.5,
+             cell_dropout=.5,
              batch_size=20,
              n_epochs=1000,
              random_seed=2122)
@@ -56,16 +58,18 @@ def build_model(hp):
     class Model(nn.Module):
         def __init__(self):
             super(Model, self).__init__()
-            self.mnlayer1 = MelNetLayer([200], 200, random_state=random_state, name="mnlayer1")
-            self.mnlayer2 = MelNetLayer([200], 200, random_state=random_state, name="mnlayer2")
-            self.mnlayer3 = MelNetLayer([200], 200, random_state=random_state, name="mnlayer3")
-            self.mnlayer4 = MelNetLayer([200], 200, random_state=random_state, name="mnlayer4")
-            self.mnlayer5 = MelNetLayer([200], 200, random_state=random_state, name="mnlayer5")
-            self.mnlayer6 = MelNetLayer([200], 200, random_state=random_state, name="mnlayer6")
+            self.mnlayer1 = MelNetLayer([200], 200, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer1")
+            self.mnlayer2 = MelNetLayer([200], 200, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer2")
+            self.mnlayer3 = MelNetLayer([200], 200, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer3")
+            self.mnlayer4 = MelNetLayer([200], 200, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer4")
+            self.mnlayer5 = MelNetLayer([200], 200, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer5")
+            self.mnlayer6 = MelNetLayer([200], 200, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer6")
             self.cond_mnlayer = MelNetFullContextLayer([200], 200, random_state=random_state, name="cond_mnlayer1")
 
             self.conv1 = Conv2d([hp.input_dim], 200, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
                                 random_state=random_state, name="conv1")
+            self.conv2 = Conv2d([hp.input_dim], 200, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
+                                random_state=random_state, name="conv2")
             self.out_conv1 = Conv2d([200], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
                                     random_state=random_state, name="out_conv1")
 
@@ -83,8 +87,8 @@ def build_model(hp):
             tier1_1, tier1_2 = split(x, axis=3)
             tier0_1, tier0_2 = split(tier1_1, axis=2)
 
-            x_proj_split1_1, x_proj_split1_2 = split(x_proj, axis=3)
-            x_proj_split0_1, x_proj_split0_2 = split(x_proj_split1_1, axis=2)
+            x_proj_split0_1 = self.conv1([tier0_1])
+            x_proj_split0_2 = self.conv2([tier0_2])
 
             # modeling order is - unconditional tier 0_1 , conditional tier0_2 on tier0_1
             # interleave the outputs for both, use to conditional tier1_1 on interleave(tier0_1, tier0_2)
@@ -159,8 +163,8 @@ if __name__ == "__main__":
         tier0_1, tier0_2 = split(tier1_1, axis=2)
 
         tier0_1_pred, tier0_2_pred = m(data_batch)
-        tier0_1loss = (tier0_1 - tier0_1_pred) ** 2
-        tier0_2loss = (tier0_2 - tier0_2_pred) ** 2
+        tier0_1loss = (tier0_1 - relu(tier0_1_pred)) ** 2
+        tier0_2loss = (tier0_2 - relu(tier0_2_pred)) ** 2
         # first "tier" done
         # could interleave then do loss?
         #tier0_rec = interleave(tier0_1_rec_f[:, :, :-1, :], tier0_2_rec_f[:, :, :-1, :], axis=2)
