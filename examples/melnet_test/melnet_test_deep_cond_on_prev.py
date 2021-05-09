@@ -92,17 +92,6 @@ def build_model(hp):
 
 
 
-            self.mnlayer1_1_1 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer1_1_1",
-                                        init=hp.melnet_init, use_centralized_stack=False)
-            self.mnlayer1_1_2 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer1_1_2",
-                                        init=hp.melnet_init, use_centralized_stack=False)
-            self.cond_mnlayer1_1 = MelNetFullContextLayer([hp.hidden_dim], hp.hidden_dim, random_state=random_state, name="cond_mnlayer1_1",
-                                                       init=hp.melnet_init)
-            self.out_conv1_1 = Conv2d([hp.hidden_dim], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
-                                      random_state=random_state, name="out_conv1_1")
-
-
-
             self.mnlayer1_2_1 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer1_2_1",
                                         init=hp.melnet_init, use_centralized_stack=False)
             self.mnlayer1_2_2 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer1_2_2",
@@ -111,17 +100,6 @@ def build_model(hp):
                                                        init=hp.melnet_init)
             self.out_conv1_2 = Conv2d([hp.hidden_dim], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
                                       random_state=random_state, name="out_conv1_2")
-
-
-
-            self.mnlayer2_1_1 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer2_1_1",
-                                        init=hp.melnet_init, use_centralized_stack=False)
-            self.mnlayer2_1_2 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer2_1_2",
-                                        init=hp.melnet_init, use_centralized_stack=False)
-            self.cond_mnlayer2_1 = MelNetFullContextLayer([hp.hidden_dim], hp.hidden_dim, random_state=random_state, name="cond_mnlayer2_1",
-                                                       init=hp.melnet_init)
-            self.out_conv2_1 = Conv2d([hp.hidden_dim], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
-                                      random_state=random_state, name="out_conv2_1")
 
 
 
@@ -136,16 +114,6 @@ def build_model(hp):
 
 
 
-            self.mnlayer3_1_1 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer3_1_1",
-                                        init=hp.melnet_init, use_centralized_stack=False)
-            self.mnlayer3_1_2 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer3_1_2",
-                                        init=hp.melnet_init, use_centralized_stack=False)
-            self.cond_mnlayer3_1 = MelNetFullContextLayer([hp.hidden_dim], hp.hidden_dim, random_state=random_state, name="cond_mnlayer3_1",
-                                                       init=hp.melnet_init)
-            self.out_conv3_1 = Conv2d([hp.hidden_dim], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
-                                      random_state=random_state, name="out_conv3_1")
-
-
             self.mnlayer3_2_1 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer3_2_1",
                                         init=hp.melnet_init, use_centralized_stack=False)
             self.mnlayer3_2_2 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer3_2_2",
@@ -156,7 +124,9 @@ def build_model(hp):
                                       random_state=random_state, name="out_conv3_2")
 
 
-        def forward(self, x):
+        def forward(self, x,
+                    sub0_1=None, sub0_2=None, sub1_2=None, sub2_2=None, sub3_2=None,
+                    return0_1=False, return0_2=False, return1_2=False, return2_2=False):
             # boutta do a lot of depth2space and stuff
             x = self.drop(x)
 
@@ -166,18 +136,14 @@ def build_model(hp):
             tier1_1, tier1_2 = split(tier2_1, axis=3)
             tier0_1, tier0_2 = split(tier1_1, axis=2)
 
-            x_proj_split0_1 = self.conv1([tier0_1])
-            x_proj_split0_2 = self.conv1([tier0_2])
-            x_proj_split1_1 = self.conv1([tier1_1])
-            x_proj_split1_2 = self.conv1([tier1_2])
-            x_proj_split2_1 = self.conv1([tier2_1])
-            x_proj_split2_2 = self.conv1([tier2_2])
-            x_proj_split3_1 = self.conv1([tier3_1])
-            x_proj_split3_2 = self.conv1([tier3_2])
-
             # modeling order is - unconditional tier 0_1 , conditional tier0_2 on tier0_1
-            # interleave the outputs for both, use to conditional tier1_1 on interleave(tier0_1, tier0_2)
+            # interleave the outputs for both, use tier1_1 (made from 0_1 and 0_2) to condition 1_2
             # repeat the chain
+
+            # tier 1
+            if sub0_1 is not None:
+                tier0_1 = sub0_1
+            x_proj_split0_1 = self.conv1([tier0_1])
             ii = x_proj_split0_1
             inp_shift_t = torch.cat((0. * ii[:, :, :1, :], ii), axis=2)
             inp_shift_f = torch.cat((0. * ii[:, :, :, :1], ii), axis=3)
@@ -191,48 +157,39 @@ def build_model(hp):
             tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = self.mnlayer0_1_3([tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c])
             tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = self.mnlayer0_1_4([tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c])
             out_pred0_1 = self.out_conv0_1([tier0_1_rec_f[:, :, :, :-1]])
+            if return0_1:
+                return out_pred0_1,
 
             # cond layer, tier 2
-            out_proj_split0_2 = self.conv1([out_pred0_1])
-            cond_x = self.cond_mnlayer0_2([out_proj_split0_2])
+            out_proj_split0_1 = self.conv1([out_pred0_1])
+            cond_x = self.cond_mnlayer0_2([out_proj_split0_1])
 
+            if sub0_2 is not None:
+                tier0_2 = sub0_2
+            x_proj_split0_2 = self.conv1([tier0_2])
             ii = x_proj_split0_2
             inp_shift_t = torch.cat((0. * ii[:, :, :1, :], ii), axis=2)
             inp_shift_f = torch.cat((0. * ii[:, :, :, :1], ii), axis=3)
             inp_shift_t[:, :, :-1, :] += cond_x
             inp_shift_f[:, :, :, :-1] += cond_x
-            #shp = inp_shift_t.shape
-            #inp_shift_t_c_pre = inp_shift_t.permute(2, 0, 1, 3).reshape(shp[2], shp[0], -1)
-            #inp_shift_t_c = self.centralized_proj2([inp_shift_t_c_pre])
-
-            #tier0_2_rec_t, tier0_2_rec_f, tier0_2_rec_c = self.mnlayer5([inp_shift_t, inp_shift_f, inp_shift_t_c])
-            #tier0_2_rec_t, tier0_2_rec_f, tier0_2_rec_c = self.mnlayer6([tier0_2_rec_t, tier0_2_rec_f, tier0_2_rec_c])
             tier0_2_rec_t, tier0_2_rec_f = self.mnlayer0_2_1([inp_shift_t, inp_shift_f, None])
             tier0_2_rec_t, tier0_2_rec_f = self.mnlayer0_2_2([tier0_2_rec_t, tier0_2_rec_f, None])
             out_pred0_2 = self.out_conv0_2([tier0_2_rec_f[:, :, :, :-1]])
+            if return0_2:
+                return out_pred0_1, out_pred0_2
 
             # combine 0_1 and 0_2 to form the next input
-            tier0_pred = interleave(out_pred0_1, out_pred0_2, axis=2)
-
+            pred1_1 = interleave(out_pred0_1, out_pred0_2, axis=2)
 
             # cond layer, tier 3
-            out_proj_split1_1 = self.conv1([tier0_pred])
-            cond_x = self.cond_mnlayer1_1([out_proj_split1_1])
+            out_proj_split1_1 = self.conv1([pred1_1])
+            cond_x = self.cond_mnlayer1_2([out_proj_split1_1])
 
-            ii = x_proj_split1_1
-            inp_shift_t = torch.cat((0. * ii[:, :, :1, :], ii), axis=2)
-            inp_shift_f = torch.cat((0. * ii[:, :, :, :1], ii), axis=3)
-            inp_shift_t[:, :, :-1, :] += cond_x
-            inp_shift_f[:, :, :, :-1] += cond_x
-            tier1_1_rec_t, tier1_1_rec_f = self.mnlayer1_1_1([inp_shift_t, inp_shift_f, None])
-            tier1_1_rec_t, tier1_1_rec_f = self.mnlayer1_1_2([tier1_1_rec_t, tier1_1_rec_f, None])
-            out_pred1_1 = self.out_conv1_1([tier1_1_rec_f[:, :, :, :-1]])
-
-            # cond layer, tier 4
-            out_proj_split1_2 = self.conv1([out_pred1_1])
-            cond_x = self.cond_mnlayer1_2([out_proj_split1_2])
-
-            ii = x_proj_split1_1
+            # 0_1 and 0_2 -> 1_1
+            if sub1_2 is not None:
+                tier1_2 = sub1_2
+            x_proj_split1_2 = self.conv1([tier1_2])
+            ii = x_proj_split1_2
             inp_shift_t = torch.cat((0. * ii[:, :, :1, :], ii), axis=2)
             inp_shift_f = torch.cat((0. * ii[:, :, :, :1], ii), axis=3)
             inp_shift_t[:, :, :-1, :] += cond_x
@@ -240,27 +197,20 @@ def build_model(hp):
             tier1_2_rec_t, tier1_2_rec_f = self.mnlayer1_2_1([inp_shift_t, inp_shift_f, None])
             tier1_2_rec_t, tier1_2_rec_f = self.mnlayer1_2_2([tier1_2_rec_t, tier1_2_rec_f, None])
             out_pred1_2 = self.out_conv1_2([tier1_2_rec_f[:, :, :, :-1]])
+            if return1_2:
+                return out_pred0_1, out_pred0_2, out_pred1_2
 
-            tier1_pred = interleave(out_pred1_1, out_pred1_2, axis=3)
+            # combine 1_1 and 1_2 to form next input
+            pred2_1 = interleave(pred1_1, out_pred1_2, axis=3)
 
+            # cond layer, tier 4
+            out_proj_split2_1 = self.conv1([pred2_1])
+            cond_x = self.cond_mnlayer2_2([out_proj_split2_1])
 
-            # cond layer, tier 5
-            out_proj_split2_1 = self.conv1([tier1_pred])
-            cond_x = self.cond_mnlayer2_1([out_proj_split2_1])
-
-            ii = x_proj_split2_1
-            inp_shift_t = torch.cat((0. * ii[:, :, :1, :], ii), axis=2)
-            inp_shift_f = torch.cat((0. * ii[:, :, :, :1], ii), axis=3)
-            inp_shift_t[:, :, :-1, :] += cond_x
-            inp_shift_f[:, :, :, :-1] += cond_x
-            tier2_1_rec_t, tier2_1_rec_f = self.mnlayer2_1_1([inp_shift_t, inp_shift_f, None])
-            tier2_1_rec_t, tier2_1_rec_f = self.mnlayer2_1_2([tier2_1_rec_t, tier2_1_rec_f, None])
-            out_pred2_1 = self.out_conv2_1([tier2_1_rec_f[:, :, :, :-1]])
-
-            # cond layer, tier 6
-            out_proj_split2_2 = self.conv1([out_pred2_1])
-            cond_x = self.cond_mnlayer2_2([out_proj_split2_2])
-
+            # 1_1 and 1_2 -> 2_1
+            if sub2_2 is not None:
+                tier2_2 = sub2_2
+            x_proj_split2_2 = self.conv1([tier2_2])
             ii = x_proj_split2_2
             inp_shift_t = torch.cat((0. * ii[:, :, :1, :], ii), axis=2)
             inp_shift_f = torch.cat((0. * ii[:, :, :, :1], ii), axis=3)
@@ -269,28 +219,19 @@ def build_model(hp):
             tier2_2_rec_t, tier2_2_rec_f = self.mnlayer2_2_1([inp_shift_t, inp_shift_f, None])
             tier2_2_rec_t, tier2_2_rec_f = self.mnlayer2_2_2([tier2_2_rec_t, tier2_2_rec_f, None])
             out_pred2_2 = self.out_conv2_2([tier2_2_rec_f[:, :, :, :-1]])
+            if return2_2:
+                return out_pred0_1, out_pred0_2, out_pred1_2, out_pred2_2
 
-            tier2_pred = interleave(out_pred2_1, out_pred2_2, axis=2)
+            pred3_1 = interleave(pred2_1, out_pred2_2, axis=2)
 
+            # cond layer, tier 5
+            out_proj_split3_1 = self.conv1([pred3_1])
+            cond_x = self.cond_mnlayer3_2([out_proj_split3_1])
 
-            # cond layer, tier 7
-            out_proj_split3_1 = self.conv1([tier2_pred])
-            cond_x = self.cond_mnlayer3_1([out_proj_split3_1])
-
-            ii = x_proj_split3_1
-            inp_shift_t = torch.cat((0. * ii[:, :, :1, :], ii), axis=2)
-            inp_shift_f = torch.cat((0. * ii[:, :, :, :1], ii), axis=3)
-            inp_shift_t[:, :, :-1, :] += cond_x
-            inp_shift_f[:, :, :, :-1] += cond_x
-            tier3_1_rec_t, tier3_1_rec_f = self.mnlayer3_1_1([inp_shift_t, inp_shift_f, None])
-            tier3_1_rec_t, tier3_1_rec_f = self.mnlayer3_1_2([tier3_1_rec_t, tier3_1_rec_f, None])
-            out_pred3_1 = self.out_conv3_1([tier3_1_rec_f[:, :, :, :-1]])
-
-
-            # cond layer, tier 8
-            out_proj_split3_2 = self.conv1([out_pred3_1])
-            cond_x = self.cond_mnlayer3_2([out_proj_split3_2])
-
+            # 2_1 and 2_2 -> 3_1
+            if sub3_2 is not None:
+                tier3_2 = sub3_2
+            x_proj_split3_2 = self.conv1([tier3_2])
             ii = x_proj_split3_2
             inp_shift_t = torch.cat((0. * ii[:, :, :1, :], ii), axis=2)
             inp_shift_f = torch.cat((0. * ii[:, :, :, :1], ii), axis=3)
@@ -299,9 +240,8 @@ def build_model(hp):
             tier3_2_rec_t, tier3_2_rec_f = self.mnlayer3_2_1([inp_shift_t, inp_shift_f, None])
             tier3_2_rec_t, tier3_2_rec_f = self.mnlayer3_2_2([tier3_2_rec_t, tier3_2_rec_f, None])
             out_pred3_2 = self.out_conv3_2([tier3_2_rec_f[:, :, :, :-1]])
-
-            tier3_pred = interleave(out_pred3_1, out_pred3_2, axis=3)
-            return out_pred0_1, out_pred0_2, out_pred1_1, out_pred1_2, out_pred2_1, out_pred2_2, out_pred3_1, out_pred3_2
+            pred_final = interleave(pred3_1, out_pred3_2, axis=3)
+            return out_pred0_1, out_pred0_2, out_pred1_2, out_pred2_2, out_pred3_2
 
     return Model().to(hp.use_device)
 
@@ -359,28 +299,19 @@ if __name__ == "__main__":
         r = model(torch_noise_data_batch)
         tier0_1_pred = r[0]
         tier0_2_pred = r[1]
-        tier1_1_pred = r[2]
-        tier1_2_pred = r[3]
-        tier2_1_pred = r[4]
-        tier2_2_pred = r[5]
-        tier3_1_pred = r[6]
-        tier3_2_pred = r[7]
+        tier1_2_pred = r[2]
+        tier2_2_pred = r[3]
+        tier3_2_pred = r[4]
         tier0_1_loss = (tier0_1 - tier0_1_pred) ** 2
         tier0_2_loss = (tier0_2 - tier0_2_pred) ** 2
-        tier1_1_loss = (tier1_1 - tier1_1_pred) ** 2
         tier1_2_loss = (tier1_2 - tier1_2_pred) ** 2
-        tier2_1_loss = (tier2_1 - tier2_1_pred) ** 2
         tier2_2_loss = (tier2_2 - tier2_2_pred) ** 2
-        tier3_1_loss = (tier3_1 - tier3_1_pred) ** 2
         tier3_2_loss = (tier3_2 - tier3_2_pred) ** 2
 
         loss = tier0_1_loss.mean()
         loss += tier0_2_loss.mean()
-        loss += tier1_1_loss.mean()
         loss += tier1_2_loss.mean()
-        loss += tier2_1_loss.mean()
         loss += tier2_2_loss.mean()
-        loss += tier3_1_loss.mean()
         loss += tier3_2_loss.mean()
         #tier0_rec = interleave(tier0_1_pred, tier0_2_pred, axis=3)
         #tier0_loss = (tier0_rec - torch_data_batch) ** 2
@@ -405,10 +336,12 @@ if __name__ == "__main__":
          "optimizer": optimizer,
          "hparams": hp}
 
+    """
     # the out-of-loop-check
-    #r = loop(train_itr, {"train": True}, None)
-    #r2 = loop(train_itr, {"train": True}, None)
-    #from IPython import embed; embed(); raise ValueError()
+    r = loop(train_itr, {"train": True}, None)
+    r2 = loop(train_itr, {"train": True}, None)
+    from IPython import embed; embed(); raise ValueError()
+    """
 
     run_loop(loop, train_itr,
              loop, valid_itr,
