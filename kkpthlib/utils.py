@@ -35,12 +35,12 @@ def split(x, axis):
 
 def interleave(x_1, x_2, axis):
     if axis == 2:
-        c = torch.empty(x_1.shape[0], x_1.shape[1], 2 * x_1.shape[2], x_1.shape[3])
+        c = torch.empty(x_1.shape[0], x_1.shape[1], 2 * x_1.shape[2], x_1.shape[3]).to(x_1.device)
         c[:, :, ::2, :] = x_1
         c[:, :, 1::2, :] = x_2
         return c
     if axis == 3:
-        c = torch.empty(x_1.shape[0], x_1.shape[1], x_1.shape[2], 2 * x_1.shape[3])
+        c = torch.empty(x_1.shape[0], x_1.shape[1], x_1.shape[2], 2 * x_1.shape[3]).to(x_1.device)
         c[:, :, :, ::2] = x_1
         c[:, :, :, 1::2] = x_2
         return c

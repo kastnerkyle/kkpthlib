@@ -46,8 +46,8 @@ hp = HParams(input_dim=1,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
              learning_rate=1E-4,
              clip=3.5,
-             cell_dropout=.8,
-             input_noise=.25,
+             cell_dropout=.925,
+             input_noise=.125,
              input_dropout=1.,
              melnet_init="normal",
              input_image_size=(28, 28),
@@ -72,10 +72,11 @@ def build_model(hp):
                                         init=hp.melnet_init)
             self.mnlayer4 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer4",
                                         init=hp.melnet_init)
+
             self.mnlayer5 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer5",
-                                        init=hp.melnet_init)
+                                        init=hp.melnet_init, use_centralized_stack=False)
             self.mnlayer6 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer6",
-                                        init=hp.melnet_init)
+                                        init=hp.melnet_init, use_centralized_stack=False)
             self.cond_mnlayer = MelNetFullContextLayer([hp.hidden_dim], hp.hidden_dim, random_state=random_state, name="cond_mnlayer1",
                                                        init=hp.melnet_init)
 
@@ -83,13 +84,15 @@ def build_model(hp):
                                 random_state=random_state, name="conv1")
             self.conv2 = Conv2d([hp.input_dim], hp.hidden_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
                                 random_state=random_state, name="conv2")
+            self.conv3 = Conv2d([hp.input_dim], hp.hidden_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
+                                random_state=random_state, name="conv3")
             self.out_conv1 = Conv2d([hp.hidden_dim], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
                                     random_state=random_state, name="out_conv1")
 
             self.out_conv2 = Conv2d([hp.hidden_dim], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
                                     random_state=random_state, name="out_conv2")
-            self.centralized_proj = Linear([hp.hidden_dim * hp.input_image_size[0] // 2], hp.hidden_dim, random_state=random_state, name="centralized_proj")
-            self.centralized_proj2 = Linear([hp.hidden_dim * hp.input_image_size[0] // 2], hp.hidden_dim, random_state=random_state, name="centralized_proj2")
+            self.centralized_proj = Linear([hp.hidden_dim * hp.input_image_size[1] // 2], hp.hidden_dim, random_state=random_state, name="centralized_proj")
+            #self.centralized_proj2 = Linear([hp.hidden_dim * hp.input_image_size[1] // 2], hp.hidden_dim, random_state=random_state, name="centralized_proj2")
 
 
         def forward(self, x):
@@ -98,7 +101,6 @@ def build_model(hp):
 
             # targets
             tier0_1, tier0_2 = split(x, axis=3)
-            #tier0_1, tier0_2 = split(tier1_1, axis=2)
 
             x_proj_split0_1 = self.conv1([tier0_1])
             x_proj_split0_2 = self.conv2([tier0_2])
@@ -120,19 +122,22 @@ def build_model(hp):
             tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = self.mnlayer4([tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c])
             out_pred0_1 = self.out_conv1([tier0_1_rec_f[:, :, :, :-1]])
 
-            cond_x = self.cond_mnlayer([x_proj_split0_1])
+            out_proj_split0_2 = self.conv3([out_pred0_1])
+            cond_x = self.cond_mnlayer([out_proj_split0_2])
 
             ii = x_proj_split0_2
             inp_shift_t = torch.cat((0. * ii[:, :, :1, :], ii), axis=2)
             inp_shift_f = torch.cat((0. * ii[:, :, :, :1], ii), axis=3)
             inp_shift_t[:, :, :-1, :] += cond_x
             inp_shift_f[:, :, :, :-1] += cond_x
-            shp = inp_shift_t.shape
-            inp_shift_t_c_pre = inp_shift_t.permute(2, 0, 1, 3).reshape(shp[2], shp[0], -1)
-            inp_shift_t_c = self.centralized_proj2([inp_shift_t_c_pre])
+            #shp = inp_shift_t.shape
+            #inp_shift_t_c_pre = inp_shift_t.permute(2, 0, 1, 3).reshape(shp[2], shp[0], -1)
+            #inp_shift_t_c = self.centralized_proj2([inp_shift_t_c_pre])
 
-            tier0_2_rec_t, tier0_2_rec_f, tier0_2_rec_c = self.mnlayer5([inp_shift_t, inp_shift_f, inp_shift_t_c])
-            tier0_2_rec_t, tier0_2_rec_f, tier0_2_rec_c = self.mnlayer6([tier0_2_rec_t, tier0_2_rec_f, tier0_2_rec_c])
+            #tier0_2_rec_t, tier0_2_rec_f, tier0_2_rec_c = self.mnlayer5([inp_shift_t, inp_shift_f, inp_shift_t_c])
+            #tier0_2_rec_t, tier0_2_rec_f, tier0_2_rec_c = self.mnlayer6([tier0_2_rec_t, tier0_2_rec_f, tier0_2_rec_c])
+            tier0_2_rec_t, tier0_2_rec_f = self.mnlayer5([inp_shift_t, inp_shift_f, None])
+            tier0_2_rec_t, tier0_2_rec_f = self.mnlayer6([tier0_2_rec_t, tier0_2_rec_f, None])
             out_pred0_2 = self.out_conv2([tier0_2_rec_f[:, :, :, :-1]])
             return out_pred0_1, out_pred0_2
 
@@ -206,6 +211,7 @@ if __name__ == "__main__":
         if extras["train"]:
             loss.backward()
             clipping_grad_value_(model.parameters(), hp.clip)
+            #clipping_grad_value_(model.named_parameters(), hp.clip, named_parameters=True, named_check=True)
             optimizer.step()
         return [l,], None, None
 

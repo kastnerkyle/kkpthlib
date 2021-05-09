@@ -124,57 +124,48 @@ data_batch, = next(itr)
 data_batch = data_batch.reshape(data_batch.shape[0], 28, 28, 1)
 data_batch = data_batch.transpose(0, 3, 1, 2)
 data_batch = data_batch / 255.0
-data_batch = np.clip(data_batch + .0 * data_random_state.randn(*data_batch.shape), 0., 1.).astype("float32")
 data_batch = torch.tensor(data_batch).contiguous().to(hp.use_device)
 
-# eval mode
-model.eval()
-
 tier0_1, tier0_2 = split(data_batch, axis=3)
-tier0_1_pred, tier0_2_pred = model(data_batch)
+tier0_1_pred = model(data_batch)
 if not os.path.exists("sampled"):
     os.makedirs("sampled")
 
-
-r1 = np.clip(tier0_1_pred.cpu().data.numpy(), 0, 1)
-r2 = np.clip(tier0_2_pred.cpu().data.numpy(), 0, 1)
-for i in range(r1.shape[0]):
-    f, axarr = plt.subplots(1, 4)
+r = np.clip(tier0_1_pred.cpu().data.numpy(), 0, 1)
+for i in range(r.shape[0]):
+    f, axarr = plt.subplots(1, 2)
     axarr[0].imshow(tier0_1[i, 0].cpu().data.numpy(), cmap="gray")
-    axarr[1].imshow(r1[i, 0], cmap="gray")
-    axarr[2].imshow(tier0_2[i, 0].cpu().data.numpy(), cmap="gray")
-    axarr[3].imshow(r2[i, 0], cmap="gray")
+    axarr[1].imshow(r[i, 0], cmap="gray")
     plt.savefig("sampled/tf_samp{}.png".format(i))
     plt.close()
 
 blank = 0. * data_batch
-filled1 = 0. * tier0_1
-filled2 = 0. * tier0_1
+filled = 0. * tier0_1
 for i in range(blank.shape[2]):
     for j in range(blank.shape[3]):
+        #tier0_pred = np_interleave(tier0_1_pred.cpu().data.numpy(), tier0_2_pred.cpu().data.numpy(), axis=2)
         if i < 14:
             blank[:, 0, i, j] = data_batch[:, 0, i, j]
-        else:
-            tier0_1_pred, tier0_2_pred = model(blank)
-            tier0_pred = np_interleave(tier0_1_pred.cpu().data.numpy(), tier0_2_pred.cpu().data.numpy(), axis=3)
-            r = np.clip(tier0_pred, 0, 1)
-            torch_r = torch.FloatTensor(r[:, 0, i, j])
-            blank[:, 0, i, j] = torch_r
             if j % 2 == 0:
-                filled1[:, 0, i, j // 2] = torch_r
+                filled[:, 0, i, j // 2] = data_batch[:, 0, i, j]
+        else:
+            if j % 2 == 0:
+                tier0_1_pred = model(blank)
+                r = np.clip(tier0_1_pred.cpu().data.numpy(), 0, 1)
+                blank[:, 0, i, j] = torch.FloatTensor(r[:, 0, i, j // 2])
+                filled[:, 0, i, j // 2] = torch.FloatTensor(r[:, 0, i, j // 2])
             else:
-                filled2[:, 0, i, j // 2] = torch_r
-        print("vert {}, {}".format(i, j))
+                blank[:, 0, i, j] = data_batch[:, 0, i, j]
+        print("{}, {}".format(i, j))
 
-for i in range(r1.shape[0]):
-    f, axarr = plt.subplots(1, 5)
+#r = np.clip(tier0_pred.cpu().data.numpy(), 0, 1)
+for i in range(r.shape[0]):
+    f, axarr = plt.subplots(1, 3)
     axarr[0].imshow(data_batch[i, 0].cpu().data.numpy(), cmap="gray")
-    axarr[1].imshow(blank[i, 0].cpu().data.numpy(), cmap="gray")
-    axarr[2].imshow(filled1[i, 0].cpu().data.numpy(), cmap="gray")
-    axarr[3].imshow(filled2[i, 0].cpu().data.numpy(), cmap="gray")
-    axarr[4].imshow(torch.abs(filled2[i, 0] - filled1[i, 0]).cpu().data.numpy(), cmap="gray")
-    plt.savefig("sampled/vert_samp{}.png".format(i))
+    #axarr[1].imshow(blank[i, 0], cmap="gray")
+    axarr[1].imshow(filled[i, 0].cpu().data.numpy(), cmap="gray")
+    axarr[2].imshow(tier0_1[i, 0].cpu().data.numpy(), cmap="gray")
+    plt.savefig("sampled/free_samp{}.png".format(i))
     plt.close()
-
 print("finished")
 from IPython import embed; embed(); raise ValueError()

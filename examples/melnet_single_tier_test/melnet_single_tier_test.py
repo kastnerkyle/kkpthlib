@@ -12,7 +12,6 @@ import torch.functional as F
 
 from kkpthlib.datasets import fetch_mnist
 from kkpthlib import Linear
-from kkpthlib import Dropout
 from kkpthlib import BernoulliCrossEntropyFromLogits
 from kkpthlib import relu
 from kkpthlib import softmax
@@ -47,7 +46,6 @@ hp = HParams(input_dim=1,
              learning_rate=1E-4,
              clip=3.5,
              cell_dropout=.8,
-             input_noise=.25,
              input_dropout=1.,
              melnet_init="normal",
              input_image_size=(28, 28),
@@ -63,7 +61,6 @@ def build_model(hp):
     class Model(nn.Module):
         def __init__(self):
             super(Model, self).__init__()
-            self.drop = Dropout(hp.input_dropout, random_state=random_state, device=hp.use_device)
             self.mnlayer1 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer1",
                                         init=hp.melnet_init)
             self.mnlayer2 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer2",
@@ -72,36 +69,36 @@ def build_model(hp):
                                         init=hp.melnet_init)
             self.mnlayer4 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer4",
                                         init=hp.melnet_init)
-            self.mnlayer5 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer5",
-                                        init=hp.melnet_init)
-            self.mnlayer6 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer6",
-                                        init=hp.melnet_init)
-            self.cond_mnlayer = MelNetFullContextLayer([hp.hidden_dim], hp.hidden_dim, random_state=random_state, name="cond_mnlayer1",
-                                                       init=hp.melnet_init)
+            #self.mnlayer5 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer5",
+            #                            init=hp.melnet_init)
+            #self.mnlayer6 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer6",
+            #                            init=hp.melnet_init)
+            #self.cond_mnlayer = MelNetFullContextLayer([hp.hidden_dim], hp.hidden_dim, random_state=random_state, name="cond_mnlayer1",
+            #                                           init=hp.melnet_init)
 
             self.conv1 = Conv2d([hp.input_dim], hp.hidden_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
                                 random_state=random_state, name="conv1")
-            self.conv2 = Conv2d([hp.input_dim], hp.hidden_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
-                                random_state=random_state, name="conv2")
+            #self.conv2 = Conv2d([hp.input_dim], hp.hidden_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
+            #                    random_state=random_state, name="conv2")
             self.out_conv1 = Conv2d([hp.hidden_dim], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
                                     random_state=random_state, name="out_conv1")
 
-            self.out_conv2 = Conv2d([hp.hidden_dim], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
-                                    random_state=random_state, name="out_conv2")
+            #self.out_conv2 = Conv2d([hp.hidden_dim], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
+            #                        random_state=random_state, name="out_conv2")
             self.centralized_proj = Linear([hp.hidden_dim * hp.input_image_size[0] // 2], hp.hidden_dim, random_state=random_state, name="centralized_proj")
-            self.centralized_proj2 = Linear([hp.hidden_dim * hp.input_image_size[0] // 2], hp.hidden_dim, random_state=random_state, name="centralized_proj2")
+            #self.centralized_proj2 = Linear([hp.hidden_dim * hp.input_image_size[0] // 2], hp.hidden_dim, random_state=random_state, name="centralized_proj2")
 
 
         def forward(self, x):
             # boutta do a lot of depth2space and stuff
-            x = self.drop(x)
+            x_proj = self.conv1([x])
 
             # targets
             tier0_1, tier0_2 = split(x, axis=3)
             #tier0_1, tier0_2 = split(tier1_1, axis=2)
 
             x_proj_split0_1 = self.conv1([tier0_1])
-            x_proj_split0_2 = self.conv2([tier0_2])
+            #x_proj_split0_2 = self.conv2([tier0_2])
 
             # modeling order is - unconditional tier 0_1 , conditional tier0_2 on tier0_1
             # interleave the outputs for both, use to conditional tier1_1 on interleave(tier0_1, tier0_2)
@@ -119,7 +116,11 @@ def build_model(hp):
             tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = self.mnlayer3([tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c])
             tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = self.mnlayer4([tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c])
             out_pred0_1 = self.out_conv1([tier0_1_rec_f[:, :, :, :-1]])
+            #out_pred0_1[0, 0, 2, 2].abs().backward()
+            #print(new_x.grad[0, 0, :, :])
+            #print("tst")
 
+            """
             cond_x = self.cond_mnlayer([x_proj_split0_1])
 
             ii = x_proj_split0_2
@@ -135,12 +136,14 @@ def build_model(hp):
             tier0_2_rec_t, tier0_2_rec_f, tier0_2_rec_c = self.mnlayer6([tier0_2_rec_t, tier0_2_rec_f, tier0_2_rec_c])
             out_pred0_2 = self.out_conv2([tier0_2_rec_f[:, :, :, :-1]])
             return out_pred0_1, out_pred0_2
+            """
+            return out_pred0_1
 
     return Model().to(hp.use_device)
 
 if __name__ == "__main__":
-    model = build_model(hp)
-    optimizer = torch.optim.Adam(model.parameters(), hp.learning_rate)
+    m = build_model(hp)
+    optimizer = torch.optim.Adam(m.parameters(), hp.learning_rate)
     l_fun = BernoulliCrossEntropyFromLogits()
 
     data_random_state = np.random.RandomState(hp.random_seed)
@@ -165,13 +168,6 @@ if __name__ == "__main__":
     """
 
     def loop(itr, extras, stateful_args):
-        if extras["train"]:
-            model.train()
-            noise_level = hp.input_noise
-        else:
-            model.eval()
-            noise_level = 0.
-
         data_batch, = next(itr)
         # N H W C
         data_batch = data_batch.reshape(data_batch.shape[0], 28, 28, 1)
@@ -179,18 +175,16 @@ if __name__ == "__main__":
         data_batch = data_batch / 255.
         #data_batch = data_batch[:, :, ::2, ::2]
         torch_data_batch = torch.tensor(data_batch).contiguous().to(hp.use_device)
-        data_batch = np.clip(data_batch + noise_level * data_random_state.randn(*data_batch.shape), 0., 1.).astype("float32")
+        data_batch = np.clip(data_batch + .5 * data_random_state.randn(*data_batch.shape), 0., 1.).astype("float32")
         torch_noise_data_batch = torch.tensor(data_batch).contiguous().to(hp.use_device)
 
         # output, convolutional logits, flattened logits, sampled, final sampled and reshaped
         # targets
         tier0_1, tier0_2 = split(torch_data_batch, axis=3)
 
-        tier0_1_pred, tier0_2_pred = model(torch_noise_data_batch)
-        tier0_1_loss = (tier0_1 - tier0_1_pred) ** 2
-        tier0_2_loss = (tier0_2 - tier0_2_pred) ** 2
-        tier0_loss = tier0_1_loss.mean() + tier0_2_loss.mean()
-        loss = tier0_loss
+        #tier0_1_pred, tier0_2_pred = m(torch_noise_data_batch)
+        tier0_1_pred = m(torch_noise_data_batch)
+        tier0_loss = (tier0_1 - tier0_1_pred) ** 2
         #tier0_rec = interleave(tier0_1_pred, tier0_2_pred, axis=3)
         #tier0_loss = (tier0_rec - torch_data_batch) ** 2
         #tier0_1loss = (tier0_1 - relu(tier0_1_pred)) ** 2
@@ -199,26 +193,23 @@ if __name__ == "__main__":
         # could interleave then do loss?
         #tier0_rec = interleave(tier0_1_rec_f[:, :, :-1, :], tier0_2_rec_f[:, :, :-1, :], axis=2)
         #tier0_loss = tier0_1loss + tier0_2loss
-        #loss = tier0_loss.mean()
+        loss = tier0_loss.mean()
         l = loss.cpu().data.numpy()
 
         optimizer.zero_grad()
         if extras["train"]:
             loss.backward()
-            clipping_grad_value_(model.parameters(), hp.clip)
+            clipping_grad_value_(m.parameters(), hp.clip)
             optimizer.step()
         return [l,], None, None
 
-    s = {"model": model,
+    s = {"model": m,
          "optimizer": optimizer,
          "hparams": hp}
 
-    """
     # the out-of-loop-check
     r = loop(train_itr, {"train": True}, None)
     r2 = loop(train_itr, {"train": True}, None)
-    from IPython import embed; embed(); raise ValueError()
-    """
 
     run_loop(loop, train_itr,
              loop, valid_itr,
