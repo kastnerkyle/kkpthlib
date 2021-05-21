@@ -1,0 +1,1 @@
+python sample_melnet_cmdline.py /home/kkastner/_kkpthlib_models/melnet_cmdline_07-08-38_2021-18-05_d506ce_separate_tier_training_tier_0_0_sz_7_7/saved_models/checkpoint_model-65000.pth --axis_split=2121 --tier_input_tag=0,0 --size_at_depth=7,7 --n_layers=12 --hidden_size=512 --batch_size=10 --experiment_name=separate_tier_training

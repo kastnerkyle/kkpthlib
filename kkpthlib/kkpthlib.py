@@ -55,6 +55,7 @@ def np_normal(shape, random_state, scale=0.01):
     return (scale * random_state.randn(*shp)).astype("float32")
 
 
+
 def np_truncated_normal(shape, random_state, scale=0.075):
     """
     Builds a numpy variable filled with truncated normal random values
@@ -1574,6 +1575,80 @@ class LSTMCell(torch.nn.Module):
         return final_out, (h, c)
 
 
+class LSTMLayer(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_dims,
+                 num_units,
+                 output_dim=None,
+                 random_state=None,
+                 name=None,
+                 init=None,
+                 scale="default",
+                 forget_bias=1.,
+                 strict=None):
+        super(LSTMLayer, self).__init__()
+        if name is None:
+            name = _get_name()
+        name = name + "_lstm_layer"
+        name_proj = name + "_proj"
+        hidden_dim = 4 * num_units
+        in_proj_obj = Linear(list_of_input_dims,
+                             hidden_dim,
+                             random_state=random_state,
+                             name=name_proj,
+                             init=init,
+                             scale=scale,
+                             strict=strict)
+
+        fwd_cell_obj = LSTMCell([hidden_dim],
+                                num_units,
+                                random_state=random_state,
+                                name=name + "_forward_rnn",
+                                init=init,
+                                scale=scale)
+
+        self.in_proj_obj = in_proj_obj
+        self.fwd_cell_obj = fwd_cell_obj
+        self.num_units = num_units
+
+    def forward(self, list_of_inputs,
+                previous_forward_hidden=None, previous_forward_cell=None,
+                input_mask=None,
+                cell_dropout=None,
+                strict=None):
+
+        num_units = self.num_units
+
+        in_proj = self.in_proj_obj(list_of_inputs)
+        if input_mask is None:
+            input_mask = 0. * in_proj[..., 0] + 1.
+
+        if previous_forward_hidden == None:
+            h1_f_init = 0. * in_proj[0, :, :num_units].detach()
+        else:
+            h1_f_init = previous_forward_hidden
+        if previous_forward_cell == None:
+            c1_f_init = 0. * in_proj[0, :, :num_units].detach()
+        else:
+            c1_f_init = previous_forward_cell
+
+        def step(inp_t, inp_mask_t,
+                 h1_f_tm1, c1_f_tm1):
+            output, s = self.fwd_cell_obj([inp_t],
+                                          h1_f_tm1, c1_f_tm1,
+                                          input_mask=inp_mask_t,
+                                          cell_dropout=cell_dropout)
+            h1_f_t = s[0]
+            c1_f_t = s[1]
+            return h1_f_t, c1_f_t
+
+        # should this be a "proper" flip with mask on the end
+        r = scan(step,
+                 [in_proj, input_mask],
+                 [h1_f_init, c1_f_init])
+        return r[0], r[0], r[1]
+
+
 class BiLSTMLayer(torch.nn.Module):
     def __init__(self,
                  list_of_input_dims,
@@ -1901,26 +1976,27 @@ class CategoricalCrossEntropyFromSoftmax(torch.nn.Module):
         else:
             raise ValueError("NYI CategoricalCrossEntropy 2D inputs!")
 
+
 class CategoricalCrossEntropyFromLogits(torch.nn.Module):
     """
     Multinomial negative log likelihood of logits compared to one hot
     true_values
 
     Arguments to forward
-    prediction : tensor, shape 2D or 3D
+    prediction : tensor, shape 2D or 3D or 4D
         The predicted class probabilities out of some layer,
         normally the output of softmax_layer
+        Last dimension shold always be the category size! So N H W C in terms of image ordering
 
     targets : tensor, shape 1D or 2D
         One hot ground truth values. Must be same dimension as predicted values, but last axis should be size 1
-        predicted_values.
     eps : float, default 0
         Epsilon to be added during log calculation to avoid NaN values.
 
     Returns
     -------
     categorical_crossentropy : tensor, shape predicted_values.shape[1:]
-        The cost per sample, or per sample per step if 3D
+        The cost per sample, or per sample per step if 3D, or per sample per dimension if 4D
     """
     def __init__(self):
         super(CategoricalCrossEntropyFromLogits, self).__init__()
@@ -1931,11 +2007,20 @@ class CategoricalCrossEntropyFromLogits(torch.nn.Module):
 
         if len(prediction.size()) != len(target.size()):
             raise ValueError("prediction and target must have the same number of dimensions! Got dimensions {} and {}".format(prediction.shape, target.shape))
-        if len(prediction.size()) not in [2, 3]:
-            raise ValueError("CategoricalCrossEntropy only supports 2D or 3D inputs, got prediction size {}".format(prediction.size()))
+        if len(prediction.size()) not in [2, 3, 4]:
+            raise ValueError("CategoricalCrossEntropy only supports 2D or 3D or 4D inputs, got prediction size {}".format(prediction.size()))
 
-        if len(target.size()) not in [2, 3]:
-            raise ValueError("CategoricalCrossEntropy only supports 2D or 3D inputs, got target size {}".format(target.size()))
+        if len(target.size()) not in [2, 3, 4]:
+            raise ValueError("CategoricalCrossEntropy only supports 2D or 3D or 4D inputs, got target size {}".format(target.size()))
+
+        shp = prediction.size()
+        was_4d = False
+        if len(shp) == 4:
+            pred_h = prediction.shape[1]
+            pred_w = prediction.shape[2]
+            prediction = prediction.reshape(prediction.shape[0], prediction.shape[1] * prediction.shape[2], prediction.shape[3])
+            target = target.reshape(target.shape[0], target.shape[1] * target.shape[2], target.shape[3])
+            was_4d = True
 
         shp = prediction.size()
         if len(shp) == 3:
@@ -1963,6 +2048,8 @@ class CategoricalCrossEntropyFromLogits(torch.nn.Module):
             buff = 0. * prediction[..., 0]
             buff[large_approx > threshold] = large_approx[large_approx > threshold]
             buff[large_approx <= threshold] = small_approx[large_approx <= threshold]
+            if was_4d:
+                buff = buff.reshape((buff.shape[0], pred_h, pred_w, -1))
             return buff
         else:
             raise ValueError("NYI CategoricalCrossEntropy 2D inputs!")
@@ -3870,3 +3957,330 @@ class MelNetFullContextLayer(torch.nn.Module):
         # down proj after concat
         tier_temp_revert_t = self.proj_conv([torch.cat((tier_temp_revert_t_f, tier_temp_revert_t_f_r, tier_temp_revert_t_t, tier_temp_revert_t_t_r), axis=1)])
         return tier_temp_revert_t
+
+
+class MelNetTier(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_symbol_sizes,
+                 n_vert,
+                 n_horiz,
+                 hidden_dim,
+                 output_dim,
+                 n_layers,
+                 has_centralized_stack=False,
+                 has_spatial_condition=False,
+                 conditional_layers=2,
+                 init=None, scale="default",
+                 biases=True, bias_offset=0.,
+                 name=None,
+                 cell_dropout=1.,
+                 use_centralized_stack=False,
+                 random_state=None, strict=None,
+                 dtype="default", device="default"):
+        super(MelNetTier, self).__init__()
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass instance of np.random.RandomState!")
+
+        if strict is None:
+            strict = get_strict_mode_default()
+
+        self.input_symbols = list_of_input_symbol_sizes[0]
+        self.hidden_size = hidden_dim
+        self.output_size = output_dim
+        self.has_centralized_stack = has_centralized_stack
+        self.has_spatial_condition = has_spatial_condition
+        self.conditional_layers = conditional_layers
+
+        self.cell_dropout = cell_dropout
+        self.n_layers = n_layers
+        self.n_vert = n_vert
+        self.n_horiz = n_horiz
+        self.output_dim = output_dim
+
+        self.embed_td = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_td")
+        self.embed_fd = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_fd")
+
+        self.tds_lstms_time_fw = nn.ModuleList()
+        self.tds_lstms_freq_fw = nn.ModuleList()
+        self.tds_lstms_freq_bw = nn.ModuleList()
+        self.tds_projs = nn.ModuleList()
+        self.fds_lstms_freq_fw = nn.ModuleList()
+        if self.has_centralized_stack:
+            self.tds_centralized_lstms = nn.ModuleList()
+
+        if self.has_spatial_condition:
+            self.cond_mn = MelNetFullContextSubTier([self.input_symbols], n_vert, n_horiz, self.hidden_size, self.conditional_layers,
+                                       random_state=random_state,
+                                       init=init,
+                                       name=name + "cond_mn")
+
+        for _i in range(self.n_layers):
+            self.tds_lstms_time_fw.append(LSTMLayer([self.hidden_size,],
+                                                    self.hidden_size,
+                                                    random_state=random_state,
+                                                    init=init,
+                                                    scale=scale,
+                                                    name=name + "_tds_lstm_time_fw_{}".format(_i)))
+
+            self.tds_lstms_freq_fw.append(LSTMLayer([self.hidden_size,],
+                                                    self.hidden_size,
+                                                    random_state=random_state,
+                                                    init=init,
+                                                    scale=scale,
+                                                    name=name + "_tds_lstm_freq_fw_{}".format(_i)))
+
+            self.tds_lstms_freq_bw.append(LSTMLayer([self.hidden_size,],
+                                                    self.hidden_size,
+                                                    random_state=random_state,
+                                                    init=init,
+                                                    scale=scale,
+                                                    name=name + "_tds_lstm_freq_bw_{}".format(_i)))
+
+            self.tds_projs.append(Linear([3 * self.hidden_size,],
+                                          self.hidden_size,
+                                          random_state=random_state,
+                                          init=init,
+                                          scale=scale,
+                                          name=name + "_tds_projs_{}".format(_i)))
+
+
+            if self.has_centralized_stack:
+                self.tds_centralized_lstms.append(LSTMLayer([self.n_horiz * self.hidden_size,],
+                                                             self.hidden_size,
+                                                             random_state=random_state,
+                                                             init=init,
+                                                             scale=scale,
+                                                             name=name + "_tds_centralized_lstm_{}".format(_i)))
+                self.fds_lstms_freq_fw.append(LSTMLayer([3 * self.hidden_size,],
+                                                        self.hidden_size,
+                                                        random_state=random_state,
+                                                        init=init,
+                                                        scale=scale,
+                                                        name=name + "_fds_lstm_freq_fw_{}".format(_i)))
+            else:
+                self.fds_lstms_freq_fw.append(LSTMLayer([2 * self.hidden_size,],
+                                                        self.hidden_size,
+                                                        random_state=random_state,
+                                                        init=init,
+                                                        scale=scale,
+                                                        name=name + "_fds_lstm_freq_fw_{}".format(_i)))
+        self.out_proj = Linear([self.hidden_size,], self.output_size,
+                               random_state=random_state,
+                               init=init,
+                               scale=scale,
+                               name=name + "_output_proj")
+
+    def _time2freq(self, inp):
+        inp = inp.reshape((self.n_vert, self.batch_size, self.n_horiz, -1))
+        inp = inp.permute(2, 1, 0, 3)
+        return inp.reshape((self.n_horiz, self.batch_size * self.n_vert, -1))
+
+    def _freq2time(self, inp):
+        # batch size set in forward!
+        inp = inp.reshape((self.n_horiz, self.batch_size, self.n_vert, -1))
+        inp = inp.permute(2, 1, 0, 3)
+        return inp.reshape((self.n_vert, self.batch_size * self.n_horiz, -1))
+
+    def _td_stack(self, tds, layer):
+        freq_lstm_fw_h, _, __ = self.tds_lstms_freq_fw[layer]([tds])
+        freq_lstm_bw_h, _, __ = self.tds_lstms_freq_bw[layer]([torch.flip(tds, [0])])
+        freq_lstm_h = torch.cat((freq_lstm_fw_h, torch.flip(freq_lstm_bw_h, [0])), dim=-1)
+        freq_lstm_h = self._freq2time(freq_lstm_h)
+
+        tds_time = self._freq2time(tds)
+        time_lstm_h, _, __ = self.tds_lstms_time_fw[layer]([tds_time])
+        combined_h = torch.cat((freq_lstm_h, time_lstm_h), dim=-1)
+        res = self.tds_projs[layer]([combined_h])
+        res = self._time2freq(res)
+        return (0.5 ** 0.5) * (tds + res)
+
+    def _td_centralized_stack(self, tds, layer):
+        t_tds = self._freq2time(tds)
+        t_tds = t_tds.reshape((self.n_vert, self.batch_size, self.n_horiz, -1))
+        r_tds = t_tds.reshape((self.n_vert, self.batch_size, -1))
+        cent_lstm_h, _, __ = self.tds_centralized_lstms[layer]([r_tds])
+        # stack / broadcast the compressed thing back to the combined batch size
+        cent_lstm_h_re = 0. * t_tds[:, :, :, 0][..., None] + cent_lstm_h[:, :, None, :]
+        res = cent_lstm_h_re.reshape((self.n_vert, self.batch_size, self.n_horiz, -1))
+        res = self._time2freq(res)
+        return (0.5 ** 0.5) * (tds + res)
+
+    def _fd_stack(self, tds, fds, layer, tds_cent=None):
+        if tds_cent is not None:
+            freq_lstm_stack = torch.cat((tds, fds, tds_cent), axis=-1)
+        else:
+            freq_lstm_stack = torch.cat((tds, fds), axis=-1)
+        freq_lstm_h, _, __ = self.fds_lstms_freq_fw[layer]([freq_lstm_stack])
+        return (0.5 ** 0.5) * (fds + freq_lstm_h)
+
+    # unconditional first tier
+    def forward(self, list_of_inputs, list_of_spatial_conditions=None, bypass_td=None, bypass_fd=None, skip_input_embed=False):
+        # by default embed the inputs, otherwise bypass
+        # condidering axis 2 time 3 frequency
+
+        # shift and project the input
+        if len(list_of_inputs) > 1:
+            raise ValueError("Only support list_of_inputs length 1 for now")
+
+        x = list_of_inputs[0]
+        td_x = torch.cat((0 * x[:, 0][:, None], x[:, :-1]), dim=1)
+        fd_x = torch.cat((0 * x[:, :, 0][:, :, None], x[:, :, :-1]), dim=2)
+        if not skip_input_embed:
+            td_x, td_e = self.embed_td(td_x)
+            fd_x, fd_e = self.embed_fd(fd_x)
+
+        if bypass_td is not None:
+            td_x = bypass_td
+        if bypass_fd is not None:
+            fd_x = bypass_fd
+
+        if self.has_spatial_condition:
+            cond_info = self.cond_mn([list_of_spatial_conditions[0]])
+            td_x = td_x + cond_info
+            fd_x = fd_x + cond_info
+
+        batch_size = td_x.shape[0]
+        self.batch_size = batch_size
+        td_x = td_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+        fd_x = fd_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+        td_x = td_x.permute(1, 0, 2)
+        fd_x = fd_x.permute(1, 0, 2)
+        for _i in range(self.n_layers):
+            td_x = self._td_stack(td_x, _i)
+            if self.has_centralized_stack:
+                td_cent_x = self._td_centralized_stack(td_x, _i)
+                fd_x = self._fd_stack(td_x, fd_x, _i, tds_cent=td_cent_x)
+            else:
+                fd_x = self._fd_stack(td_x, fd_x, _i)
+        out = self.out_proj([fd_x])
+        out = out.reshape((self.n_horiz, self.batch_size, self.n_vert, self.output_size))
+        out = out.permute((1, 2, 0, 3))
+        return out
+
+
+class MelNetFullContextSubTier(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_symbol_sizes,
+                 n_vert,
+                 n_horiz,
+                 hidden_dim,
+                 n_layers,
+                 init=None, scale="default",
+                 biases=True, bias_offset=0.,
+                 name=None,
+                 cell_dropout=1.,
+                 use_centralized_stack=False,
+                 random_state=None, strict=None,
+                 dtype="default", device="default"):
+        super(MelNetFullContextSubTier, self).__init__()
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass instance of np.random.RandomState!")
+
+        if strict is None:
+            strict = get_strict_mode_default()
+
+        self.input_symbols = list_of_input_symbol_sizes[0]
+        self.hidden_size = hidden_dim
+
+        self.cell_dropout = cell_dropout
+        self.n_layers = n_layers
+        self.n_vert = n_vert
+        self.n_horiz = n_horiz
+
+        self.embed = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed")
+
+        self.lstms_time_fw = nn.ModuleList()
+        self.lstms_time_bw = nn.ModuleList()
+        self.lstms_freq_fw = nn.ModuleList()
+        self.lstms_freq_bw = nn.ModuleList()
+        self.projs = nn.ModuleList()
+
+        for _i in range(self.n_layers):
+            self.lstms_time_fw.append(LSTMLayer([self.hidden_size,],
+                                                    self.hidden_size,
+                                                    random_state=random_state,
+                                                    init=init,
+                                                    scale=scale,
+                                                    name=name + "_lstm_time_fw_{}".format(_i)))
+
+            self.lstms_time_bw.append(LSTMLayer([self.hidden_size,],
+                                                    self.hidden_size,
+                                                    random_state=random_state,
+                                                    init=init,
+                                                    scale=scale,
+                                                    name=name + "_lstm_time_bw_{}".format(_i)))
+
+            self.lstms_freq_fw.append(LSTMLayer([self.hidden_size,],
+                                                    self.hidden_size,
+                                                    random_state=random_state,
+                                                    init=init,
+                                                    scale=scale,
+                                                    name=name + "_lstm_freq_fw_{}".format(_i)))
+
+            self.lstms_freq_bw.append(LSTMLayer([self.hidden_size,],
+                                                    self.hidden_size,
+                                                    random_state=random_state,
+                                                    init=init,
+                                                    scale=scale,
+                                                    name=name + "_lstm_freq_bw_{}".format(_i)))
+
+            self.projs.append(Linear([4 * self.hidden_size,],
+                                      self.hidden_size,
+                                      random_state=random_state,
+                                      init=init,
+                                      scale=scale,
+                                      name=name + "_projs_{}".format(_i)))
+
+    def _time2freq(self, inp):
+        inp = inp.reshape((self.n_vert, self.batch_size, self.n_horiz, -1))
+        inp = inp.permute(2, 1, 0, 3)
+        return inp.reshape((self.n_horiz, self.batch_size * self.n_vert, -1))
+
+    def _freq2time(self, inp):
+        # batch size set in forward!
+        inp = inp.reshape((self.n_horiz, self.batch_size, self.n_vert, -1))
+        inp = inp.permute(2, 1, 0, 3)
+        return inp.reshape((self.n_vert, self.batch_size * self.n_horiz, -1))
+
+    def _stack(self, nds, layer):
+        freq_lstm_fw_h, _, __ = self.lstms_freq_fw[layer]([nds])
+        freq_lstm_bw_h, _, __ = self.lstms_freq_bw[layer]([torch.flip(nds, [0])])
+        freq_lstm_h = torch.cat((freq_lstm_fw_h, torch.flip(freq_lstm_bw_h, [0])), dim=-1)
+        freq_lstm_h = self._freq2time(freq_lstm_h)
+
+        nds_time = self._freq2time(nds)
+        time_lstm_fw_h, _, __ = self.lstms_time_fw[layer]([nds_time])
+        time_lstm_bw_h, _, __ = self.lstms_time_bw[layer]([torch.flip(nds_time, [0])])
+        time_lstm_h = torch.cat((time_lstm_fw_h, torch.flip(time_lstm_bw_h, [0])), dim=-1)
+        combined_h = torch.cat((freq_lstm_h, time_lstm_h), dim=-1)
+        res = self.projs[layer]([combined_h])
+        res = self._time2freq(res)
+        return (0.5 ** 0.5) * (nds + res)
+
+    def forward(self, list_of_inputs):
+        # by default embed the inputs, otherwise bypass
+        # condidering axis 2 time 3 frequency
+
+        # shift and project the input
+        if len(list_of_inputs) > 1:
+            raise ValueError("Only support list_of_inputs length 1 for now")
+
+        x = list_of_inputs[0]
+        c_x = x
+        c_x, c_e = self.embed(c_x)
+
+        batch_size = c_x.shape[0]
+        self.batch_size = batch_size
+        c_x = c_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+        c_x = c_x.permute(1, 0, 2)
+        for _i in range(self.n_layers):
+            c_x = self._stack(c_x, _i)
+        out = c_x.reshape((self.n_horiz, self.batch_size, self.n_vert, self.hidden_size))
+        out = out.permute((1, 2, 0, 3))
+        return out

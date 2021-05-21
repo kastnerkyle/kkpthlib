@@ -76,6 +76,14 @@ def build_model(hp):
                                         init=hp.melnet_init)
             self.mnlayer0_1_4 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer0_1_4",
                                         init=hp.melnet_init)
+            self.mnlayer0_1_5 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer0_1_5",
+                                        init=hp.melnet_init)
+            self.mnlayer0_1_6 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer0_1_6",
+                                        init=hp.melnet_init)
+            self.mnlayer0_1_7 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer0_1_7",
+                                        init=hp.melnet_init)
+            self.mnlayer0_1_8 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer0_1_8",
+                                        init=hp.melnet_init)
             self.out_conv0_1 = Conv2d([hp.hidden_dim], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
                                       random_state=random_state, name="out_conv0_1")
 
@@ -84,6 +92,12 @@ def build_model(hp):
             self.mnlayer0_2_1 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer0_2_1",
                                         init=hp.melnet_init, use_centralized_stack=False)
             self.mnlayer0_2_2 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer0_2_2",
+                                        init=hp.melnet_init, use_centralized_stack=False)
+            self.mnlayer0_2_3 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer0_2_3",
+                                        init=hp.melnet_init, use_centralized_stack=False)
+            self.mnlayer0_2_4 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer0_2_4",
+                                        init=hp.melnet_init, use_centralized_stack=False)
+            self.mnlayer0_2_5 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer0_2_5",
                                         init=hp.melnet_init, use_centralized_stack=False)
             self.cond_mnlayer0_2 = MelNetFullContextLayer([hp.hidden_dim], hp.hidden_dim, random_state=random_state, name="cond_mnlayer0_2",
                                                        init=hp.melnet_init)
@@ -96,6 +110,10 @@ def build_model(hp):
                                         init=hp.melnet_init, use_centralized_stack=False)
             self.mnlayer1_2_2 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer1_2_2",
                                         init=hp.melnet_init, use_centralized_stack=False)
+            self.mnlayer1_2_3 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer1_2_3",
+                                        init=hp.melnet_init, use_centralized_stack=False)
+            self.mnlayer1_2_4 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer1_2_4",
+                                        init=hp.melnet_init, use_centralized_stack=False)
             self.cond_mnlayer1_2 = MelNetFullContextLayer([hp.hidden_dim], hp.hidden_dim, random_state=random_state, name="cond_mnlayer1_2",
                                                        init=hp.melnet_init)
             self.out_conv1_2 = Conv2d([hp.hidden_dim], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
@@ -107,6 +125,8 @@ def build_model(hp):
                                         init=hp.melnet_init, use_centralized_stack=False)
             self.mnlayer2_2_2 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer2_2_2",
                                         init=hp.melnet_init, use_centralized_stack=False)
+            self.mnlayer2_2_3 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer2_2_3",
+                                        init=hp.melnet_init, use_centralized_stack=False)
             self.cond_mnlayer2_2 = MelNetFullContextLayer([hp.hidden_dim], hp.hidden_dim, random_state=random_state, name="cond_mnlayer2_2",
                                                        init=hp.melnet_init)
             self.out_conv2_2 = Conv2d([hp.hidden_dim], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0),
@@ -117,6 +137,8 @@ def build_model(hp):
             self.mnlayer3_2_1 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer3_2_1",
                                         init=hp.melnet_init, use_centralized_stack=False)
             self.mnlayer3_2_2 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer3_2_2",
+                                        init=hp.melnet_init, use_centralized_stack=False)
+            self.mnlayer3_2_3 = MelNetLayer([hp.hidden_dim], hp.hidden_dim, cell_dropout=hp.cell_dropout, random_state=random_state, name="mnlayer3_2_3",
                                         init=hp.melnet_init, use_centralized_stack=False)
             self.cond_mnlayer3_2 = MelNetFullContextLayer([hp.hidden_dim], hp.hidden_dim, random_state=random_state, name="cond_mnlayer3_2",
                                                        init=hp.melnet_init)
@@ -156,6 +178,10 @@ def build_model(hp):
             tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = self.mnlayer0_1_2([tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c])
             tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = self.mnlayer0_1_3([tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c])
             tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = self.mnlayer0_1_4([tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c])
+            tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = self.mnlayer0_1_5([tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c])
+            tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = self.mnlayer0_1_6([tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c])
+            tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = self.mnlayer0_1_7([tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c])
+            tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c = self.mnlayer0_1_8([tier0_1_rec_t, tier0_1_rec_f, tier0_1_rec_c])
             out_pred0_1 = self.out_conv0_1([tier0_1_rec_f[:, :, :, :-1]])
             if return0_1:
                 return out_pred0_1,
@@ -174,6 +200,9 @@ def build_model(hp):
             inp_shift_f[:, :, :, :-1] += cond_x
             tier0_2_rec_t, tier0_2_rec_f = self.mnlayer0_2_1([inp_shift_t, inp_shift_f, None])
             tier0_2_rec_t, tier0_2_rec_f = self.mnlayer0_2_2([tier0_2_rec_t, tier0_2_rec_f, None])
+            tier0_2_rec_t, tier0_2_rec_f = self.mnlayer0_2_3([tier0_2_rec_t, tier0_2_rec_f, None])
+            tier0_2_rec_t, tier0_2_rec_f = self.mnlayer0_2_4([tier0_2_rec_t, tier0_2_rec_f, None])
+            tier0_2_rec_t, tier0_2_rec_f = self.mnlayer0_2_5([tier0_2_rec_t, tier0_2_rec_f, None])
             out_pred0_2 = self.out_conv0_2([tier0_2_rec_f[:, :, :, :-1]])
             if return0_2:
                 return out_pred0_1, out_pred0_2
@@ -196,6 +225,8 @@ def build_model(hp):
             inp_shift_f[:, :, :, :-1] += cond_x
             tier1_2_rec_t, tier1_2_rec_f = self.mnlayer1_2_1([inp_shift_t, inp_shift_f, None])
             tier1_2_rec_t, tier1_2_rec_f = self.mnlayer1_2_2([tier1_2_rec_t, tier1_2_rec_f, None])
+            tier1_2_rec_t, tier1_2_rec_f = self.mnlayer1_2_3([tier1_2_rec_t, tier1_2_rec_f, None])
+            tier1_2_rec_t, tier1_2_rec_f = self.mnlayer1_2_4([tier1_2_rec_t, tier1_2_rec_f, None])
             out_pred1_2 = self.out_conv1_2([tier1_2_rec_f[:, :, :, :-1]])
             if return1_2:
                 return out_pred0_1, out_pred0_2, out_pred1_2
@@ -218,6 +249,7 @@ def build_model(hp):
             inp_shift_f[:, :, :, :-1] += cond_x
             tier2_2_rec_t, tier2_2_rec_f = self.mnlayer2_2_1([inp_shift_t, inp_shift_f, None])
             tier2_2_rec_t, tier2_2_rec_f = self.mnlayer2_2_2([tier2_2_rec_t, tier2_2_rec_f, None])
+            tier2_2_rec_t, tier2_2_rec_f = self.mnlayer2_2_3([tier2_2_rec_t, tier2_2_rec_f, None])
             out_pred2_2 = self.out_conv2_2([tier2_2_rec_f[:, :, :, :-1]])
             if return2_2:
                 return out_pred0_1, out_pred0_2, out_pred1_2, out_pred2_2
@@ -239,6 +271,7 @@ def build_model(hp):
             inp_shift_f[:, :, :, :-1] += cond_x
             tier3_2_rec_t, tier3_2_rec_f = self.mnlayer3_2_1([inp_shift_t, inp_shift_f, None])
             tier3_2_rec_t, tier3_2_rec_f = self.mnlayer3_2_2([tier3_2_rec_t, tier3_2_rec_f, None])
+            tier3_2_rec_t, tier3_2_rec_f = self.mnlayer3_2_3([tier3_2_rec_t, tier3_2_rec_f, None])
             out_pred3_2 = self.out_conv3_2([tier3_2_rec_f[:, :, :, :-1]])
             pred_final = interleave(pred3_1, out_pred3_2, axis=3)
             return out_pred0_1, out_pred0_2, out_pred1_2, out_pred2_2, out_pred3_2

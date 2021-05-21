@@ -654,6 +654,7 @@ def run_loop(train_loop_function, train_itr,
              permanent_model_keep_type="quantile",
              fill_fn=np.median,
              save_every_n_steps="default",
+             force_tag=None,
              skip_first_n_steps_when_saving=0):
     """
     loop function signature
@@ -758,35 +759,38 @@ def run_loop(train_loop_function, train_itr,
     if not passes_check:
         raise ValueError("Script file {} failed the following format checks: {}".format(full_script_path, reasons_failed))
 
-    break_outer = False
-    while True:
-        if break_outer:
-            if tag is not None:
-                logger.info("Confirmed tag input: {}".format(tag))
-            break
+    if force_tag is None:
+        break_outer = False
+        while True:
+            if break_outer:
+                if tag is not None:
+                    logger.info("Confirmed tag input: {}".format(tag))
+                break
 
-        print("Type an arbitrary tag to add to the save file path (will continue without input after 30s)")
-        i, o, e = select.select([sys.stdin], [], [], 30)
-        if (i):
-            tag = sys.stdin.readline().strip().replace(" ", "_")
-            while True:
-                print("Tag input: '{}', OK? ([y]/n , will auto-accept in 15s)".format(tag))
-                i, o, e = select.select([sys.stdin], [], [], 15)
-                if (i):
-                    s = sys.stdin.readline().strip()
-                    if s == "y" or s == "":
+            print("Type an arbitrary tag to add to the save file path (will continue without input after 30s)")
+            i, o, e = select.select([sys.stdin], [], [], 30)
+            if (i):
+                tag = sys.stdin.readline().strip().replace(" ", "_")
+                while True:
+                    print("Tag input: '{}', OK? ([y]/n , will auto-accept in 15s)".format(tag))
+                    i, o, e = select.select([sys.stdin], [], [], 15)
+                    if (i):
+                        s = sys.stdin.readline().strip()
+                        if s == "y" or s == "":
+                            break_outer = True
+                            break
+                        else:
+                            break
+                    else:
+                        #print("silent inner")
                         break_outer = True
                         break
-                    else:
-                        break
-                else:
-                    #print("silent inner")
-                    break_outer = True
-                    break
-        else:
-            #print("no tag case")
-            tag = None
-            break_outer = True
+            else:
+                #print("no tag case")
+                tag = None
+                break_outer = True
+    else:
+        tag = force_tag
     write_lookup_file()
     archive_code(tag=tag)
 

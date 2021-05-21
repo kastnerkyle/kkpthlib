@@ -25,15 +25,29 @@ def batch2space(x, n_batch, axis):
 
 def split(x, axis):
     assert x.shape[axis] % 2 == 0
-    if axis not in [2, 3]:
-        raise ValueError("split only operates on axis 2 or 3, 4D input assumed n_batch, channel (depth), Y, X")
-    if axis == 2:
-        return x[:, :, 0::2, :], x[:, :, 1::2, :]
+    if axis == 0:
+        return x[0::2].contiguous(), x[1::2].contiguous()
+    elif axis == 1:
+        return x[:, 0::2].contiguous(), x[:, 1::2].contiguous()
+    elif axis == 2:
+        return x[:, :, 0::2].contiguous(), x[:, :, 1::2].contiguous()
     elif axis == 3:
         return x[:, :, :, 0::2].contiguous(), x[:, :, :, 1::2].contiguous()
+    else:
+        raise ValueError("Only currently support axis 0 1 2 or 3")
 
 
 def interleave(x_1, x_2, axis):
+    if axis == 0:
+        c = torch.empty(2 * x_1.shape[0], x_1.shape[1], x_1.shape[2], x_1.shape[3]).to(x_1.device)
+        c[::2] = x_1
+        c[1::2] = x_2
+        return c
+    if axis == 1:
+        c = torch.empty(x_1.shape[0], 2 * x_1.shape[1], x_1.shape[2], x_1.shape[3]).to(x_1.device)
+        c[:, ::2] = x_1
+        c[:, 1::2] = x_2
+        return c
     if axis == 2:
         c = torch.empty(x_1.shape[0], x_1.shape[1], 2 * x_1.shape[2], x_1.shape[3]).to(x_1.device)
         c[:, :, ::2, :] = x_1
@@ -45,14 +59,19 @@ def interleave(x_1, x_2, axis):
         c[:, :, :, 1::2] = x_2
         return c
 
-def np_interleave(x_1, x_2, axis):
+def interleave_np(x_1, x_2, axis):
+    if axis == 1:
+        c = np.empty((x_1.shape[0], 2 * x_1.shape[1], x_1.shape[2], x_1.shape[3])).astype(x_1.dtype)
+        c[:, ::2] = x_1
+        c[:, 1::2] = x_2
+        return c
     if axis == 2:
-        c = np.empty((x_1.shape[0], x_1.shape[1], 2 * x_1.shape[2], x_1.shape[3]))
+        c = np.empty((x_1.shape[0], x_1.shape[1], 2 * x_1.shape[2], x_1.shape[3])).astype(x_1.dtype)
         c[:, :, ::2, :] = x_1
         c[:, :, 1::2, :] = x_2
         return c
     if axis == 3:
-        c = np.empty((x_1.shape[0], x_1.shape[1], x_1.shape[2], 2 * x_1.shape[3]))
+        c = np.empty((x_1.shape[0], x_1.shape[1], x_1.shape[2], 2 * x_1.shape[3])).astype(x_1.dtype)
         c[:, :, :, ::2] = x_1
         c[:, :, :, 1::2] = x_2
         return c
