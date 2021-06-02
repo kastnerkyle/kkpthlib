@@ -1463,7 +1463,8 @@ class LSTMCell(torch.nn.Module):
                  random_state=None,
                  name=None, init=None, scale="default",
                  forget_bias=1.,
-                 strict=None):
+                 strict=None,
+                 device="default"):
         super(LSTMCell, self).__init__()
         # cell_dropout should be a value in [0., 1.], or None
         # output is the thing to use in following layers, state is a tuple that feeds into the next call
@@ -1510,7 +1511,8 @@ class LSTMCell(torch.nn.Module):
                                hidden_dim,
                                random_state=random_state,
                                name=name_proj,
-                               init=(comb_w_np, comb_b_np), strict=strict)
+                               init=(comb_w_np, comb_b_np), strict=strict,
+                               device=device)
 
         if output_dim is not None:
             name_out = name + "_lstm_h_to_out",
@@ -1522,7 +1524,8 @@ class LSTMCell(torch.nn.Module):
             h_to_out_b_np, = make_numpy_biases([output_dim], name=name_out_b)
             h_to_out_obj = Linear([num_units], output_dim, random_state=random_state,
                               name=name_out,
-                              init=(h_to_out_w_np, h_to_out_b_np), strict=strict)
+                              init=(h_to_out_w_np, h_to_out_b_np), strict=strict,
+                              device=device)
             self.h_to_out_obj = h_to_out_obj
         self.lstm_proj_obj = lstm_proj_obj
         self.num_units = num_units
@@ -1585,7 +1588,8 @@ class LSTMLayer(torch.nn.Module):
                  init=None,
                  scale="default",
                  forget_bias=1.,
-                 strict=None):
+                 strict=None,
+                 device="default"):
         super(LSTMLayer, self).__init__()
         if name is None:
             name = _get_name()
@@ -1598,14 +1602,16 @@ class LSTMLayer(torch.nn.Module):
                              name=name_proj,
                              init=init,
                              scale=scale,
-                             strict=strict)
+                             strict=strict,
+                             device=device)
 
         fwd_cell_obj = LSTMCell([hidden_dim],
                                 num_units,
                                 random_state=random_state,
                                 name=name + "_forward_rnn",
                                 init=init,
-                                scale=scale)
+                                scale=scale,
+                                device=device)
 
         self.in_proj_obj = in_proj_obj
         self.fwd_cell_obj = fwd_cell_obj
@@ -1657,7 +1663,8 @@ class BiLSTMLayer(torch.nn.Module):
                  random_state=None,
                  name=None, init=None, scale="default",
                  forget_bias=1.,
-                 strict=None):
+                 strict=None,
+                 device="default"):
         super(BiLSTMLayer, self).__init__()
         if name is None:
             name = _get_name()
@@ -1668,19 +1675,22 @@ class BiLSTMLayer(torch.nn.Module):
                              hidden_dim,
                              random_state=random_state,
                              name=name_proj,
-                             init=init, strict=strict)
+                             init=init, strict=strict,
+                             device=device)
 
         fwd_cell_obj = LSTMCell([hidden_dim],
                                 num_units,
                                 random_state=random_state,
                                 name=name + "forward_rnn",
-                                init=init)
+                                init=init,
+                                device=device)
 
         rev_cell_obj = LSTMCell([hidden_dim],
                                  num_units,
                                  random_state=random_state,
                                  name=name + "reverse_rnn",
-                                 init=init)
+                                 init=init,
+                                 device=device)
 
         self.in_proj_obj = in_proj_obj
         self.fwd_cell_obj = fwd_cell_obj
@@ -1932,7 +1942,7 @@ class CategoricalCrossEntropyFromSoftmax(torch.nn.Module):
     Multinomial negative log likelihood of softmax predicted compared to one hot
     true_values
 
-    Arguments to forward 
+    Arguments to forward
     prediction : tensor, shape 2D or 3D
         The predicted class probabilities out of some layer,
         normally the output of softmax_layer
@@ -2054,6 +2064,136 @@ class CategoricalCrossEntropyFromLogits(torch.nn.Module):
         else:
             raise ValueError("NYI CategoricalCrossEntropy 2D inputs!")
 
+class DiscretizedMixtureOfLogisticsCrossEntropyFromLogits(torch.nn.Module):
+    """
+    Discretized mixture of logistics negative log likelihood of logits compared to scaled -1, 1 targets 
+    true_values
+     
+    both in NHWC format, with C being (2 * n_mix + n_mix) * n_channels, where n_channels is the number of output maps (3 for RGB images for example)
+
+    Arguments to forward
+    prediction : tensor, shape 4D
+        The predicted class probabilities out of some layer,
+
+    targets : tensor, shape 4D
+        Must be same dimension as predicted values, but last axis should be size 1
+
+    Returns
+    -------
+   crossentropy : tensor, shape predicted_values.shape
+        The cost per sample per dimension if 4D
+    """
+    def __init__(self):
+        super(DiscretizedMixtureOfLogisticsCrossEntropyFromLogits, self).__init__()
+
+    def log_sum_exp(self, x):
+        """ numerically stable log_sum_exp implementation that prevents overflow
+        **** code for this function from https://github.com/pclucas14/pixel-cnn-pp/blob/master/utils.py
+        """
+        # TF ordering
+        axis  = len(x.size()) - 1
+        m, _  = torch.max(x, dim=axis)
+        m2, _ = torch.max(x, dim=axis, keepdim=True)
+        return m + torch.log(torch.sum(torch.exp(x - m2), dim=axis))
+
+    def log_prob_from_logits(self, x):
+        """ numerically stable log_softmax implementation that prevents overflow
+        **** code for this function from https://github.com/pclucas14/pixel-cnn-pp/blob/master/utils.py
+        """
+        # TF ordering
+        axis = len(x.size()) - 1
+        m, _ = torch.max(x, dim=axis, keepdim=True)
+        return x - m - torch.log(torch.sum(torch.exp(x - m), dim=axis, keepdim=True))
+
+    def forward(self, prediction, target, n_mix=10, n_bins=255.):
+        if target.size(-1) != 1:
+            raise ValueError("Last dimension of target must be 1")
+
+        if len(prediction.size()) != len(target.size()):
+            raise ValueError("prediction and target must have the same number of dimensions! Got dimensions {} and {}".format(prediction.shape, target.shape))
+        if len(prediction.size()) not in [4]:
+            raise ValueError("DiscretizedMixtureOfLogisticsCrossEntropy only supports 4D inputs, got prediction size {}".format(prediction.size()))
+
+        if len(target.size()) not in [4]:
+            raise ValueError("DiscretizedMixtureOfLogisticsCrossEntropy only supports 4D inputs, got target size {}".format(target.size()))
+
+        #def discretized_mix_logistic_loss(prediction, target, nr_mix=10, reduction='mean'):
+        """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval
+        Args:
+            prediction: model prediction. channels of model prediction should be mean
+                        and scale for each channel and weighting bt components --> (2*nr_mix+nr_mix)*num_channels
+            target: min/max should be -1 and 1
+        **** code for this function from https://github.com/pclucas14/pixel-cnn-pp/blob/master/utils.py
+        """
+        chan = prediction.shape[-1]
+        nr_mix = n_mix
+        #assert (prediction.max()<=1 and prediction.min()>=-1)
+        assert (target.max()<=1 and target.min()>=-1)
+        device = target.device
+        l = prediction
+        x = target
+
+        # Pytorch ordering
+        # N C H W TO N H W C
+        #x = x.permute(0, 2, 3, 1)
+        #l = l.permute(0, 2, 3, 1)
+
+        xs = [int(y) for y in x.size()]
+        #ls = [int(y) for y in l.size()]
+
+        # here and below: unpacking the params of the mixture of logistics
+        #nr_mix = int(ls[-1] / 10)
+        # l is prediction
+        logit_probs = l[:, :, :, :nr_mix]
+
+        l = l[:, :, :, nr_mix:].contiguous().view(xs + [nr_mix*2]) # 3--changed to 1 for mean, scale, coef
+        means = l[:, :, :, :, :nr_mix]
+        log_scales = torch.clamp(l[:, :, :, :, nr_mix:2 * nr_mix], min=-7.)
+
+        # here and below: getting the means and adjusting them based on preceding
+        # sub-pixels
+        x = x.contiguous()
+        #x = x.unsqueeze(-1) + torch.Variable(torch.zeros(xs + [nr_mix]).to(device), requires_grad=False)
+        x = x.unsqueeze(-1) + torch.zeros(xs + [nr_mix], requires_grad=False).to(device)
+
+        centered_x = x - means
+        inv_stdv = torch.exp(-log_scales)
+        plus_in = inv_stdv * (centered_x + 1. / float(n_bins))
+        cdf_plus = torch.sigmoid(plus_in)
+        min_in = inv_stdv * (centered_x - 1. / float(n_bins))
+        cdf_min = torch.sigmoid(min_in)
+        # log probability for edge case of 0 (before scaling)
+        log_cdf_plus = plus_in - F.softplus(plus_in)
+        # log probability for edge case of 255 (before scaling)
+        log_one_minus_cdf_min = -F.softplus(min_in)
+        cdf_delta = cdf_plus - cdf_min  # probability for all other cases
+        mid_in = inv_stdv * centered_x
+        # log probability in the center of the bin, to be used in extreme cases
+        # (not actually used in our code)
+        log_pdf_mid = mid_in - log_scales - 2. * F.softplus(mid_in)
+
+        # now select the right output: left edge case, right edge case, normal
+        # case, extremely low prob case (doesn't actually happen for us)
+
+        # this is what we are really doing, but using the robust version below for extreme cases in other applications and to avoid NaN issue with tf.select()
+        # log_probs = tf.select(x < -0.999, log_cdf_plus, tf.select(x > 0.999, log_one_minus_cdf_min, tf.log(cdf_delta)))
+
+        # robust version, that still works if probabilities are below 1e-5 (which never happens in our code)
+        # tensorflow backpropagates through tf.select() by multiplying with zero instead of selecting: this requires use to use some ugly tricks to avoid potential NaNs
+        # the 1e-12 in tf.maximum(cdf_delta, 1e-12) is never actually used as output, it's purely there to get around the tf.select() gradient issue
+        # if the probability on a sub-pixel is below 1e-5, we use an approximation
+        # based on the assumption that the log-density is constant in the bin of
+        # the observed sub-pixel value
+
+        inner_inner_cond = (cdf_delta > 1e-5).float()
+        inner_inner_out  = inner_inner_cond * torch.log(torch.clamp(cdf_delta, min=1e-12)) + (1. - inner_inner_cond) * (log_pdf_mid - np.log(float(n_bins) / 2))
+        inner_cond       = (x > 0.999).float()
+        inner_out        = inner_cond * log_one_minus_cdf_min + (1. - inner_cond) * inner_inner_out
+        cond             = (x < -0.999).float()
+        log_probs        = cond * log_cdf_plus + (1. - cond) * inner_out
+        log_probs        = torch.sum(log_probs, dim=3) + self.log_prob_from_logits(logit_probs)
+        lse = self.log_sum_exp(log_probs)
+        return -lse
 
 class NoamOpt(object):
     """
@@ -3456,8 +3596,7 @@ class AWDXLNetDecoderBlock(nn.Module):
             pad_l = np.zeros((perm_mask_0.shape[0], context_cut))
             perm_mask_0 = np.concatenate((pad_l, perm_mask_0), axis=1)
 
-            # target_mapping should be the length of the full sequence - due to the mechanics of the attention inside TwoStreamRelativeDecoder
-            target_mask_0 = np.array(mask).astype("float32")
+            # target_mapping should be the length of the full sequence - due to the mechanics of the attention inside TwoStreamRelativeDecoder target_mask_0 = np.array(mask).astype("float32")
             pad_l = np.zeros((len(full_tgt) - len(tgt),))
             target_mask_0 = np.concatenate((pad_l, target_mask_0))
             target_mapping_0 = _xlnet_make_target_mapping(target_mask_0)
@@ -4207,35 +4346,40 @@ class MelNetFullContextSubTier(torch.nn.Module):
                                                     random_state=random_state,
                                                     init=init,
                                                     scale=scale,
-                                                    name=name + "_lstm_time_fw_{}".format(_i)))
+                                                    name=name + "_lstm_time_fw_{}".format(_i),
+                                                    device=device))
 
             self.lstms_time_bw.append(LSTMLayer([self.hidden_size,],
                                                     self.hidden_size,
                                                     random_state=random_state,
                                                     init=init,
                                                     scale=scale,
-                                                    name=name + "_lstm_time_bw_{}".format(_i)))
+                                                    name=name + "_lstm_time_bw_{}".format(_i),
+                                                    device=device))
 
             self.lstms_freq_fw.append(LSTMLayer([self.hidden_size,],
                                                     self.hidden_size,
                                                     random_state=random_state,
                                                     init=init,
                                                     scale=scale,
-                                                    name=name + "_lstm_freq_fw_{}".format(_i)))
+                                                    name=name + "_lstm_freq_fw_{}".format(_i),
+                                                    device=device))
 
             self.lstms_freq_bw.append(LSTMLayer([self.hidden_size,],
                                                     self.hidden_size,
                                                     random_state=random_state,
                                                     init=init,
                                                     scale=scale,
-                                                    name=name + "_lstm_freq_bw_{}".format(_i)))
+                                                    name=name + "_lstm_freq_bw_{}".format(_i),
+                                                    device=device))
 
             self.projs.append(Linear([4 * self.hidden_size,],
                                       self.hidden_size,
                                       random_state=random_state,
                                       init=init,
                                       scale=scale,
-                                      name=name + "_projs_{}".format(_i)))
+                                      name=name + "_projs_{}".format(_i),
+                                      device=device))
 
     def _time2freq(self, inp):
         inp = inp.reshape((self.n_vert, self.batch_size, self.n_horiz, -1))
@@ -4284,3 +4428,339 @@ class MelNetFullContextSubTier(torch.nn.Module):
         out = c_x.reshape((self.n_horiz, self.batch_size, self.n_vert, self.hidden_size))
         out = out.permute((1, 2, 0, 3))
         return out
+
+
+class AttentionMelNetTier(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_symbol_sizes,
+                 n_vert,
+                 n_horiz,
+                 hidden_dim,
+                 output_dim,
+                 n_layers,
+                 has_centralized_stack=False,
+                 has_spatial_condition=False,
+                 has_attention=False,
+                 attention_mixture_components=10,
+                 conditional_layers=2,
+                 init=None, scale="default",
+                 biases=True, bias_offset=0.,
+                 name=None,
+                 cell_dropout=1.,
+                 use_centralized_stack=False,
+                 random_state=None, strict=None,
+                 dtype="default", device="default"):
+        super(AttentionMelNetTier, self).__init__()
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass instance of np.random.RandomState!")
+
+        if strict is None:
+            strict = get_strict_mode_default()
+
+        self.input_symbols = list_of_input_symbol_sizes[0]
+        self.hidden_size = hidden_dim
+        self.output_size = output_dim
+        self.has_centralized_stack = has_centralized_stack
+        self.has_spatial_condition = has_spatial_condition
+        self.attention_mixture_components = attention_mixture_components
+        self.has_attention = has_attention
+        self.conditional_layers = conditional_layers
+
+        self.cell_dropout = cell_dropout
+        self.n_layers = n_layers
+        self.n_vert = n_vert
+        self.n_horiz = n_horiz
+        self.output_dim = output_dim
+
+        self.embed_td = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_td")
+        self.embed_fd = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_fd")
+
+        self.tds_lstms_time_fw = nn.ModuleList()
+        self.tds_lstms_freq_fw = nn.ModuleList()
+        self.tds_lstms_freq_bw = nn.ModuleList()
+        self.tds_projs = nn.ModuleList()
+        self.fds_lstms_freq_fw = nn.ModuleList()
+        if self.has_centralized_stack:
+            self.centralized_input_proj = Linear([self.n_horiz],
+                                                 self.hidden_size,
+                                                 random_state=random_state,
+                                                 init=init,
+                                                 scale=scale,
+                                                 name=name + "_centralized_input_proj",
+                                                 device=device)
+            self.cds_centralized_lstms = nn.ModuleList()
+
+        if self.has_spatial_condition:
+            self.cond_mn = MelNetFullContextSubTier([self.input_symbols], n_vert, n_horiz, self.hidden_size, self.conditional_layers,
+                                       random_state=random_state,
+                                       init=init,
+                                       name=name + "cond_mn",
+                                       device=device)
+        if self.has_centralized_stack:
+            if self.has_attention:
+                self.attn_lstm_cell = LSTMCell([2 * self.hidden_size],
+                                               self.hidden_size,
+                                               random_state=random_state,
+                                               init=init,
+                                               scale=scale,
+                                               name=name + "_attn_lstm_cell",
+                                               device=device)
+
+                self.attn_proj = Linear([self.hidden_size],
+                                         3 * self.attention_mixture_components,
+                                         random_state=random_state,
+                                         init=init,
+                                         scale=scale,
+                                         name=name + "_attn_proj",
+                                         device=device)
+
+
+        for _i in range(self.n_layers):
+            self.tds_lstms_time_fw.append(LSTMLayer([self.hidden_size,],
+                                                    self.hidden_size,
+                                                    random_state=random_state,
+                                                    init=init,
+                                                    scale=scale,
+                                                    name=name + "_tds_lstm_time_fw_{}".format(_i),
+                                                    device=device))
+
+            self.tds_lstms_freq_fw.append(LSTMLayer([self.hidden_size,],
+                                                    self.hidden_size,
+                                                    random_state=random_state,
+                                                    init=init,
+                                                    scale=scale,
+                                                    name=name + "_tds_lstm_freq_fw_{}".format(_i),
+                                                    device=device))
+
+            self.tds_lstms_freq_bw.append(LSTMLayer([self.hidden_size,],
+                                                    self.hidden_size,
+                                                    random_state=random_state,
+                                                    init=init,
+                                                    scale=scale,
+                                                    name=name + "_tds_lstm_freq_bw_{}".format(_i),
+                                                    device=device))
+
+            self.tds_projs.append(Linear([3 * self.hidden_size,],
+                                          self.hidden_size,
+                                          random_state=random_state,
+                                          init=init,
+                                          scale=scale,
+                                          name=name + "_tds_projs_{}".format(_i),
+                                          device=device))
+
+
+            if self.has_centralized_stack:
+                self.cds_centralized_lstms.append(LSTMLayer([self.hidden_size,],
+                                                             self.hidden_size,
+                                                             random_state=random_state,
+                                                             init=init,
+                                                             scale=scale,
+                                                             name=name + "_cds_centralized_lstm_{}".format(_i),
+                                                             device=device))
+                self.fds_lstms_freq_fw.append(LSTMLayer([3 * self.hidden_size,],
+                                                        self.hidden_size,
+                                                        random_state=random_state,
+                                                        init=init,
+                                                        scale=scale,
+                                                        name=name + "_fds_lstm_freq_fw_{}".format(_i),
+                                                        device=device))
+            else:
+                self.fds_lstms_freq_fw.append(LSTMLayer([2 * self.hidden_size,],
+                                                        self.hidden_size,
+                                                        random_state=random_state,
+                                                        init=init,
+                                                        scale=scale,
+                                                        name=name + "_fds_lstm_freq_fw_{}".format(_i),
+                                                        device=device))
+        self.out_proj = Linear([self.hidden_size,], self.output_size,
+                               random_state=random_state,
+                               init=init,
+                               scale=scale,
+                               name=name + "_output_proj",
+                               device=device)
+
+    def _time2freq(self, inp):
+        inp = inp.reshape((self.n_vert, self.batch_size, self.n_horiz, -1))
+        inp = inp.permute(2, 1, 0, 3)
+        return inp.reshape((self.n_horiz, self.batch_size * self.n_vert, -1))
+
+    def _freq2time(self, inp):
+        # batch size set in forward!
+        inp = inp.reshape((self.n_horiz, self.batch_size, self.n_vert, -1))
+        inp = inp.permute(2, 1, 0, 3)
+        return inp.reshape((self.n_vert, self.batch_size * self.n_horiz, -1))
+
+    def _td_stack(self, tds, layer):
+        freq_lstm_fw_h, _, __ = self.tds_lstms_freq_fw[layer]([tds])
+        freq_lstm_bw_h, _, __ = self.tds_lstms_freq_bw[layer]([torch.flip(tds, [0])])
+        freq_lstm_h = torch.cat((freq_lstm_fw_h, torch.flip(freq_lstm_bw_h, [0])), dim=-1)
+        freq_lstm_h = self._freq2time(freq_lstm_h)
+
+        tds_time = self._freq2time(tds)
+        time_lstm_h, _, __ = self.tds_lstms_time_fw[layer]([tds_time])
+        combined_h = torch.cat((freq_lstm_h, time_lstm_h), dim=-1)
+        res = self.tds_projs[layer]([combined_h])
+        res = self._time2freq(res)
+        return (0.5 ** 0.5) * (tds + res)
+
+    def _cd_centralized_stack(self, cds, layer):
+        cent_lstm_h, _, __ = self.cds_centralized_lstms[layer]([cds])
+        # stack / broadcast the compressed thing back to the combined batch size
+        return (0.5 ** 0.5) * (cds + cent_lstm_h)
+
+    def _fd_stack(self, tds, fds, layer, tds_cent=None):
+        # broadcast tds_cent across frequency axis
+        if tds_cent is not None:
+            # need to permute + reshape to match what was done for td_x, fd_x
+            # so that batch combined stuff stays contiguous in the right way!
+            tds_cent = tds_cent.permute(1, 0, 2)
+            ext_tds_cent = tds_cent.reshape((self.batch_size * self.n_vert, -1))[None]
+            # broadcast trick so that shapes match - basically broadcasting over freq
+            ext_tds_cent = ext_tds_cent + 0. * fds
+            freq_lstm_stack = torch.cat((tds, fds, ext_tds_cent), axis=-1)
+        else:
+            freq_lstm_stack = torch.cat((tds, fds), axis=-1)
+        freq_lstm_h, _, __ = self.fds_lstms_freq_fw[layer]([freq_lstm_stack])
+        return (0.5 ** 0.5) * (fds + freq_lstm_h)
+
+    def _attention_step(self, h_i, memory, memory_mask, ksi):
+        phi_hat = self.attn_proj([h_i])
+
+        ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
+        beta = torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+        alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+
+        u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
+        u_R = u + 1.5
+        u_L = u + 0.5
+        term1 = torch.sum(alpha[..., None] * (torch.sigmoid(u_R - ksi[..., None]) / beta[..., None]), keepdim=True, dim=1)
+        term2 = torch.sum(alpha[..., None] * (torch.sigmoid(u_L - ksi[..., None]) / beta[..., None]), keepdim=True, dim=1)
+        weights = term1 - term2
+        # mask weights here
+        weights = memory_mask[:, None].permute(2, 1, 0) * weights
+        context = torch.bmm(weights, memory.permute(1, 0, 2))
+        termination = 1. - term1[:, 0]
+        # context is B, 1, D
+        # weights T, 1, B 
+        # termination T, B
+        # ksi B, mixture
+        return context, weights.permute(2, 1, 0), termination.permute(1, 0), ksi
+
+    def _attention(self, tds, layer, memory, memory_mask):
+        T, B, D = tds.size()
+        context = 0. * tds[0]
+        h_i, c_i = 0. * tds[0], 0. * tds[0]
+        ksi = tds.new_zeros(B, self.attention_mixture_components)
+        """
+        def step(inp_t, inp_mask_t,
+                 h1_f_tm1, c1_f_tm1):
+            output, s = self.fwd_cell_obj([inp_t],
+                                          h1_f_tm1, c1_f_tm1,
+                                          input_mask=inp_mask_t,
+                                          cell_dropout=cell_dropout)
+            h1_f_t = s[0]
+            c1_f_t = s[1]
+            return h1_f_t, c1_f_t
+
+        # should this be a "proper" flip with mask on the end
+        r = scan(step,
+                 [in_proj, input_mask],
+                 [h1_f_init, c1_f_init])
+        """
+        contexts = []
+        weights = []
+        terminations = []
+        ksis = []
+        for _i in range(T):
+            x = torch.cat([tds[_i], context.squeeze(1)], dim=-1)
+            out, s = self.attn_lstm_cell([x],
+                                         h_i, c_i,
+                                         input_mask=None)
+            h_t, c_t = s[0], s[1]
+            context, weight, termination, ksi = self._attention_step(h_t, memory, memory_mask, ksi)
+            contexts.append(context)
+            weights.append(weight)
+            terminations.append(termination[None])
+            ksis.append(ksi[None])
+            h_i, c_i = h_t, c_t
+        # decoder_T, B, D
+        contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + tds
+        # decoder_T, encoder_T, B
+        alignments = torch.cat(weights, axis=1).permute(1, 0, 2)
+        terminations = torch.cat(terminations, axis=0)
+        ksis = torch.cat(ksis, axis=0)
+        return contexts, alignments, terminations, ksis
+
+    # conditional first tier
+    def forward(self, list_of_inputs, list_of_spatial_conditions=None, bypass_td=None, bypass_fd=None, skip_input_embed=False,
+                      memory=None, memory_mask=None):
+        # by default embed the inputs, otherwise bypass
+        # condidering axis 2 time 3 frequency
+
+        # shift and project the input
+        if len(list_of_inputs) > 1:
+            raise ValueError("Only support list_of_inputs length 1 for now")
+
+        x = list_of_inputs[0]
+        td_x = torch.cat((0 * x[:, 0][:, None], x[:, :-1]), dim=1)
+        fd_x = torch.cat((0 * x[:, :, 0][:, :, None], x[:, :, :-1]), dim=2)
+        if self.has_centralized_stack:
+            # x should have dim of size 1 on the last for input
+            cd_x = torch.cat((0 * x[:, 0][:, None], x[:, :-1]), dim=1)[..., 0]
+            cd_x = cd_x.permute(1, 0, 2)
+        if not skip_input_embed:
+            td_x, td_e = self.embed_td(td_x)
+            fd_x, fd_e = self.embed_fd(fd_x)
+            cd_x = self.centralized_input_proj([cd_x])
+            # separate embed 
+
+        if bypass_td is not None:
+            td_x = bypass_td
+        if bypass_fd is not None:
+            fd_x = bypass_fd
+
+        if self.has_attention:
+            assert memory is not None
+            assert memory_mask is not None
+
+        if self.has_spatial_condition:
+            cond_info = self.cond_mn([list_of_spatial_conditions[0]])
+            td_x = td_x + cond_info
+            fd_x = fd_x + cond_info
+
+        batch_size = td_x.shape[0]
+        self.batch_size = batch_size
+        if self.has_attention:
+            # t b f to b t f to stretch
+            #mem_shp = memory.shape
+            #memory_stretch = memory.permute(1, 0, 2)[:, :, None, :] + 0. * td_x[:, :1, :, :1]
+            #memory_stretch = memory_stretch.permute(0, 2, 1, 3).reshape((batch_size * self.n_vert, mem_shp[0], mem_shp[2]))
+            # back to t b f
+            #memory_stretch = memory_stretch.permute(1, 0, 2)
+            memory_stretch = memory
+        # batch, mel_time, mel_freq, feats -> batch * mel_time, mel_freq, feats
+        td_x = td_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+        fd_x = fd_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+        td_x = td_x.permute(1, 0, 2)
+        fd_x = fd_x.permute(1, 0, 2)
+        for _i in range(self.n_layers):
+            td_x = self._td_stack(td_x, _i)
+            if self.has_centralized_stack:
+                if _i == (self.n_layers // 2) and self.has_attention:
+                    cd_att, alignment, termination, ksis = self._attention(cd_x, _i, memory, memory_mask)
+                    cd_x = self._cd_centralized_stack(cd_att, _i)
+                else:
+                    cd_x = self._cd_centralized_stack(cd_x, _i)
+                fd_x = self._fd_stack(td_x, fd_x, _i, tds_cent=cd_x)
+            else:
+                fd_x = self._fd_stack(td_x, fd_x, _i)
+        out = self.out_proj([fd_x])
+        out = out.reshape((self.n_horiz, self.batch_size, self.n_vert, self.output_size))
+        out = out.permute((1, 2, 0, 3))
+        if self.has_attention:
+            return out, alignment, termination, ksis
+        else:
+            return out

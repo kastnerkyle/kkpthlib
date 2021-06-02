@@ -133,58 +133,74 @@ if args.tier_condition_tag is not None:
 else:
     input_tier_condition_tag = None
 
-from kkpthlib.datasets import fetch_mnist
-from kkpthlib import ListIterator
+from kkpthlib.datasets import EnglishSpeechCorpus
 from kkpthlib.utils import split
 from kkpthlib.utils import interleave_np
 from kkpthlib.utils import interleave
 from kkpthlib import softmax_np
 
-mnist = fetch_mnist()
 data_random_state = np.random.RandomState(hp.random_seed)
+folder_base = "/usr/local/data/kkastner/robovoice/robovoice_d_25k"
+speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
+                             wav_folder=folder_base + "/wavs/",
+                             alignment_folder=folder_base + "/alignment_json/",
+                             fixed_minibatch_time_secs=6,
+                             train_split=0.9,
+                             random_state=data_random_state)
 
-"""
-train_data = mnist["data"][mnist["train_indices"]]
-train_target = mnist["target"][mnist["train_indices"]]
-valid_data = mnist["data"][mnist["valid_indices"]]
-valid_target = mnist["target"][mnist["valid_indices"]]
+valid_el = speech.get_valid_utterances(hp.batch_size)
+cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
+batch_norm_flag = 1.
 
-train_itr = ListIterator([train_data, train_target], batch_size=hp.batch_size, random_state=data_random_state,
-                         infinite_iterator=True)
-valid_itr = ListIterator([valid_data, valid_target], batch_size=hp.batch_size, random_state=data_random_state,
-                         infinite_iterator=True)
-"""
-train_data = mnist["data"][mnist["train_indices"]]
-valid_data = mnist["data"][mnist["valid_indices"]]
-
-train_itr = ListIterator([train_data], batch_size=hp.batch_size, random_state=data_random_state,
-                         infinite_iterator=True)
-valid_itr = ListIterator([valid_data], batch_size=hp.batch_size, random_state=data_random_state,
-                         infinite_iterator=True)
-
-itr = valid_itr
-data_batch, = next(itr)
-data_batch = data_batch.reshape(data_batch.shape[0], 28, 28, 1)
-data_batch = data_batch.transpose(0, 3, 1, 2).astype("int32").astype("float32")
-data_batch = torch.tensor(data_batch).contiguous().to(hp.use_device)
-data_batch = data_batch[:, 0][..., None]
+torch_data_batch = torch.tensor(data_batch[..., None]).contiguous().to(hp.use_device)
+torch_data_mask = torch.tensor(data_mask).contiguous().to(hp.use_device)
+torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
+torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
 
 all_x_splits = []
-x_t = data_batch
+x_t = torch_data_batch
 for aa in input_axis_split_list:
     all_x_splits.append(split(x_t, axis=aa))
     x_t = all_x_splits[-1][0]
 x_in = all_x_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
 
-teacher_forced_in = x_in
+all_x_mask_splits = []
+# broadcast mask over frequency so we can downsample
+x_mask_t = torch_data_mask[..., None, None] + 0. * torch_data_batch
+for aa in input_axis_split_list:
+    all_x_mask_splits.append(split(x_mask_t, axis=aa))
+    x_mask_t = all_x_mask_splits[-1][0]
+x_mask_in = all_x_mask_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+
 if input_tier_condition_tag is None:
-    pred_out = model(x_in)
+    pred_out = model(x_in, x_mask=x_mask_in,
+                     memory_condition=torch_cond_seq_data_batch,
+                     memory_condition_mask=torch_cond_seq_data_mask,
+                     batch_norm_flag=batch_norm_flag)
 else:
     cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
-    pred_out = model(x_in, spatial_condition=cond)
-    teacher_forced_cond = cond
+    pred_out = model(x_in, x_mask=x_mask_in,
+                     spatial_condition=cond,
+                     batch_norm_flag=batch_norm_flag)
 
 teacher_forced_pred = pred_out
+teacher_forced_attn = model.attention_alignment
+
+import matplotlib.pyplot as plt
+
+for _i in range(hp.batch_size):
+    mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
+    text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
+    plt.matshow(teacher_forced_attn[..., _i].cpu().data.numpy()[:mel_cut, :text_cut])
+    plt.savefig("tmp_attn_{}.png".format(_i))
+    plt.close()
+from IPython import embed; embed(); raise ValueError()
+print("dwjakl")
+
+#x_mask_in[0, :, 0, 0]
+#torch_cond_seq_data_mask[:, 0]
+from IPython import embed; embed(); raise ValueError()
+
 
 if input_tier_condition_tag is None:
     tag = str(args.experiment_name) + "_tier_{}_{}_sz_{}_{}".format(input_tier_input_tag[0], input_tier_input_tag[1],
