@@ -7,6 +7,7 @@ import math
 import torch.nn.functional as F
 from torch import nn
 from torch.autograd import Variable
+from scipy.stats import betabinom
 
 import copy
 
@@ -914,6 +915,8 @@ class Conv2d(torch.nn.Module):
                 biases = make_tensor(b, dtype=dtype, device=device).contiguous()
                 _set_shared(name_b, biases)
             self.biases = torch.nn.Parameter(biases)
+        else:
+            self.biases = None
 
         self.strides = strides
         self.dilation = dilation
@@ -1359,6 +1362,43 @@ class BatchNorm2d(torch.nn.Module):
         else:
             out = right()
         return out
+
+class Conv1d(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_dims,
+                 num_feature_maps,
+                 kernel_size,
+                 border_mode="same",
+                 init=None,
+                 scale="default",
+                 biases=True,
+                 bias_offset=0.,
+                 name=None,
+                 random_state=None,
+                 strict=None,
+                 dtype="default",
+                 device="default"):
+        super(Conv1d, self).__init__()
+
+        if name is None:
+            name = _get_name()
+
+        # assuming they come in as length, batch, features
+        #tlist = [li[:, None].permute((2, 3, 1, 0)) for li in list_of_inputs]
+        # now N C H W, height of 1 (so laid out along width dim)
+        self.conv = Conv2d(list_of_input_dims, num_feature_maps,
+                           kernel_size=kernel_size,
+                           name=name + "_conv1d", random_state=random_state,
+                           border_mode=border_mode, init=init, scale=scale, biases=biases,
+                           bias_offset=bias_offset, strict=strict, dtype=dtype, device=device)
+
+    def forward(self,
+                list_of_inputs):
+        # assuming they come in as length, batch, features
+        tlist = [li[:, None].permute((2, 3, 1, 0)) for li in list_of_inputs]
+        # now N C H W, height of 1 (so laid out along width dim)
+        pre = self.conv(tlist)
+        return pre[:, :, 0].permute(2, 0, 1)
 
 
 class SequenceConv1dStack(torch.nn.Module):
@@ -4441,6 +4481,7 @@ class AttentionMelNetTier(torch.nn.Module):
                  has_centralized_stack=False,
                  has_spatial_condition=False,
                  has_attention=False,
+                 attention_type="location",
                  attention_mixture_components=10,
                  conditional_layers=2,
                  init=None, scale="default",
@@ -4508,14 +4549,79 @@ class AttentionMelNetTier(torch.nn.Module):
                                                scale=scale,
                                                name=name + "_attn_lstm_cell",
                                                device=device)
-
-                self.attn_proj = Linear([self.hidden_size],
-                                         3 * self.attention_mixture_components,
-                                         random_state=random_state,
-                                         init=init,
-                                         scale=scale,
-                                         name=name + "_attn_proj",
-                                         device=device)
+                # for sigmoid attention
+                #self.attn_proj = Linear([self.hidden_size],
+                #                         3 * self.attention_mixture_components,
+                #                         random_state=random_state,
+                #                         init=init,
+                #                         scale=scale,
+                #                         name=name + "_attn_proj",
+                #                         device=device)
+                # for convolutional attention
+                # https://github.com/bshall/Tacotron/blob/6fee34a7c3a9d4ceb9215ed3063771a9287010e1/tacotron/model.py
+                prior_length = 11
+                alpha = .1
+                beta = .9
+                # expected average step size (encoder steps per decoder step) is 1 here
+                # alpha * prior_length / (alpha + beta)
+                # makes sense because of the extreme downsampling
+                # roughly on 1 to 1 scale but may need to be tuned
+                # realistically more like .8 encoder steps per decoder steps on datasets
+                P = betabinom.pmf(np.arange(prior_length), prior_length - 1, alpha, beta)
+                self.register_buffer("P", torch.FloatTensor(P).flip(0))
+                # note - W_g in paper
+                self.W_g = Linear([self.hidden_size],
+                                 self.hidden_size,
+                                 random_state=random_state,
+                                 init=init,
+                                 scale=scale,
+                                 name=name + "_attn_W_term",
+                                 device=device)
+                dynamic_channels = 8
+                dynamic_kernel_size = 21
+                # note - V_g in paper
+                self.V_g = Linear([self.hidden_size],
+                                 dynamic_channels * dynamic_kernel_size,
+                                 random_state=random_state,
+                                 init=init,
+                                 scale=scale,
+                                 name=name + "_attn_V_term",
+                                 biases=False,
+                                 device=device)
+                static_channels = 8
+                static_kernel_size = 21
+                self.attn_prior_length = prior_length
+                self.attn_alpha = alpha
+                self.attn_beta = beta
+                self.attn_dynamic_channels = dynamic_channels
+                self.attn_dynamic_kernel_size = dynamic_kernel_size
+                self.attn_static_channels = static_channels
+                self.attn_static_kernel_size = static_kernel_size
+                self.F = Conv1d([1], static_channels, kernel_size=(static_kernel_size, static_kernel_size), random_state=random_state,
+                                name=name + "_attn_F_term", biases=False, device=device)
+                self.U = Linear([static_channels],
+                                 self.hidden_size,
+                                 random_state=random_state,
+                                 init=init,
+                                 scale=scale,
+                                 name=name + "_attn_U_term",
+                                 biases=False,
+                                 device=device)
+                self.T = Linear([dynamic_channels],
+                                 self.hidden_size,
+                                 random_state=random_state,
+                                 init=init,
+                                 scale=scale,
+                                 name=name + "_attn_T_term",
+                                 device=device)
+                self.v = Linear([self.hidden_size],
+                                 1,
+                                 random_state=random_state,
+                                 init=init,
+                                 scale=scale,
+                                 name=name + "_attn_v_term",
+                                 biases=False,
+                                 device=device)
 
 
         for _i in range(self.n_layers):
@@ -4626,73 +4732,114 @@ class AttentionMelNetTier(torch.nn.Module):
         freq_lstm_h, _, __ = self.fds_lstms_freq_fw[layer]([freq_lstm_stack])
         return (0.5 ** 0.5) * (fds + freq_lstm_h)
 
-    def _attention_step(self, h_i, memory, memory_mask, ksi):
-        phi_hat = self.attn_proj([h_i])
+    def _attention_step(self, h_i, memory, memory_mask, previous_attn):
+        #_attention_step(self, h_i, memory, memory_mask, ksi):
+        #phi_hat = self.attn_proj([h_i])
 
-        ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
-        beta = torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
-        alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+        #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
+        # clamp beta so it doesn't collapse?
+        #beta = torch.exp(torch.clamp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components], min=-4))
+        # changes based on GMMv2 of https://arxiv.org/pdf/1910.10288.pdf
+        # as well as https://arxiv.org/pdf/1811.07240.pdf
+        #ksi = ksi + F.softplus(phi_hat[:, :self.attention_mixture_components])
+        #beta = (F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-4)
+        #beta = torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+        #alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
 
-        u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
-        u_R = u + 1.5
-        u_L = u + 0.5
-        term1 = torch.sum(alpha[..., None] * (torch.sigmoid(u_R - ksi[..., None]) / beta[..., None]), keepdim=True, dim=1)
-        term2 = torch.sum(alpha[..., None] * (torch.sigmoid(u_L - ksi[..., None]) / beta[..., None]), keepdim=True, dim=1)
-        weights = term1 - term2
+        #u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
+        #u_L = u + 0.5
+        #u_R = u - 0.5
+        # softplus(a) = log(1 + exp(a))
+        # with a = ((ksi - u) / beta)
+        # this overall becomes
+        # 1. / exp(softplus(a)) -> exp(-softplus(a)) -> exp(-log(1 + exp(a))) -> 1./(1 + exp(a))
+        #termL = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((ksi[..., None] - u_L) / beta[..., None])))), keepdim=True, dim=1)
+        #termR = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((ksi[..., None] - u_R) / beta[..., None])))), keepdim=True, dim=1)
+        # could rewrite further by taking softmax out of context
+        # softmax(alpha) * exp(-softplus(a)) -> exp(alpha) * exp(-softplus(a)) / sum(exp(alpha)) -> exp(alpha - softplus(a)) / sum(exp(alpha))
+        # but would probably be less stable than "stable" softmax due to sum(exp) in denominator
+        #termL = torch.sum(alpha[..., None] * (torch.exp(-F.softplus(((ksi[..., None] - u_L)) / beta[..., None]))), keepdim=True, dim=1)
+        #termR = torch.sum(alpha[..., None] * (torch.exp(-F.softplus(((ksi[..., None] - u_R)) / beta[..., None]))), keepdim=True, dim=1)
+
+        # best derivation (inspired by https://github.com/Deepest-Project/MelNet/blob/master/model/tts.py#L138 although I don't get the 1.5 and .5 instead of -.5 and +.5, perhaps this is setting the default step size to 1. for all ksi?)
+        # 1. / (1. + exp((k-u) / b)) -> 1. / (1. + exp(-(u - k) / b)) -> 1. / (1. + exp(-t)), where t is (u - k) / b
+        # knowing that sigmoid(t) = 1. / (1. + exp(-t))
+        # this results in sigmoid((u - k) / b) for each term
+        # this means both terms L and R are bounded btwn 0 and 1, and potentially more stable than exp(-softplus) shenanigans would allow
+        #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - ksi[..., None])) / beta[..., None])), keepdim=True, dim=1)
+        #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - ksi[..., None])) / beta[..., None])), keepdim=True, dim=1)
+        # finally since beta is bounded > 0 due to exp() activation, we note that dividing by beta and multiplying by beta are effectively the same
+        # in terms of optimization paths
+        # simply swapping "what regime" wrt values exp(x) < 1, and values exp(x) > 1
+        # with the *key* difference being a vanishing to 0 of beta (perhaps due to very negative weights for beta or other issues during training), will not explode the whole equation
+        #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - ksi[..., None])) * beta[..., None])), keepdim=True, dim=1)
+        #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - ksi[..., None])) * beta[..., None])), keepdim=True, dim=1)
+        #weights = termL - termR
+        #termination = 1. - termL[:, 0]
+
+        # none of this worked in a satisfying way, swap to location sensitive attention
+        # https://gist.github.com/acetylSv/9dcff15bc0e895c0190c5942b573c28b
+
+        p = F.conv1d(F.pad(previous_attn[:, None], (self.attn_prior_length - 1, 0)), self.P[None, None])
+        p = torch.log(p.clamp_min_(1E-6)[:, 0])
+
+        G = self.V_g([self.W_g([h_i])])
+
+        g = F.conv1d(previous_attn[None], G.view(-1, 1, self.attn_dynamic_kernel_size),
+                     padding=(self.attn_dynamic_kernel_size - 1) // 2,
+                     groups=h_i.shape[0])
+        g = g.view(h_i.size(0), self.attn_dynamic_channels, -1).transpose(1, 2)
+
+        f = self.F([previous_attn.transpose(1, 0)[..., None]])
+        e = self.v([torch.tanh(self.U([f]) + self.T([g]).transpose(0, 1))])[..., 0]
+
+        e = e.transpose(1, 0) + p
+        # now B, mem_T
+        weights = F.softmax(e, dim=1)
+
         # mask weights here
-        weights = memory_mask[:, None].permute(2, 1, 0) * weights
-        context = torch.bmm(weights, memory.permute(1, 0, 2))
-        termination = 1. - term1[:, 0]
+        # technically don't sum to 1 anymore but don't want to add weight to zero info places...
+        # for now, don't mask
+        #weights = memory_mask.transpose(0, 1) * weights
+
+        context = torch.bmm(weights[:, None], memory.permute(1, 0, 2))
         # context is B, 1, D
-        # weights T, 1, B 
-        # termination T, B
-        # ksi B, mixture
-        return context, weights.permute(2, 1, 0), termination.permute(1, 0), ksi
+        # weights B, mem_T 
+        return context, weights
 
     def _attention(self, tds, layer, memory, memory_mask):
         T, B, D = tds.size()
         context = 0. * tds[0]
         h_i, c_i = 0. * tds[0], 0. * tds[0]
-        ksi = tds.new_zeros(B, self.attention_mixture_components)
-        """
-        def step(inp_t, inp_mask_t,
-                 h1_f_tm1, c1_f_tm1):
-            output, s = self.fwd_cell_obj([inp_t],
-                                          h1_f_tm1, c1_f_tm1,
-                                          input_mask=inp_mask_t,
-                                          cell_dropout=cell_dropout)
-            h1_f_t = s[0]
-            c1_f_t = s[1]
-            return h1_f_t, c1_f_t
-
-        # should this be a "proper" flip with mask on the end
-        r = scan(step,
-                 [in_proj, input_mask],
-                 [h1_f_init, c1_f_init])
-        """
+        #ksi = tds.new_zeros(B, self.attention_mixture_components)
+        prev_attn = F.one_hot(torch.zeros(B, dtype=torch.long, device=tds.device), memory.size(0)).float()
         contexts = []
         weights = []
         terminations = []
         ksis = []
+        out_hiddens = []
         for _i in range(T):
             x = torch.cat([tds[_i], context.squeeze(1)], dim=-1)
             out, s = self.attn_lstm_cell([x],
                                          h_i, c_i,
                                          input_mask=None)
             h_t, c_t = s[0], s[1]
-            context, weight, termination, ksi = self._attention_step(h_t, memory, memory_mask, ksi)
+            out_hiddens.append(h_t[None])
+            context, attn_weight = self._attention_step(h_t, memory, memory_mask, prev_attn)
+            prev_attn = attn_weight
             contexts.append(context)
-            weights.append(weight)
-            terminations.append(termination[None])
-            ksis.append(ksi[None])
+            weights.append(attn_weight[None])
             h_i, c_i = h_t, c_t
         # decoder_T, B, D
-        contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + tds
-        # decoder_T, encoder_T, B
-        alignments = torch.cat(weights, axis=1).permute(1, 0, 2)
-        terminations = torch.cat(terminations, axis=0)
-        ksis = torch.cat(ksis, axis=0)
-        return contexts, alignments, terminations, ksis
+        # skip connected around the attention so there is direct control of the rnn itself
+        # don't allow direct access to the input - should force attention to be more meaningful
+        #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0) + tds
+        #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0) + tds
+        # absolutely no bypassing this
+        contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) #+ tds
+        # decoder_T, B, encoder_T
+        alignments = torch.cat(weights, axis=0)
+        return contexts, alignments
 
     # conditional first tier
     def forward(self, list_of_inputs, list_of_spatial_conditions=None, bypass_td=None, bypass_fd=None, skip_input_embed=False,
@@ -4750,7 +4897,7 @@ class AttentionMelNetTier(torch.nn.Module):
             td_x = self._td_stack(td_x, _i)
             if self.has_centralized_stack:
                 if _i == (self.n_layers // 2) and self.has_attention:
-                    cd_att, alignment, termination, ksis = self._attention(cd_x, _i, memory, memory_mask)
+                    cd_att, alignment = self._attention(cd_x, _i, memory, memory_mask)
                     cd_x = self._cd_centralized_stack(cd_att, _i)
                 else:
                     cd_x = self._cd_centralized_stack(cd_x, _i)
@@ -4761,6 +4908,6 @@ class AttentionMelNetTier(torch.nn.Module):
         out = out.reshape((self.n_horiz, self.batch_size, self.n_vert, self.output_size))
         out = out.permute((1, 2, 0, 3))
         if self.has_attention:
-            return out, alignment, termination, ksis
+            return out, alignment
         else:
             return out

@@ -154,7 +154,7 @@ class EnglishSpeechCorpus(object):
         self.phone_lookup["_"] = sil_val
         assert len(self.phone_lookup.keys()) == len(np.unique(list(self.phone_lookup.keys())))
 
-    def get_utterances(self, size, all_keys,
+    def get_utterances(self, size, all_keys, skip_mel=False,
                        min_length_words=None, max_length_words=None,
                        min_length_symbols=None, max_length_symbols=None,
                        min_length_time_secs=None, max_length_time_secs=None):
@@ -175,7 +175,7 @@ class EnglishSpeechCorpus(object):
         # get a bigger extent, so if some don't match out filters we can keep going
         idx = self.random_state.choice(len(all_keys), 100 * size)
         for ii in idx:
-            utt = self._fetch_utterance(all_keys[ii])
+            utt = self._fetch_utterance(all_keys[ii], skip_mel=skip_mel)
             # fs, d, melspec, info
             core_key = list(utt[-1].keys())[0]
             word_length = len(utt[-1][core_key]["transcript"].split(" "))
@@ -202,11 +202,11 @@ class EnglishSpeechCorpus(object):
             raise ValueError("Unable to build correct length in get_utterances! Something has gone very wrong, debug this!")
         return utts
 
-    def get_train_utterances(self, size):
-        return self.get_utterances(size, self.train_keys)
+    def get_train_utterances(self, size, skip_mel=False):
+        return self.get_utterances(size, self.train_keys, skip_mel=skip_mel)
 
-    def get_valid_utterances(self, size):
-        return self.get_utterances(size, self.valid_keys)
+    def get_valid_utterances(self, size, skip_mel=False):
+        return self.get_utterances(size, self.valid_keys, skip_mel=skip_mel)
 
     def format_minibatch(self, utterances,
                                symbol_type="phoneme",

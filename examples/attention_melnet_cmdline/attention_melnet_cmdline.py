@@ -67,13 +67,22 @@ if __name__ == "__main__":
                         help='batch size\n')
     parser.add_argument('--experiment_name', type=str, required=True,
                         help='name of overall experiment, will be combined with some of the arg input info for model save')
-
+    parser.add_argument('--previous_saved_model_path', type=str, default=None,
+                        help='path to previously saved checkpoint model')
+    parser.add_argument('--previous_saved_optimizer_path', type=str, default=None,
+                        help='path to previously saved optimizer')
+    parser.add_argument('--n_previous_save_steps', type=str, default=None,
+                        help='number of save steps taken for previously run model, used to "replay" the data generator back to the same point')
     args = parser.parse_args()
 else:
     # filthy global hack passed from sampling code
     import builtins
     args = builtins.my_args
     # note here that the exact parser arguments will need to be *repeated* in the sampling code
+
+if args.previous_saved_model_path is not None:
+    assert args.previous_saved_optimizer_path is not None
+    assert args.n_previous_save_steps is not None
 
 input_axis_split_list = [int(args.axis_splits[i]) for i in range(len(args.axis_splits))]
 input_size_at_depth = [int(el) for el in args.size_at_depth.split(",")]
@@ -127,8 +136,9 @@ speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              fixed_minibatch_time_secs=6,
                              train_split=0.9,
                              random_state=data_random_state)
-
-
+# used in the loop
+n_train_steps_per = 1000
+n_valid_steps_per = 250
 
 """
 train_el = speech.get_train_utterances(10)
@@ -199,10 +209,8 @@ def build_model(hp):
                 # x currently batch, time, freq, 1
                 # mem time, batch, feat
                 # feed mask for attention calculations as well
-                mn_out, alignment, termination, ksis = self.mn_t([x], memory=mem_lstm, memory_mask=memory_condition_mask)
+                mn_out, alignment = self.mn_t([x], memory=mem_lstm, memory_mask=memory_condition_mask)
                 self.attention_alignment = alignment
-                self.attention_termination = termination
-                self.attention_ksis = ksis
             else:
                 mn_out = self.mn_t([x], list_of_spatial_conditions=[spatial_condition])
             return mn_out
@@ -211,6 +219,40 @@ def build_model(hp):
 if __name__ == "__main__":
     model = build_model(hp)
     optimizer = torch.optim.Adam(model.parameters(), hp.learning_rate)
+
+    if args.previous_saved_model_path is not None:
+        assert args.previous_saved_optimizer_path is not None
+        assert args.n_previous_save_steps is not None
+        n_previous_save_steps = int(args.n_previous_save_steps)
+
+        model_dict = torch.load(args.previous_saved_model_path, map_location=hp.use_device)
+        model.load_state_dict(model_dict)
+
+        opt_dict = torch.load(args.previous_saved_optimizer_path, map_location=hp.use_device)
+        optimizer.load_state_dict(opt_dict)
+
+        del model_dict
+        del opt_dict
+
+        logger.info("Reloaded weights from previous training files based on commandline arguments")
+        logger.info("Previous model file: {}".format(args.previous_saved_model_path))
+        logger.info("Previous optimizer file: {}".format(args.previous_saved_optimizer_path))
+        logger.info("Previous number of save steps: {}".format(n_previous_save_steps))
+
+        # re-run data iterator forward for reload
+        logger.info("Replaying data iterator")
+        for _i in range(n_previous_save_steps):
+            logger.info("Data iterator train step: {} of {}".format(_i * n_train_steps_per, n_previous_save_steps * n_train_steps_per))
+            # since mel calculations take the bulk of the time, and we are just replaying the iterator, skip it
+            for _j in range(n_train_steps_per):
+                train_el = speech.get_train_utterances(hp.batch_size, skip_mel=True)
+                #cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(train_el)
+                batch_norm_flag = 0.
+            for _j in range(n_valid_steps_per):
+                valid_el = speech.get_valid_utterances(hp.batch_size, skip_mel=True)
+                #cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
+                batch_norm_flag = 1.
+
     l_fun = BernoulliCrossEntropyFromLogits()
 
     data_random_state = np.random.RandomState(hp.random_seed)
@@ -266,7 +308,6 @@ if __name__ == "__main__":
         torch_data_batch = torch_data_batch[:, 0][..., None]
         """
 
-
         all_x_splits = []
         x_t = torch_data_batch
         for aa in input_axis_split_list:
@@ -311,9 +352,12 @@ if __name__ == "__main__":
          "optimizer": optimizer,
          "hparams": hp}
 
+    """
     # the out-of-loop-check
     r = loop(train_itr, {"train": True}, None)
     r2 = loop(train_itr, {"train": True}, None)
+    from IPython import embed; embed(); raise ValueError()
+    """
 
     if input_tier_condition_tag is None:
         tag = str(args.experiment_name) + "_tier_{}_{}_sz_{}_{}".format(input_tier_input_tag[0], input_tier_input_tag[1],
@@ -327,5 +371,5 @@ if __name__ == "__main__":
              loop, valid_itr,
              s,
              force_tag=tag,
-             n_train_steps_per=1000,
-             n_valid_steps_per=250)
+             n_train_steps_per=n_train_steps_per,
+             n_valid_steps_per=n_valid_steps_per)

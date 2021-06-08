@@ -23,7 +23,8 @@ parser.add_argument('--direct_saved_model_path', type=str, default=None,
 saved_model_def_default = "../{tag}.py"
 parser.add_argument('--direct_saved_model_definition', type=str, default=saved_model_def_default,
                     help='location of saved model definition, a .py file')
-# have to redo training argparse args as well.
+
+# have to redo training argparse args as well for load setup
 parser.add_argument('--axis_splits', type=str, required=True,
                     help='string denoting the axis splits for the model, eg 2121 starting from first split to last\n')
 parser.add_argument('--tier_input_tag', type=str, required=True,
@@ -40,6 +41,16 @@ parser.add_argument('--batch_size', type=int, required=True,
                     help='batch size\n')
 parser.add_argument('--experiment_name', type=str, required=True,
                     help='name of overall experiment, will be combined with some of the arg input info for model save')
+parser.add_argument('--previous_saved_model_path', type=str, default=None,
+                    help='path to previously saved checkpoint model')
+parser.add_argument('--previous_saved_optimizer_path', type=str, default=None,
+                    help='path to previously saved optimizer')
+parser.add_argument('--n_previous_save_steps', type=str, default=None,
+                    help='number of save steps taken for previously run model, used to "replay" the data generator back to the same point')
+
+
+parser.add_argument('--terminate_early_attention_plot', action="store_true",
+                    help='flag to terminate early for attention plotting meta-scripts')
 
 parser.add_argument('--stored_sampled_tier_data', action="store", nargs='*', type=str, default=None,
                     help='all previously sampled tier data, in order from beginning tier to previous from left to right. Last array assumed to be the conditioning input')
@@ -49,6 +60,7 @@ parser.add_argument('--random_seed', '-r', type=int, default=2133,
 parser.add_argument('--data_seed', '-d', type=int, default=144,
                     help='random seed to use when seeding the sampling (default 144)')
 parser.add_argument('--sample_len', type=int, default=1024,
+
                     help='how long of a sequence to sample (default 1024)')
 
 parser.add_argument('--temperature', type=float, default=.9,
@@ -59,6 +71,7 @@ parser.add_argument('--p_cutoff', type=float, default=.5,
                     help='cutoff to use in top p sampling (default .5)')
 parser.add_argument('--samples_to_average', type=int, default=10,
                     help='number of samples to average in order to form estimated sample')
+
 
 import builtins
 # filthy global hack to pass args to submodules / models imported by importlib
@@ -188,17 +201,109 @@ teacher_forced_attn = model.attention_alignment
 
 import matplotlib.pyplot as plt
 
+if args.terminate_early_attention_plot:
+    for _i in range(hp.batch_size):
+        mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
+        text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
+        # matshow vs imshow?
+        plt.imshow(teacher_forced_attn[:, _i].cpu().data.numpy()[:mel_cut, :text_cut])
+        plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
+        plt.savefig("attn_{}.png".format(_i))
+        plt.close()
+
+    import sys
+    print("Terminating early after only plotting attention due to commandline flag --terminate_early_attention_plot")
+    sys.exit()
+
+def to_one_hot(tensor, n, fill_with=1.):
+    # we perform one hot encore with respect to the last axis
+    one_hot = torch.FloatTensor(tensor.size() + (n,)).zero_()
+    if tensor.is_cuda : one_hot = one_hot.cuda()
+    one_hot.scatter_(len(tensor.size()), tensor.unsqueeze(-1), fill_with)
+    return one_hot
+
+def sample_dml(l, n_mix=10, only_mean=True, deterministic=True, sampling_temperature=1.):
+    sampling_temperature = float(sampling_temperature)
+    nr_mix = n_mix
+    # Pytorch ordering
+    #l = l.permute(0, 2, 3, 1)
+    ls = [int(y) for y in l.size()]
+    xs = ls[:-1] + [1]
+
+    # unpack parameters
+    logit_probs = l[:, :, :, :nr_mix]
+    l = l[:, :, :, nr_mix:].contiguous().view(xs + [nr_mix * 2])
+    # sample mixture indicator from softmax
+    noise = torch.FloatTensor(logit_probs.size())
+    if l.is_cuda : noise = noise.cuda()
+    noise.uniform_(1e-5, 1. - 1e-5)
+    # hack to make deterministic JRH
+    # could also just take argmax of logit_probs
+    if deterministic or only_mean:
+        # make temp small so logit_probs dominates equation
+        sampling_temperature = 1e-6
+    # sampling temperature from kk
+    # https://gist.github.com/kastnerkyle/ea08e1aed59a0896e4f7991ac7cdc147
+    # discussion on gumbel sm sampling -
+    # https://github.com/Rayhane-mamah/Tacotron-2/issues/155
+    noise = (logit_probs.data/sampling_temperature) - torch.log(- torch.log(noise))
+    _, argmax = noise.max(dim=3)
+
+    one_hot = to_one_hot(argmax, nr_mix)
+    sel = one_hot.view(xs[:-1] + [1, nr_mix])
+    # select logistic parameters
+    means = torch.sum(l[:, :, :, :, :nr_mix] * sel, dim=4)
+    log_scales = torch.clamp(torch.sum(l[:, :, :, :, nr_mix:2 * nr_mix] * sel, dim=4), min=-7.)
+    # sample from logistic & clip to interval
+    # we don't actually round to the nearest 8bit value when sampling
+    u = torch.FloatTensor(means.size())
+    if l.is_cuda : u = u.cuda()
+    u.uniform_(1e-5, 1. - 1e-5)
+    # hack to make deterministic
+    if deterministic:
+        u= u*0.0+0.5
+    if only_mean:
+        x = means
+    else:
+        x = means + torch.exp(log_scales) * (torch.log(u) - torch.log(1. - u))
+    out = torch.clamp(torch.clamp(x,min=-1.),max=1.)
+    # put back in Pytorch ordering
+    #out = out.permute(0, 3, 1, 2)
+    return out
+
+for _i in range(hp.batch_size):
+    reduced_mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
+    full_mel_cut = int(torch_data_mask[_i].cpu().data.numpy().sum())
+
+    plt.imshow(x_in[_i, :reduced_mel_cut, :, 0])
+    plt.savefig("small_x{}.png".format(_i))
+    plt.close()
+
+
+    plt.imshow(torch_data_batch[_i, :full_mel_cut, :, 0])
+    plt.savefig("data_x{}.png".format(_i))
+    plt.close()
+
+
 for _i in range(hp.batch_size):
     mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
     text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
-    plt.matshow(teacher_forced_attn[..., _i].cpu().data.numpy()[:mel_cut, :text_cut])
-    plt.savefig("tmp_attn_{}.png".format(_i))
+    # matshow vs imshow?
+    plt.imshow(teacher_forced_attn[..., _i].cpu().data.numpy()[:mel_cut, :text_cut])
+    plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
+    plt.savefig("teacher_forced_attn_{}.png".format(_i))
     plt.close()
-from IPython import embed; embed(); raise ValueError()
-print("dwjakl")
 
-#x_mask_in[0, :, 0, 0]
-#torch_cond_seq_data_mask[:, 0]
+
+outs = sample_dml(pred_out)
+for _i in range(hp.batch_size):
+    reduced_mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
+    full_mel_cut = int(torch_data_mask[_i].cpu().data.numpy().sum())
+
+    plt.imshow(outs[_i, :reduced_mel_cut, :, 0].cpu().data.numpy())
+    plt.savefig("pred_x{}.png".format(_i))
+    plt.close()
+
 from IPython import embed; embed(); raise ValueError()
 
 
