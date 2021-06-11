@@ -63,8 +63,10 @@ if __name__ == "__main__":
                         help='number of layers the tier will have\n')
     parser.add_argument('--hidden_size', type=int, required=True,
                         help='hidden dimension size for every layer\n')
-    parser.add_argument('--batch_size', type=int, required=True,
-                        help='batch size\n')
+    parser.add_argument('--real_batch_size', type=int, required=True,
+                        help='real batch size\n')
+    parser.add_argument('--virtual_batch_size', type=int, required=True,
+                        help='virtual_batch size\n')
     parser.add_argument('--experiment_name', type=str, required=True,
                         help='name of overall experiment, will be combined with some of the arg input info for model save')
     parser.add_argument('--previous_saved_model_path', type=str, default=None,
@@ -88,7 +90,12 @@ input_axis_split_list = [int(args.axis_splits[i]) for i in range(len(args.axis_s
 input_size_at_depth = [int(el) for el in args.size_at_depth.split(",")]
 input_hidden_size = int(args.hidden_size)
 input_n_layers = int(args.n_layers)
-input_batch_size = int(args.batch_size)
+input_real_batch_size = int(args.real_batch_size)
+input_virtual_batch_size = int(args.virtual_batch_size)
+if float(input_virtual_batch_size) / float(input_real_batch_size) != input_virtual_batch_size // input_real_batch_size:
+    raise ValueError("Got non-divisible virtual batch size, virtual batch size should be a multiple of the real batch size")
+input_virtual_to_real_batch_multiple = input_virtual_batch_size // input_real_batch_size
+assert input_virtual_to_real_batch_multiple > 0
 input_tier_input_tag = [int(el) for el in args.tier_input_tag.split(",")]
 
 assert len(input_size_at_depth) == 2
@@ -117,15 +124,19 @@ hp = HParams(input_dim=1,
              clip=3.5,
              n_layers_per_tier=[input_n_layers],
              melnet_init="truncated_normal",
+             #attention_type="relative_logistic",
+             attention_type="logistic",
+             #attention_type="dca",
              #melnet_init=None,
-             # mnist so we force input symbols
+             # 256 mel channels
              input_symbols=256,
              n_mix=10,
+             # mixture of logistics n_mix == 10
              output_size=2 * 10 + 10,
-             text_input_symbols=194, #len(speech.phone_lookup),
+             text_input_symbols=51, #len(speech.phone_lookup),
              input_image_size=input_size_at_depth,
-             batch_size=input_batch_size,
-             n_epochs=1000,
+             real_batch_size=input_real_batch_size,
+             virtual_batch_size=input_virtual_batch_size,
              random_seed=2122)
 
 data_random_state = np.random.RandomState(hp.random_seed)
@@ -136,9 +147,13 @@ speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              fixed_minibatch_time_secs=6,
                              train_split=0.9,
                              random_state=data_random_state)
+
+# want to see these every 5000 train samples, every 1250 valid samples have been processed from dataset
+n_train_steps_per = 5000 // input_virtual_batch_size
+n_valid_steps_per = 1250 // input_virtual_batch_size
 # used in the loop
-n_train_steps_per = 1000
-n_valid_steps_per = 250
+#n_train_steps_per = 1000
+#n_valid_steps_per = 250
 
 """
 train_el = speech.get_train_utterances(10)
@@ -174,6 +189,7 @@ def build_model(hp):
                                                 hp.hidden_dim, hp.output_size, hp.n_layers_per_tier[0],
                                                 has_centralized_stack=True,
                                                 has_attention=True,
+                                                attention_type=hp.attention_type,
                                                 random_state=random_state,
                                                 init=hp.melnet_init,
                                                 device=hp.use_device,
@@ -209,8 +225,9 @@ def build_model(hp):
                 # x currently batch, time, freq, 1
                 # mem time, batch, feat
                 # feed mask for attention calculations as well
-                mn_out, alignment = self.mn_t([x], memory=mem_lstm, memory_mask=memory_condition_mask)
+                mn_out, alignment, attn_extras = self.mn_t([x], memory=mem_lstm, memory_mask=memory_condition_mask)
                 self.attention_alignment = alignment
+                self.attention_extras = attn_extras
             else:
                 mn_out = self.mn_t([x], list_of_spatial_conditions=[spatial_condition])
             return mn_out
@@ -245,37 +262,17 @@ if __name__ == "__main__":
             logger.info("Data iterator train step: {} of {}".format(_i * n_train_steps_per, n_previous_save_steps * n_train_steps_per))
             # since mel calculations take the bulk of the time, and we are just replaying the iterator, skip it
             for _j in range(n_train_steps_per):
-                train_el = speech.get_train_utterances(hp.batch_size, skip_mel=True)
+                train_el = speech.get_train_utterances(input_real_batch_size, skip_mel=True)
                 #cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(train_el)
                 batch_norm_flag = 0.
             for _j in range(n_valid_steps_per):
-                valid_el = speech.get_valid_utterances(hp.batch_size, skip_mel=True)
+                valid_el = speech.get_valid_utterances(input_real_batch_size, skip_mel=True)
                 #cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
                 batch_norm_flag = 1.
 
     l_fun = BernoulliCrossEntropyFromLogits()
 
     data_random_state = np.random.RandomState(hp.random_seed)
-    train_data = mnist["data"][mnist["train_indices"]]
-    valid_data = mnist["data"][mnist["valid_indices"]]
-
-    train_itr = ListIterator([train_data], batch_size=hp.batch_size, random_state=data_random_state,
-                             infinite_iterator=True)
-    valid_itr = ListIterator([valid_data], batch_size=hp.batch_size, random_state=data_random_state,
-                             infinite_iterator=True)
-
-    """
-    train_data = mnist["data"][mnist["train_indices"]]
-    train_target = mnist["target"][mnist["train_indices"]]
-    valid_data = mnist["data"][mnist["valid_indices"]]
-    valid_target = mnist["target"][mnist["valid_indices"]]
-
-    train_itr = ListIterator([train_data, train_target], batch_size=hp.batch_size, random_state=data_random_state,
-                             infinite_iterator=True)
-    valid_itr = ListIterator([valid_data, valid_target], batch_size=hp.batch_size, random_state=data_random_state,
-                             infinite_iterator=True)
-    """
-    # N H W C
     loss_function = DiscretizedMixtureOfLogisticsCrossEntropyFromLogits()
 
     def loop(itr, extras, stateful_args):
@@ -284,69 +281,80 @@ if __name__ == "__main__":
         else:
             model.eval()
         model.zero_grad()
-
-        if extras["train"]:
-            train_el = speech.get_train_utterances(hp.batch_size)
-            cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(train_el)
-            batch_norm_flag = 0.
-        else:
-            valid_el = speech.get_valid_utterances(hp.batch_size)
-            cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
-            batch_norm_flag = 1.
-        torch_data_batch = torch.tensor(data_batch[..., None]).contiguous().to(hp.use_device)
-        torch_data_mask = torch.tensor(data_mask).contiguous().to(hp.use_device)
-        torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
-        torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
-        """
-        data_batch, = next(itr)
-        # N H W C
-        data_batch = data_batch.reshape(data_batch.shape[0], 28, 28, 1)
-        # N C H W
-        data_batch = data_batch.transpose(0, 3, 1, 2).astype("int32").astype("float32")
-        torch_data_batch = torch.tensor(data_batch).contiguous().to(hp.use_device)
-        # N H W 1
-        torch_data_batch = torch_data_batch[:, 0][..., None]
-        """
-
-        all_x_splits = []
-        x_t = torch_data_batch
-        for aa in input_axis_split_list:
-            all_x_splits.append(split(x_t, axis=aa))
-            x_t = all_x_splits[-1][0]
-        x_in = all_x_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
-
-        all_x_mask_splits = []
-        # broadcast mask over frequency so we can downsample
-        x_mask_t = torch_data_mask[..., None, None] + 0. * torch_data_batch
-        for aa in input_axis_split_list:
-            all_x_mask_splits.append(split(x_mask_t, axis=aa))
-            x_mask_t = all_x_mask_splits[-1][0]
-        x_mask_in = all_x_mask_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
-
-        if input_tier_condition_tag is None:
-            pred_out = model(x_in, x_mask=x_mask_in,
-                             memory_condition=torch_cond_seq_data_batch,
-                             memory_condition_mask=torch_cond_seq_data_mask,
-                             batch_norm_flag=batch_norm_flag)
-        else:
-            cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
-            pred_out = model(x_in, x_mask=x_mask_in,
-                             spatial_condition=cond,
-                             batch_norm_flag=batch_norm_flag)
-
-        # x_in comes in discretized between 0 and 256, now scale -1 to 1
-        loss1 = loss_function(pred_out, 2 * (x_in / 256.) - 1., n_mix=hp.n_mix)
-        # take last trailing 1 off x_mask_in for shapes to match
-        loss = ((loss1 * x_mask_in[..., 0]) / (x_mask_in.sum())).sum()
-        l = loss.cpu().data.numpy()
-
         optimizer.zero_grad()
-        if extras["train"]:
-            loss.backward()
-            clipping_grad_value_(model.parameters(), hp.clip)
-            #clipping_grad_value_(model.named_parameters(), hp.clip, named_check=True)
-            optimizer.step()
-        return [l,], None, None
+
+        total_l = None
+        step_count = input_virtual_to_real_batch_multiple
+        for _step in range(step_count):
+            if extras["train"]:
+                train_el = speech.get_train_utterances(input_real_batch_size)
+                cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(train_el)
+                batch_norm_flag = 0.
+            else:
+                valid_el = speech.get_valid_utterances(input_real_batch_size)
+                cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
+                batch_norm_flag = 1.
+            torch_data_batch = torch.tensor(data_batch[..., None]).contiguous().to(hp.use_device)
+            torch_data_mask = torch.tensor(data_mask).contiguous().to(hp.use_device)
+            torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
+            torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
+            """
+            data_batch, = next(itr)
+            # N H W C
+            data_batch = data_batch.reshape(data_batch.shape[0], 28, 28, 1)
+            # N C H W
+            data_batch = data_batch.transpose(0, 3, 1, 2).astype("int32").astype("float32")
+            torch_data_batch = torch.tensor(data_batch).contiguous().to(hp.use_device)
+            # N H W 1
+            torch_data_batch = torch_data_batch[:, 0][..., None]
+            """
+
+            all_x_splits = []
+            x_t = torch_data_batch
+            for aa in input_axis_split_list:
+                all_x_splits.append(split(x_t, axis=aa))
+                x_t = all_x_splits[-1][0]
+            x_in = all_x_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+
+            all_x_mask_splits = []
+            # broadcast mask over frequency so we can downsample
+            x_mask_t = torch_data_mask[..., None, None] + 0. * torch_data_batch
+            for aa in input_axis_split_list:
+                all_x_mask_splits.append(split(x_mask_t, axis=aa))
+                x_mask_t = all_x_mask_splits[-1][0]
+            x_mask_in = all_x_mask_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+
+            with torch.set_grad_enabled(True):
+                if input_tier_condition_tag is None:
+                    pred_out = model(x_in, x_mask=x_mask_in,
+                                     memory_condition=torch_cond_seq_data_batch,
+                                     memory_condition_mask=torch_cond_seq_data_mask,
+                                     batch_norm_flag=batch_norm_flag)
+                else:
+                    cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+                    pred_out = model(x_in, x_mask=x_mask_in,
+                                     spatial_condition=cond,
+                                     batch_norm_flag=batch_norm_flag)
+
+                # x_in comes in discretized between 0 and 256, now scale -1 to 1
+                loss1 = loss_function(pred_out, 2 * (x_in / 256.) - 1., n_mix=hp.n_mix)
+                # take last trailing 1 off x_mask_in for shapes to match
+                loss = ((loss1 * x_mask_in[..., 0]) / (x_mask_in.sum())).sum()
+                l = loss.cpu().data.numpy()
+                if extras["train"]:
+                    (loss / step_count).backward()
+
+                if total_l is None:
+                    total_l = l / step_count
+                else:
+                    total_l += l / step_count
+
+            if extras["train"]:
+                #clipping_grad_value_(model.named_parameters(), hp.clip, named_check=True)
+                clipping_grad_value_(model.parameters(), hp.clip)
+                optimizer.step()
+                optimizer.zero_grad()
+        return total_l, None, None
 
     s = {"model": model,
          "optimizer": optimizer,
@@ -354,8 +362,8 @@ if __name__ == "__main__":
 
     """
     # the out-of-loop-check
-    r = loop(train_itr, {"train": True}, None)
-    r2 = loop(train_itr, {"train": True}, None)
+    r = loop(speech, {"train": True}, None)
+    r2 = loop(speech, {"train": True}, None)
     from IPython import embed; embed(); raise ValueError()
     """
 
@@ -367,8 +375,8 @@ if __name__ == "__main__":
                                                                                    input_tier_condition_tag[0], input_tier_condition_tag[1],
                                                                                    input_size_at_depth[0], input_size_at_depth[1])
 
-    run_loop(loop, train_itr,
-             loop, valid_itr,
+    run_loop(loop, speech,
+             loop, speech,
              s,
              force_tag=tag,
              n_train_steps_per=n_train_steps_per,

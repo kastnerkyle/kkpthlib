@@ -255,7 +255,7 @@ class EnglishSpeechCorpus(object):
                     flat_phones_and_gaps.extend(phone_group_syms[_n])
                 flat_phones_and_gaps.append("~")
                 flat_phones_and_gaps.append("!{}".format(gaps_arr[-1]))
-                seq_as_ints = [self.phone_lookup[s] for s in flat_phones_and_gaps]
+                seq_as_ints = [self.phone_lookup[s.split("_")[0]] for s in flat_phones_and_gaps]
                 phoneme_sequences.append(seq_as_ints)
         # pad it out so all are same length
         max_seq_len = max([len(ps) for ps in phoneme_sequences])

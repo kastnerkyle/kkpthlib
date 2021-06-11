@@ -206,7 +206,7 @@ if args.terminate_early_attention_plot:
         mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
         text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
         # matshow vs imshow?
-        plt.imshow(teacher_forced_attn[:, _i].cpu().data.numpy()[:mel_cut, :text_cut])
+        plt.imshow(teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:mel_cut, :text_cut])
         plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
         plt.savefig("attn_{}.png".format(_i))
         plt.close()
