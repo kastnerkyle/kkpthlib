@@ -20,6 +20,7 @@ from kkpthlib import Linear
 from kkpthlib import Dropout
 from kkpthlib import BernoulliCrossEntropyFromLogits
 from kkpthlib import DiscretizedMixtureOfLogisticsCrossEntropyFromLogits
+from kkpthlib import MixtureOfGaussiansNegativeLogLikelihood
 from kkpthlib import relu
 from kkpthlib import softmax
 from kkpthlib import log_softmax
@@ -43,6 +44,8 @@ from kkpthlib import Embedding
 from kkpthlib import space2batch
 from kkpthlib import batch2space
 from kkpthlib import split
+from kkpthlib import split_np
+from kkpthlib import batch_mean_variance_update
 from kkpthlib import interleave
 from kkpthlib import scan
 from kkpthlib import LSTMCell
@@ -115,8 +118,6 @@ logger.info("\ndirect argparse args to script {}".format(__file__))
 for arg in vars(args):
     logger.info("{}={}".format(arg, getattr(args, arg)))
 
-mnist = fetch_mnist()
-
 hp = HParams(input_dim=1,
              hidden_dim=input_hidden_size,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
@@ -132,7 +133,8 @@ hp = HParams(input_dim=1,
              input_symbols=256,
              n_mix=10,
              # mixture of logistics n_mix == 10
-             output_size=2 * 10 + 10,
+             #output_size=2 * 10 + 10,
+             output_size=1,
              text_input_symbols=51, #len(speech.phone_lookup),
              input_image_size=input_size_at_depth,
              real_batch_size=input_real_batch_size,
@@ -141,11 +143,13 @@ hp = HParams(input_dim=1,
 
 data_random_state = np.random.RandomState(hp.random_seed)
 folder_base = "/usr/local/data/kkastner/robovoice/robovoice_d_25k"
+fixed_minibatch_time_secs = 6
+fraction_train_split = .9
 speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              wav_folder=folder_base + "/wavs/",
                              alignment_folder=folder_base + "/alignment_json/",
-                             fixed_minibatch_time_secs=6,
-                             train_split=0.9,
+                             fixed_minibatch_time_secs=fixed_minibatch_time_secs,
+                             train_split=fraction_train_split,
                              random_state=data_random_state)
 
 # want to see these every 5000 train samples, every 1250 valid samples have been processed from dataset
@@ -237,6 +241,91 @@ if __name__ == "__main__":
     model = build_model(hp)
     optimizer = torch.optim.Adam(model.parameters(), hp.learning_rate)
 
+    dataset_name = folder_base.split("/")[-1]
+    dataset_max_limit = fixed_minibatch_time_secs
+    axis_splits_str = "".join([str(aa) for aa in input_axis_split_list])
+    axis_size_str = "{}x{}".format(input_size_at_depth[0], input_size_at_depth[1])
+    tier_depth_str = str(input_tier_input_tag[0])
+
+
+    # hardcoded per-dimension mean and std for mel data from the training iterator, read from a file
+    full_cached_mean_std_name_for_experiment = "{}_max{}secs_{}splits_{}sz_{}tierdepth_mean_std.npz".format(dataset_name,
+                                                                                                        dataset_max_limit,
+                                                                                                        axis_splits_str,
+                                                                                                        axis_size_str,
+                                                                                                        tier_depth_str)
+    mean_std_cache = os.getcwd() + "/mean_std_cache/"
+    if not os.path.exists(mean_std_cache):
+        os.makedirs(mean_std_cache)
+    mean_std_path = mean_std_cache + full_cached_mean_std_name_for_experiment
+    if not os.path.exists(mean_std_path):
+        print("Estimated mean and std for dataset/tier combo not found, checked {}".format(mean_std_path))
+        # calculate estimate over 10000 samples randomly drawn from the speech loader!
+        mean_var_random_state = np.random.RandomState(8179)
+        # manually set the speech iterator random state to the new one - this preserves the data splits but wont just give the first
+        # N minibatches for our mean var estimates
+        speech.random_state = mean_var_random_state
+
+        # not an exact thing since we sample with replacement, but should roughly form the mean/var for the train set
+        #n_sample_estimate = len(speech.train_keys)
+        # 5000 sequences should be plenty
+        n_sample_estimate = 5000
+        subbatch = 100
+
+        running_mean_vec = None
+        running_var_vec = None
+        running_sample_count = None
+        count = 0
+
+        while count < n_sample_estimate:
+            print("mean/var estimate count {} of {}".format(count, n_sample_estimate))
+            els = speech.get_utterances(subbatch, speech.train_keys, skip_mel=False)
+            cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(els,
+                                                                                                mean_std_per_bin_normalization=False,
+                                                                                                quantize_to_n_bins=None)
+            all_x_splits = []
+            x_t = data_batch[..., None]
+            for aa in input_axis_split_list:
+                all_x_splits.append(split_np(x_t, axis=aa))
+                x_t = all_x_splits[-1][0]
+            x_in = all_x_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+
+            all_x_mask_splits = []
+            # broadcast mask over frequency so we can downsample
+            x_mask_t = data_mask[..., None, None] + 0. * data_batch[..., None]
+            for aa in input_axis_split_list:
+                all_x_mask_splits.append(split_np(x_mask_t, axis=aa))
+                x_mask_t = all_x_mask_splits[-1][0]
+            x_mask_in = all_x_mask_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+
+            megabatch_frames = []
+            for _i in range(x_in.shape[0]):
+                masklen = np.sum(x_mask_in[_i, :, :, 0], axis=0)
+                assert np.all(masklen == int(masklen[0]))
+                this_x_in = x_in[_i, :int(masklen[0]), :, 0]
+                megabatch_frames.append(this_x_in)
+            this_batch = np.concatenate(megabatch_frames)
+
+            if running_mean_vec is None:
+                # only build megabatch out of non masked frames
+                running_mean_vec = np.mean(this_batch, axis=0)
+                running_var_vec = np.std(this_batch, axis=0)
+                running_sample_count = float(this_batch.shape[0])
+            else:
+                new_mean, new_var, new_count = batch_mean_variance_update(this_batch, running_mean_vec, running_var_vec, running_sample_count)
+                running_mean_vec = new_mean
+                running_var_vec = new_var
+                running_sample_count = new_count
+            count += subbatch
+        running_std_vec = np.sqrt(running_var_vec)
+        mean = running_mean_vec
+        std = running_std_vec
+        frame_count = running_sample_count
+        np.savez(mean_std_path, mean=mean, std=std, frame_count=frame_count)
+        # terminate here because we needed to manipulate the speech loader...
+        raise ValueError("Terminating after calculation and caching of mean/std data to {}, rerun to train".format(mean_std_cache))
+
+
     if args.previous_saved_model_path is not None:
         assert args.previous_saved_optimizer_path is not None
         assert args.n_previous_save_steps is not None
@@ -270,10 +359,17 @@ if __name__ == "__main__":
                 #cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
                 batch_norm_flag = 1.
 
-    l_fun = BernoulliCrossEntropyFromLogits()
-
     data_random_state = np.random.RandomState(hp.random_seed)
-    loss_function = DiscretizedMixtureOfLogisticsCrossEntropyFromLogits()
+    #loss_function = DiscretizedMixtureOfLogisticsCrossEntropyFromLogits()
+    # needs 30 for n_mix of 10
+    loss_function = MixtureOfGaussiansNegativeLogLikelihood()
+
+    # load in cached mean std
+    speech.load_mean_std_from_filepath(mean_std_path)
+    saved_mean = speech.cached_mean_vec_[None, None, :, None]
+    saved_std = speech.cached_std_vec_[None, None, :, None]
+    #saved_torch_mean = torch.tensor(speech.cached_mean_vec_[None, None, :, None]).contiguous().to(hp.use_device)
+    #saved_torch_std = torch.tensor(speech.cached_std_vec_[None, None, :, None]).contiguous().to(hp.use_device)
 
     def loop(itr, extras, stateful_args):
         if extras["train"]:
@@ -294,8 +390,6 @@ if __name__ == "__main__":
                 valid_el = speech.get_valid_utterances(input_real_batch_size)
                 cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
                 batch_norm_flag = 1.
-            torch_data_batch = torch.tensor(data_batch[..., None]).contiguous().to(hp.use_device)
-            torch_data_mask = torch.tensor(data_mask).contiguous().to(hp.use_device)
             torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
             torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
             """
@@ -310,20 +404,25 @@ if __name__ == "__main__":
             """
 
             all_x_splits = []
-            x_t = torch_data_batch
+            x_t = data_batch[..., None]
             for aa in input_axis_split_list:
-                all_x_splits.append(split(x_t, axis=aa))
+                all_x_splits.append(split_np(x_t, axis=aa))
                 x_t = all_x_splits[-1][0]
-            x_in = all_x_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+            x_in_np = all_x_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+            x_in_np = (x_in_np - saved_mean) / saved_std
+
+            # additive noise? next thing to try
 
             all_x_mask_splits = []
             # broadcast mask over frequency so we can downsample
-            x_mask_t = torch_data_mask[..., None, None] + 0. * torch_data_batch
+            x_mask_t = data_mask[..., None, None] + 0. * data_batch[..., None]
             for aa in input_axis_split_list:
-                all_x_mask_splits.append(split(x_mask_t, axis=aa))
+                all_x_mask_splits.append(split_np(x_mask_t, axis=aa))
                 x_mask_t = all_x_mask_splits[-1][0]
-            x_mask_in = all_x_mask_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+            x_mask_in_np = all_x_mask_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
 
+            x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
+            x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
             with torch.set_grad_enabled(True):
                 if input_tier_condition_tag is None:
                     pred_out = model(x_in, x_mask=x_mask_in,
@@ -337,12 +436,20 @@ if __name__ == "__main__":
                                      batch_norm_flag=batch_norm_flag)
 
                 # x_in comes in discretized between 0 and 256, now scale -1 to 1
-                loss1 = loss_function(pred_out, 2 * (x_in / 256.) - 1., n_mix=hp.n_mix)
+                #loss1 = loss_function(pred_out, 2 * (x_in / 256.) - 1., n_mix=hp.n_mix)
+                # for now just do mse
+                loss1 = (pred_out - x_in) ** 2
                 # take last trailing 1 off x_mask_in for shapes to match
-                loss = ((loss1 * x_mask_in[..., 0]) / (x_mask_in.sum())).sum()
+                loss = (loss1 * x_mask_in).sum() / x_mask_in.sum()
                 l = loss.cpu().data.numpy()
                 if extras["train"]:
                     (loss / step_count).backward()
+                else:
+                    loss = 0. * loss
+                    # need to do backward to avoid memory issues in valid!
+                    loss.backward()
+                    # wipe the grad immediately
+                    model.zero_grad()
 
                 if total_l is None:
                     total_l = l / step_count

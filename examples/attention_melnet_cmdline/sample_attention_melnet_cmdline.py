@@ -37,8 +37,10 @@ parser.add_argument('--n_layers', '-n', type=int, required=True,
                     help='number of layers the tier will have\n')
 parser.add_argument('--hidden_size', type=int, required=True,
                     help='hidden dimension size for every layer\n')
-parser.add_argument('--batch_size', type=int, required=True,
-                    help='batch size\n')
+parser.add_argument('--real_batch_size', type=int, required=True,
+                    help='real batch size\n')
+parser.add_argument('--virtual_batch_size', type=int, required=True,
+                    help='virtual batch size\n')
 parser.add_argument('--experiment_name', type=str, required=True,
                     help='name of overall experiment, will be combined with some of the arg input info for model save')
 parser.add_argument('--previous_saved_model_path', type=str, default=None,
@@ -135,7 +137,8 @@ input_axis_split_list = [int(args.axis_splits[i]) for i in range(len(args.axis_s
 input_size_at_depth = [int(el) for el in args.size_at_depth.split(",")]
 input_hidden_size = int(args.hidden_size)
 input_n_layers = int(args.n_layers)
-input_batch_size = int(args.batch_size)
+input_real_batch_size = int(args.real_batch_size)
+input_virtual_batch_size = int(args.virtual_batch_size)
 input_tier_input_tag = [int(el) for el in args.tier_input_tag.split(",")]
 
 assert len(input_size_at_depth) == 2
@@ -148,42 +151,69 @@ else:
 
 from kkpthlib.datasets import EnglishSpeechCorpus
 from kkpthlib.utils import split
+from kkpthlib.utils import split_np
 from kkpthlib.utils import interleave_np
 from kkpthlib.utils import interleave
 from kkpthlib import softmax_np
 
 data_random_state = np.random.RandomState(hp.random_seed)
 folder_base = "/usr/local/data/kkastner/robovoice/robovoice_d_25k"
+fixed_minibatch_time_secs = 6
+fraction_train_split = .9
 speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              wav_folder=folder_base + "/wavs/",
                              alignment_folder=folder_base + "/alignment_json/",
-                             fixed_minibatch_time_secs=6,
-                             train_split=0.9,
+                             fixed_minibatch_time_secs=fixed_minibatch_time_secs,
+                             train_split=fraction_train_split,
                              random_state=data_random_state)
 
-valid_el = speech.get_valid_utterances(hp.batch_size)
+dataset_name = folder_base.split("/")[-1]
+dataset_max_limit = fixed_minibatch_time_secs
+axis_splits_str = "".join([str(aa) for aa in input_axis_split_list])
+axis_size_str = "{}x{}".format(input_size_at_depth[0], input_size_at_depth[1])
+tier_depth_str = str(input_tier_input_tag[0])
+
+# hardcoded per-dimension mean and std for mel data from the training iterator, read from a file
+full_cached_mean_std_name_for_experiment = "{}_max{}secs_{}splits_{}sz_{}tierdepth_mean_std.npz".format(dataset_name,
+                                                                                                    dataset_max_limit,
+                                                                                                    axis_splits_str,
+                                                                                                    axis_size_str,
+                                                                                                    tier_depth_str)
+mean_std_cache = os.getcwd() + "/mean_std_cache/"
+mean_std_path = mean_std_cache + full_cached_mean_std_name_for_experiment
+if not os.path.exists(mean_std_path):
+    raise ValueError("Unable to find cached mean std info at {}".format(mean_std_path))
+
+valid_el = speech.get_valid_utterances(hp.real_batch_size)
 cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
 batch_norm_flag = 1.
 
-torch_data_batch = torch.tensor(data_batch[..., None]).contiguous().to(hp.use_device)
-torch_data_mask = torch.tensor(data_mask).contiguous().to(hp.use_device)
+# this is weird, need 2 load calls for conditional generator...
+speech.load_mean_std_from_filepath(mean_std_path)
+saved_mean = speech.cached_mean_vec_[None, None, :, None]
+saved_std = speech.cached_std_vec_[None, None, :, None]
+
 torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
 torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
 
 all_x_splits = []
-x_t = torch_data_batch
+x_t = data_batch[..., None]
 for aa in input_axis_split_list:
-    all_x_splits.append(split(x_t, axis=aa))
+    all_x_splits.append(split_np(x_t, axis=aa))
     x_t = all_x_splits[-1][0]
-x_in = all_x_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+x_in_np = all_x_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+x_in_np = (x_in_np - saved_mean) / saved_std
 
 all_x_mask_splits = []
 # broadcast mask over frequency so we can downsample
-x_mask_t = torch_data_mask[..., None, None] + 0. * torch_data_batch
+x_mask_t = data_mask[..., None, None] + 0. * data_batch[..., None]
 for aa in input_axis_split_list:
-    all_x_mask_splits.append(split(x_mask_t, axis=aa))
+    all_x_mask_splits.append(split_np(x_mask_t, axis=aa))
     x_mask_t = all_x_mask_splits[-1][0]
-x_mask_in = all_x_mask_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+x_mask_in_np = all_x_mask_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+
+x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
+x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
 
 if input_tier_condition_tag is None:
     pred_out = model(x_in, x_mask=x_mask_in,
@@ -202,7 +232,7 @@ teacher_forced_attn = model.attention_alignment
 import matplotlib.pyplot as plt
 
 if args.terminate_early_attention_plot:
-    for _i in range(hp.batch_size):
+    for _i in range(hp.real_batch_size):
         mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
         text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
         # matshow vs imshow?
@@ -271,21 +301,26 @@ def sample_dml(l, n_mix=10, only_mean=True, deterministic=True, sampling_tempera
     #out = out.permute(0, 3, 1, 2)
     return out
 
-for _i in range(hp.batch_size):
+for _i in range(hp.real_batch_size):
     reduced_mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
-    full_mel_cut = int(torch_data_mask[_i].cpu().data.numpy().sum())
+    full_mel_cut = int(data_mask[_i].sum())
 
-    plt.imshow(x_in[_i, :reduced_mel_cut, :, 0])
+    this_x_in = x_in[_i][None].cpu().data.numpy()
+    unnormalized = this_x_in * saved_std + saved_mean
+    from IPython import embed; embed(); raise ValueError()
+    plt.imshow((this_x_in * saved_std + saved_mean)[0, :reduced_mel_cut, :, 0])
     plt.savefig("small_x{}.png".format(_i))
     plt.close()
 
 
-    plt.imshow(torch_data_batch[_i, :full_mel_cut, :, 0])
+    # no normalization on initial data
+    unnormalized_full = data_batch[_i, :full_mel_cut, :]
+    plt.imshow(unnormalized_full)
     plt.savefig("data_x{}.png".format(_i))
     plt.close()
 
 
-for _i in range(hp.batch_size):
+for _i in range(hp.real_batch_size):
     mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
     text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
     # matshow vs imshow?
@@ -295,8 +330,9 @@ for _i in range(hp.batch_size):
     plt.close()
 
 
-outs = sample_dml(pred_out)
-for _i in range(hp.batch_size):
+#outs = sample_dml(pred_out)
+outs = pred_out * saved_std + saved_mean
+for _i in range(hp.real_batch_size):
     reduced_mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
     full_mel_cut = int(torch_data_mask[_i].cpu().data.numpy().sum())
 
@@ -304,6 +340,7 @@ for _i in range(hp.batch_size):
     plt.savefig("pred_x{}.png".format(_i))
     plt.close()
 
+print("plotted")
 from IPython import embed; embed(); raise ValueError()
 
 

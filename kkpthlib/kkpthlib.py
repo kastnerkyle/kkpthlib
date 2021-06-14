@@ -15,6 +15,26 @@ from .hparams import HParams
 from .utils import space2batch
 from .utils import batch2space
 
+
+def log_sum_exp(x, axis=-1):
+    """ numerically stable log_sum_exp implementation that prevents overflow
+    **** code for this function from https://github.com/pclucas14/pixel-cnn-pp/blob/master/utils.py
+    """
+    # TF ordering
+    #axis  = len(x.size()) - 1
+    m, _  = torch.max(x, dim=axis)
+    m2, _ = torch.max(x, dim=axis, keepdim=True)
+    return m + torch.log(torch.sum(torch.exp(x - m2), dim=axis))
+
+def log_prob_from_logits(x, axis=-1):
+    """ numerically stable log_softmax implementation that prevents overflow
+    **** code for this function from https://github.com/pclucas14/pixel-cnn-pp/blob/master/utils.py
+    """
+    # TF ordering
+    #axis = len(x.size()) - 1
+    m, _ = torch.max(x, dim=axis, keepdim=True)
+    return x - m - torch.log(torch.sum(torch.exp(x - m), dim=axis, keepdim=True))
+
 def np_zeros(shape):
     """
     Builds a numpy variable filled with zeros
@@ -2104,6 +2124,7 @@ class CategoricalCrossEntropyFromLogits(torch.nn.Module):
         else:
             raise ValueError("NYI CategoricalCrossEntropy 2D inputs!")
 
+
 class DiscretizedMixtureOfLogisticsCrossEntropyFromLogits(torch.nn.Module):
     """
     Discretized mixture of logistics negative log likelihood of logits compared to scaled -1, 1 targets 
@@ -2126,6 +2147,119 @@ class DiscretizedMixtureOfLogisticsCrossEntropyFromLogits(torch.nn.Module):
     def __init__(self):
         super(DiscretizedMixtureOfLogisticsCrossEntropyFromLogits, self).__init__()
 
+    def forward(self, prediction, target, n_mix=10, n_bins=255.):
+        if target.size(-1) != 1:
+            raise ValueError("Last dimension of target must be 1")
+
+        if len(prediction.size()) != len(target.size()):
+            raise ValueError("prediction and target must have the same number of dimensions! Got dimensions {} and {}".format(prediction.shape, target.shape))
+        if len(prediction.size()) not in [4]:
+            raise ValueError("DiscretizedMixtureOfLogisticsCrossEntropy only supports 4D inputs, got prediction size {}".format(prediction.size()))
+
+        if len(target.size()) not in [4]:
+            raise ValueError("DiscretizedMixtureOfLogisticsCrossEntropy only supports 4D inputs, got target size {}".format(target.size()))
+
+        #def discretized_mix_logistic_loss(prediction, target, nr_mix=10, reduction='mean'):
+        """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval
+        Args:
+            prediction: model prediction. channels of model prediction should be mean
+                        and scale for each channel and weighting bt components --> (2*nr_mix+nr_mix)*num_channels
+            target: min/max should be -1 and 1
+        **** code for this function from https://github.com/pclucas14/pixel-cnn-pp/blob/master/utils.py
+        """
+        chan = prediction.shape[-1]
+        nr_mix = n_mix
+        #assert (prediction.max()<=1 and prediction.min()>=-1)
+        assert (target.max()<=1 and target.min()>=-1)
+        device = target.device
+        l = prediction
+        x = target
+
+        # Pytorch ordering
+        # N C H W TO N H W C
+        #x = x.permute(0, 2, 3, 1)
+        #l = l.permute(0, 2, 3, 1)
+
+        xs = [int(y) for y in x.size()]
+        #ls = [int(y) for y in l.size()]
+
+        # here and below: unpacking the params of the mixture of logistics
+        #nr_mix = int(ls[-1] / 10)
+        # l is prediction
+        logit_probs = l[:, :, :, :nr_mix]
+
+        l = l[:, :, :, nr_mix:].contiguous().view(xs + [nr_mix*2]) # 3--changed to 1 for mean, scale, coef
+        means = l[:, :, :, :, :nr_mix]
+        log_scales = torch.clamp(l[:, :, :, :, nr_mix:2 * nr_mix], min=-7.)
+
+        # here and below: getting the means and adjusting them based on preceding
+        # sub-pixels
+        x = x.contiguous()
+        #x = x.unsqueeze(-1) + torch.Variable(torch.zeros(xs + [nr_mix]).to(device), requires_grad=False)
+        x = x.unsqueeze(-1) + torch.zeros(xs + [nr_mix], requires_grad=False).to(device)
+
+        centered_x = x - means
+        inv_stdv = torch.exp(-log_scales)
+        plus_in = inv_stdv * (centered_x + 1. / float(n_bins))
+        cdf_plus = torch.sigmoid(plus_in)
+        min_in = inv_stdv * (centered_x - 1. / float(n_bins))
+        cdf_min = torch.sigmoid(min_in)
+        # log probability for edge case of 0 (before scaling)
+        log_cdf_plus = plus_in - F.softplus(plus_in)
+        # log probability for edge case of 255 (before scaling)
+        log_one_minus_cdf_min = -F.softplus(min_in)
+        cdf_delta = cdf_plus - cdf_min  # probability for all other cases
+        mid_in = inv_stdv * centered_x
+        # log probability in the center of the bin, to be used in extreme cases
+        # (not actually used in our code)
+        log_pdf_mid = mid_in - log_scales - 2. * F.softplus(mid_in)
+
+        # now select the right output: left edge case, right edge case, normal
+        # case, extremely low prob case (doesn't actually happen for us)
+
+        # this is what we are really doing, but using the robust version below for extreme cases in other applications and to avoid NaN issue with tf.select()
+        # log_probs = tf.select(x < -0.999, log_cdf_plus, tf.select(x > 0.999, log_one_minus_cdf_min, tf.log(cdf_delta)))
+
+        # robust version, that still works if probabilities are below 1e-5 (which never happens in our code)
+        # tensorflow backpropagates through tf.select() by multiplying with zero instead of selecting: this requires use to use some ugly tricks to avoid potential NaNs
+        # the 1e-12 in tf.maximum(cdf_delta, 1e-12) is never actually used as output, it's purely there to get around the tf.select() gradient issue
+        # if the probability on a sub-pixel is below 1e-5, we use an approximation
+        # based on the assumption that the log-density is constant in the bin of
+        # the observed sub-pixel value
+
+        inner_inner_cond = (cdf_delta > 1e-5).float()
+        inner_inner_out  = inner_inner_cond * torch.log(torch.clamp(cdf_delta, min=1e-12)) + (1. - inner_inner_cond) * (log_pdf_mid - np.log(float(n_bins) / 2))
+        inner_cond       = (x > 0.999).float()
+        inner_out        = inner_cond * log_one_minus_cdf_min + (1. - inner_cond) * inner_inner_out
+        cond             = (x < -0.999).float()
+        log_probs        = cond * log_cdf_plus + (1. - cond) * inner_out
+        log_probs        = torch.sum(log_probs, dim=3) + self.log_prob_from_logits(logit_probs)
+        lse = self.log_sum_exp(log_probs)
+        return -lse
+
+
+class MixtureOfGaussiansNegativeLogLikelihood(torch.nn.Module):
+    """
+    Discretized mixture of logistics negative log likelihood of logits compared to scaled -1, 1 targets 
+    true_values
+     
+    both in NHWC format, with C being (2 * n_mix + n_mix) * n_channels, where n_channels is the number of output maps (3 for RGB images for example)
+
+    Arguments to forward
+    prediction : tensor, shape 4D
+        The predicted class probabilities out of some layer,
+
+    targets : tensor, shape 4D
+        Must be same dimension as predicted values, but last axis should be size 1
+
+    Returns
+    -------
+   crossentropy : tensor, shape predicted_values.shape
+        The cost per sample per dimension if 4D
+    """
+    def __init__(self):
+        super(MixtureOfGaussiansNegativeLogLikelihood, self).__init__()
+
     def log_sum_exp(self, x):
         """ numerically stable log_sum_exp implementation that prevents overflow
         **** code for this function from https://github.com/pclucas14/pixel-cnn-pp/blob/master/utils.py
@@ -2145,18 +2279,20 @@ class DiscretizedMixtureOfLogisticsCrossEntropyFromLogits(torch.nn.Module):
         m, _ = torch.max(x, dim=axis, keepdim=True)
         return x - m - torch.log(torch.sum(torch.exp(x - m), dim=axis, keepdim=True))
 
-    def forward(self, prediction, target, n_mix=10, n_bins=255.):
+    def forward(self, prediction, target, n_mix=10):
         if target.size(-1) != 1:
             raise ValueError("Last dimension of target must be 1")
 
         if len(prediction.size()) != len(target.size()):
             raise ValueError("prediction and target must have the same number of dimensions! Got dimensions {} and {}".format(prediction.shape, target.shape))
         if len(prediction.size()) not in [4]:
-            raise ValueError("DiscretizedMixtureOfLogisticsCrossEntropy only supports 4D inputs, got prediction size {}".format(prediction.size()))
+            raise ValueError("MixtureOfGaussiansNegativeLogLikelihood only supports 4D inputs, got prediction size {}".format(prediction.size()))
 
         if len(target.size()) not in [4]:
-            raise ValueError("DiscretizedMixtureOfLogisticsCrossEntropy only supports 4D inputs, got target size {}".format(target.size()))
+            raise ValueError("MixtureOfGaussiansNegativeLogLikelihood only supports 4D inputs, got target size {}".format(target.size()))
 
+        print("hjkdwakl;")
+        from IPython import embed; embed(); raise ValueError()
         #def discretized_mix_logistic_loss(prediction, target, nr_mix=10, reduction='mean'):
         """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval
         Args:
@@ -4517,8 +4653,22 @@ class AttentionMelNetTier(torch.nn.Module):
         self.n_horiz = n_horiz
         self.output_dim = output_dim
 
-        self.embed_td = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_td")
-        self.embed_fd = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_fd")
+        #self.embed_td = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_td")
+        #self.embed_fd = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_fd")
+        self.td_input_proj = Linear([1],
+                                             self.hidden_size,
+                                             random_state=random_state,
+                                             init=init,
+                                             scale=scale,
+                                             name=name + "_td_input_proj",
+                                             device=device)
+        self.fd_input_proj = Linear([1],
+                                             self.hidden_size,
+                                             random_state=random_state,
+                                             init=init,
+                                             scale=scale,
+                                             name=name + "_fd_input_proj",
+                                             device=device)
 
         self.tds_lstms_time_fw = nn.ModuleList()
         self.tds_lstms_freq_fw = nn.ModuleList()
@@ -4779,6 +4929,7 @@ class AttentionMelNetTier(torch.nn.Module):
         # https://gist.github.com/acetylSv/9dcff15bc0e895c0190c5942b573c28b
         if self.attention_type == "logistic":
             #_attention_step(self, h_i, memory, memory_mask, ksi):
+            # condition on input sequence length
             phi_hat = self.attn_proj([h_i])
 
             #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
@@ -4790,12 +4941,16 @@ class AttentionMelNetTier(torch.nn.Module):
             kappa = ksi + F.softplus(phi_hat[:, :self.attention_mixture_components])
             #beta = (F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-4)
             beta = torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
-            #logit_alpha = phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components]
-            alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+
+            logit_alpha = phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components]
+
+            #alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
 
             u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
-            u_L = u + 0.5
-            u_R = u - 0.5
+            u_L = u + 1.5
+            u_R = u + 0.5
+            #u_L = u + 1.5
+            #u_R = u + 0.5
             #termL = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_L) * beta[..., None])))), keepdim=True, dim=1)
             #termR = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_R) * beta[..., None])))), keepdim=True, dim=1)
             # could rewrite further by taking softmax out of context
@@ -4820,10 +4975,13 @@ class AttentionMelNetTier(torch.nn.Module):
             # simply swapping "what regime" wrt values exp(x) < 1, and values exp(x) > 1
             # with the *key* difference being a vanishing to 0 of beta (perhaps due to very negative weights for beta or other issues during training), will not explode the whole equation
             # reweight in log space before summation?
-            termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+
+            #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
             #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
-            termL_R = torch.sum(alpha[..., None] * (torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])) - torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None]))), keepdim=True, dim=1)
-            weights = termL_R
+
+            # combined term
+            #termL_R = torch.sum(alpha[..., None] * (torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])) - torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None]))), keepdim=True, dim=1)
+            #weights = termL_R
 
             # introduce sum(exp(log(alpha * sigmoid))) -> sum(exp(log(alpha) + log(sigmoid)))
             # log(alpha) -> log_softmax
@@ -4841,7 +4999,19 @@ class AttentionMelNetTier(torch.nn.Module):
             #termR = torch.sum(torch.exp(log_alpha + q_R - F.softplus(q_R)), keepdim=True, dim=1)
             #weights = termL - termR
 
+            # even more further beyond...
+            log_alpha = log_prob_from_logits(logit_alpha, axis=1)
+            log_alpha = log_alpha[..., None]
+            q_L = (u_L - kappa[..., None]) * beta[..., None]
+            # keep dims
+            termL = torch.exp(log_sum_exp(log_alpha + q_L - F.softplus(q_L), axis=1))[:, None]
+            q_R = (u_R - kappa[..., None]) * beta[..., None]
+            # keep dims
+            termR = torch.exp(log_sum_exp(log_alpha + q_R - F.softplus(q_R), axis=1))[:, None]
+            weights = termL - termR
+
             termination = 1. - termL[:, 0]
+            weights = memory_mask.transpose(0, 1)[:, None, :] * weights
             context = torch.bmm(weights, memory.permute(1, 0, 2))
             # context is B, 1, D
             # weights B, mem_T 
@@ -4865,8 +5035,8 @@ class AttentionMelNetTier(torch.nn.Module):
             #alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
 
             u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
-            u_L = u + 0.5
-            u_R = u - 0.5
+            u_L = u + 1.5
+            u_R = u + 0.5
             #termL = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_L) * beta[..., None])))), keepdim=True, dim=1)
             #termR = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_R) * beta[..., None])))), keepdim=True, dim=1)
             # could rewrite further by taking softmax out of context
@@ -4902,7 +5072,7 @@ class AttentionMelNetTier(torch.nn.Module):
             # https://math.stackexchange.com/questions/2320905/obtaining-derivative-of-log-of-sigmoid-function
             #go further beyond, do multiplication in log space (so additive)
             # then sum exps afterward
-            log_alpha = logit_alpha - torch.log(torch.sum(torch.exp(logit_alpha), keepdim=True, dim=1))
+            log_alpha = logit_alpha - log_sum_exp(logit_alpha, axis=1) # torch.log(torch.sum(torch.exp(logit_alpha), keepdim=True, dim=1))
             log_alpha = log_alpha[..., None]
             q_L = (u_L - kappa[..., None]) * beta[..., None]
             termL = torch.sum(torch.exp(log_alpha + q_L - F.softplus(q_L)), keepdim=True, dim=1)
@@ -4988,10 +5158,7 @@ class AttentionMelNetTier(torch.nn.Module):
             weights.append(attn_weight[None])
             all_extras.append(extras)
             h_i, c_i = h_t, c_t
-        contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
-        """
-        reduced_contexts = self.attn_reduction_proj([contexts])
-        """
+        contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) #+ torch.cat(out_hiddens, axis=0)
         #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
         #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + tds
         # decoder_T, B, D
@@ -5013,16 +5180,30 @@ class AttentionMelNetTier(torch.nn.Module):
         x = list_of_inputs[0]
         td_x = torch.cat((0 * x[:, 0][:, None], x[:, :-1]), dim=1)
         fd_x = torch.cat((0 * x[:, :, 0][:, :, None], x[:, :, :-1]), dim=2)
+
+        batch_size = td_x.shape[0]
+        self.batch_size = batch_size
+
         if self.has_centralized_stack:
             # x should has dim of size 1 on the last for input
             cd_x = torch.cat((0 * x[:, 0][:, None], x[:, :-1]), dim=1)[..., 0]
             # cd is now t b f
             cd_x = cd_x.permute(1, 0, 2)
+
+            if not skip_input_embed:
+                cd_x = self.centralized_input_proj([cd_x])
+
         if not skip_input_embed:
-            td_x, td_e = self.embed_td(td_x)
-            fd_x, fd_e = self.embed_fd(fd_x)
-            cd_x = self.centralized_input_proj([cd_x])
-            # do not embed or do anything to cd_x we operate on whole frames
+            #td_x, td_e = self.embed_td(td_x)
+            #fd_x, fd_e = self.embed_fd(fd_x)
+            # reshape so the dot works
+            td_x = td_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+            fd_x = fd_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+            td_x = self.td_input_proj([td_x])
+            fd_x = self.fd_input_proj([fd_x])
+            td_x = td_x.reshape((batch_size, self.n_vert, self.n_horiz, -1))
+            fd_x = fd_x.reshape((batch_size, self.n_vert, self.n_horiz, -1))
+            # un reshape it
 
         if bypass_td is not None:
             td_x = bypass_td
@@ -5038,8 +5219,6 @@ class AttentionMelNetTier(torch.nn.Module):
             td_x = td_x + cond_info
             fd_x = fd_x + cond_info
 
-        batch_size = td_x.shape[0]
-        self.batch_size = batch_size
         if self.has_attention:
             # t b f to b t f to stretch
             #mem_shp = memory.shape
@@ -5078,7 +5257,10 @@ class AttentionMelNetTier(torch.nn.Module):
                 fd_x_o = self._fd_stack(td_x_o + td_x_i, fd_x_i, _i)
             fd_x_i = fd_x_o + fd_x_i
             td_x_i = td_x_o + td_x_i
-            cd_x_i = cd_x_o + cd_x_i
+            if self.has_centralized_stack:
+                cd_x_i = cd_x_o + cd_x_i
+                # don't add in the attention because we manually add it everwhere cd_x_i is used
+                #cd_x_i = cd_x_o + cd_x_i + cd_att
             # set to none to be ensure no "carryover" / errors
             td_x_o = None
             fd_x_o = None

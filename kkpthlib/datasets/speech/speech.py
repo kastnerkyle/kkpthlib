@@ -39,6 +39,10 @@ class EnglishSpeechCorpus(object):
             max_length_time_secs = fixed_minibatch_time_secs
         self.max_length_time_secs = max_length_time_secs
 
+        self.cached_mean_vec_ = None
+        self.cached_std_vec_ = None
+        self.cached_count_ = None
+
         self.n_mels = 256
 
         self.cut_on_alignment = cut_on_alignment
@@ -208,10 +212,18 @@ class EnglishSpeechCorpus(object):
     def get_valid_utterances(self, size, skip_mel=False):
         return self.get_utterances(size, self.valid_keys, skip_mel=skip_mel)
 
+    def load_mean_std_from_filepath(self, filepath):
+        if not os.path.exists(filepath):
+            raise ValueError("Unable to find mean/std file at {}".format(filepath))
+        d = np.load(filepath)
+        self.cached_mean_vec_ = d["mean"].copy()
+        self.cached_std_vec_ = d["std"].copy()
+        self.cached_count_ = d["frame_count"].copy()
+
     def format_minibatch(self, utterances,
                                symbol_type="phoneme",
                                pause_duration_breakpoints=None,
-                               quantize_to_n_bins=256):
+                               quantize_to_n_bins=None):
         if pause_duration_breakpoints is None:
             pause_duration_breakpoints = self.pause_duration_breakpoints
         phoneme_sequences = []
@@ -264,7 +276,9 @@ class EnglishSpeechCorpus(object):
         input_seq_mask = np.array(input_seq_mask).T
         phoneme_sequences = [ps + (max_seq_len - len(ps)) * [self.phone_lookup["_"]] for ps in phoneme_sequences]
         phoneme_sequences = np.array(phoneme_sequences).astype("float32").T
+
         overlap_len = ((self.max_length_time_secs * fs) + self.stft_size) % self.stft_size
+
         max_frame_count = (((self.max_length_time_secs * fs) + self.stft_size) - overlap_len) / self.stft_step
         divisors = [2, 4, 8]
         for di in divisors:
@@ -284,6 +298,7 @@ class EnglishSpeechCorpus(object):
             padded_melspec_sequences.append(melspec_padded)
         padded_melspec_sequences = np.array(padded_melspec_sequences)
         if quantize_to_n_bins is not None:
+            assert mean_std_per_bin_normalization is False
             n_bins = quantize_to_n_bins
             bins = np.linspace(0., 1., num=n_bins, endpoint=True)
             quantized_melspec_sequences = np.digitize(padded_melspec_sequences, bins)
@@ -321,6 +336,9 @@ class EnglishSpeechCorpus(object):
         melspec = self._melspectrogram_preprocess(d, fs)
         # check full validity outside the core fetch
         return fs, d, melspec, this_info
+
+    def melspectrogram_denormalize(self, ms):
+        from IPython import embed; embed(); raise ValueError()
 
     def _melspectrogram_preprocess(self, data, sample_rate):
         # takes in a raw sequence scaled between -1 and 1 (such as loaded from a wav file)
