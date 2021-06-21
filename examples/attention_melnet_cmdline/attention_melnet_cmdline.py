@@ -125,8 +125,10 @@ hp = HParams(input_dim=1,
              clip=3.5,
              n_layers_per_tier=[input_n_layers],
              melnet_init="truncated_normal",
-             #attention_type="relative_logistic",
-             attention_type="logistic",
+             #attention_type="sigmoid_logistic",
+             #attention_type="gaussian",
+             attention_type="lsa",
+             #attention_type="logistic",
              #attention_type="dca",
              #melnet_init=None,
              # 256 mel channels
@@ -371,6 +373,7 @@ if __name__ == "__main__":
     #saved_torch_mean = torch.tensor(speech.cached_mean_vec_[None, None, :, None]).contiguous().to(hp.use_device)
     #saved_torch_std = torch.tensor(speech.cached_std_vec_[None, None, :, None]).contiguous().to(hp.use_device)
 
+    noise_random_state = np.random.RandomState(111212)
     def loop(itr, extras, stateful_args):
         if extras["train"]:
             model.train()
@@ -423,6 +426,7 @@ if __name__ == "__main__":
 
             x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
             x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
+            # standard deviation 1 noise
             with torch.set_grad_enabled(True):
                 if input_tier_condition_tag is None:
                     pred_out = model(x_in, x_mask=x_mask_in,
@@ -467,12 +471,10 @@ if __name__ == "__main__":
          "optimizer": optimizer,
          "hparams": hp}
 
-    """
     # the out-of-loop-check
     r = loop(speech, {"train": True}, None)
     r2 = loop(speech, {"train": True}, None)
     from IPython import embed; embed(); raise ValueError()
-    """
 
     if input_tier_condition_tag is None:
         tag = str(args.experiment_name) + "_tier_{}_{}_sz_{}_{}".format(input_tier_input_tag[0], input_tier_input_tag[1],

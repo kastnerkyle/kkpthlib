@@ -216,6 +216,7 @@ x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
 x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
 
 if input_tier_condition_tag is None:
+    # no noise here in pred
     pred_out = model(x_in, x_mask=x_mask_in,
                      memory_condition=torch_cond_seq_data_batch,
                      memory_condition_mask=torch_cond_seq_data_mask,

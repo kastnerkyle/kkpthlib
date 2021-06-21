@@ -4617,7 +4617,7 @@ class AttentionMelNetTier(torch.nn.Module):
                  has_centralized_stack=False,
                  has_spatial_condition=False,
                  has_attention=False,
-                 attention_type="dca",
+                 attention_type="gaussian",
                  attention_mixture_components=10,
                  conditional_layers=2,
                  init=None, scale="default",
@@ -4720,7 +4720,7 @@ class AttentionMelNetTier(torch.nn.Module):
                                              scale=scale,
                                              name=name + "_attn_proj",
                                              device=device)
-                elif self.attention_type == "relative_logistic":
+                elif self.attention_type == "sigmoid_logistic":
                     self.attn_proj = Linear([self.hidden_size],
                                              3 * self.attention_mixture_components,
                                              random_state=random_state,
@@ -4794,6 +4794,83 @@ class AttentionMelNetTier(torch.nn.Module):
                                      name=name + "_attn_v_term",
                                      biases=False,
                                      device=device)
+                elif self.attention_type == "lsa":
+                    print("here")
+                    from IPython import embed; embed(); raise ValueError()
+                    # for convolutional attention
+                    # https://github.com/bshall/Tacotron/blob/6fee34a7c3a9d4ceb9215ed3063771a9287010e1/tacotron/model.py
+                    prior_length = 11
+                    alpha = .1
+                    beta = .9
+                    # expected average step size (encoder steps per decoder step) is 1 here
+                    # alpha * prior_length / (alpha + beta)
+                    # makes sense because of the extreme downsampling
+                    # roughly on 1 to 1 scale but may need to be tuned
+                    # realistically more like .8 encoder steps per decoder steps on datasets
+                    P = betabinom.pmf(np.arange(prior_length), prior_length - 1, alpha, beta)
+                    self.register_buffer("P", torch.FloatTensor(P).flip(0))
+                    # note - W_g in paper
+                    self.W_g = Linear([self.hidden_size],
+                                     self.hidden_size,
+                                     random_state=random_state,
+                                     init=init,
+                                     scale=scale,
+                                     name=name + "_attn_W_term",
+                                     device=device)
+                    dynamic_channels = 8
+                    dynamic_kernel_size = 21
+                    # note - V_g in paper
+                    self.V_g = Linear([self.hidden_size],
+                                     dynamic_channels * dynamic_kernel_size,
+                                     random_state=random_state,
+                                     init=init,
+                                     scale=scale,
+                                     name=name + "_attn_V_term",
+                                     biases=False,
+                                     device=device)
+                    static_channels = 8
+                    static_kernel_size = 21
+                    self.attn_prior_length = prior_length
+                    self.attn_alpha = alpha
+                    self.attn_beta = beta
+                    self.attn_dynamic_channels = dynamic_channels
+                    self.attn_dynamic_kernel_size = dynamic_kernel_size
+                    self.attn_static_channels = static_channels
+                    self.attn_static_kernel_size = static_kernel_size
+                    self.F = Conv1d([1], static_channels, kernel_size=(static_kernel_size, static_kernel_size), random_state=random_state,
+                                    name=name + "_attn_F_term", biases=False, device=device)
+                    self.U = Linear([static_channels],
+                                     self.hidden_size,
+                                     random_state=random_state,
+                                     init=init,
+                                     scale=scale,
+                                     name=name + "_attn_U_term",
+                                     biases=False,
+                                     device=device)
+                    self.T = Linear([dynamic_channels],
+                                     self.hidden_size,
+                                     random_state=random_state,
+                                     init=init,
+                                     scale=scale,
+                                     name=name + "_attn_T_term",
+                                     device=device)
+                    self.v = Linear([self.hidden_size],
+                                     1,
+                                     random_state=random_state,
+                                     init=init,
+                                     scale=scale,
+                                     name=name + "_attn_v_term",
+                                     biases=False,
+                                     device=device)
+                elif self.attention_type == "gaussian":
+                    # for logistic sigmoid attention ala melnet
+                    self.attn_proj = Linear([self.hidden_size],
+                                             3 * self.attention_mixture_components,
+                                             random_state=random_state,
+                                             init=init,
+                                             scale=scale,
+                                             name=name + "_attn_proj",
+                                             device=device)
                 else:
                     raise ValueError("Unknown value in initialization for attention_type in AttnMelNetTier, got {}".format(attention_type))
 
@@ -4906,13 +4983,17 @@ class AttentionMelNetTier(torch.nn.Module):
         if tds_cent is not None:
             # need to permute + reshape to match what was done for td_x, fd_x
             # so that batch combined stuff stays contiguous in the right way!
+            # time2freq is freq, batch * time, -1
+            # time is also self.n_vert
+
             # nvert batch feat to batch nvert feat
             tds_cent = tds_cent.permute(1, 0, 2)
             ext_tds_cent = tds_cent.reshape((self.batch_size * self.n_vert, -1))
             # now 1, batch * time, hidden
-            ext_tds_cent = ext_tds_cent[None]
             # broadcasts over frequency, since the cent rnn has puts out a whole freq frame per step dim...
+            ext_tds_cent = ext_tds_cent[None]
             # (fds dim 0)
+            # broacasts over features, since the cent rnn has effectively seen the whole frequency
             #ext_tds_cent = ext_tds_cent + 0. * fds
             freq_lstm_stack = tds + fds + ext_tds_cent#  torch.cat((tds, fds, ext_tds_cent), axis=-1)
         else:
@@ -4940,15 +5021,16 @@ class AttentionMelNetTier(torch.nn.Module):
             ksi = previous_attn
             kappa = ksi + F.softplus(phi_hat[:, :self.attention_mixture_components])
             #beta = (F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-4)
-            beta = torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+            # cap beta
+            beta = torch.exp(phi_hat[:, self.attention_mixture_components:(2 * self.attention_mixture_components)]) + 1E-2
 
-            logit_alpha = phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components]
+            logit_alpha = phi_hat[:, (2 * self.attention_mixture_components):(3 * self.attention_mixture_components)]
 
             #alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
 
             u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
-            u_L = u + 1.5
-            u_R = u + 0.5
+            u_L = u + 0.5
+            u_R = u - 0.5
             #u_L = u + 1.5
             #u_R = u + 0.5
             #termL = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_L) * beta[..., None])))), keepdim=True, dim=1)
@@ -5018,10 +5100,12 @@ class AttentionMelNetTier(torch.nn.Module):
             extras = {}
             extras["termination"] = termination
             extras["kappa"] = kappa
-        elif self.attention_type == "relative_logistic":
+            extras["beta"] = beta
+        elif self.attention_type == "sigmoid_logistic":
+            #_attention_step(self, h_i, memory, memory_mask, ksi):
+            # condition on input sequence length
             phi_hat = self.attn_proj([h_i])
-            print("rel logistic")
-            from IPython import embed; embed(); raise ValueError()
+
             #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
             # clamp beta so it doesn't collapse?
             #beta = torch.exp(torch.clamp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components], min=-4))
@@ -5030,63 +5114,32 @@ class AttentionMelNetTier(torch.nn.Module):
             ksi = previous_attn
             kappa = ksi + F.softplus(phi_hat[:, :self.attention_mixture_components])
             #beta = (F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-4)
-            beta = torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
-            logit_alpha = phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components]
-            #alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+            #beta = torch.clamp(torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.5)
+            # fix beta to 1 - hack city but works!
+            #beta = 0. * phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components] + 1.
+
+            # aggressive clamping here, use softplus to help stability as well
+            beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.25, max=2.0)
+            alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
 
             u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
-            u_L = u + 1.5
-            u_R = u + 0.5
-            #termL = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_L) * beta[..., None])))), keepdim=True, dim=1)
-            #termR = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_R) * beta[..., None])))), keepdim=True, dim=1)
-            # could rewrite further by taking softmax out of context
-            # softmax(alpha) * exp(-softplus(a)) -> exp(alpha) * exp(-softplus(a)) / sum(exp(alpha)) -> exp(alpha - softplus(a)) / sum(exp(alpha))
-            # but would probably be less stable than "stable" softmax due to sum(exp) in denominator
-            # softplus(a) = log(1 + exp(a))
-            # with a = ((ksi - u) / beta)
-            # this overall becomes
-            # 1. / exp(softplus(a)) -> exp(-softplus(a)) -> exp(-log(1 + exp(a))) -> 1./(1 + exp(a))
-            #termL = torch.sum(alpha[..., None] * (torch.exp(-F.softplus(((kappa[..., None] - u_L)) * beta[..., None]))), keepdim=True, dim=1)
-            #termR = torch.sum(alpha[..., None] * (torch.exp(-F.softplus(((kappa[..., None] - u_R)) * beta[..., None]))), keepdim=True, dim=1)
+            u_L = u + 0.5
+            u_R = u - 0.5
 
-            # possible best derivation (inspired by https://github.com/Deepest-Project/MelNet/blob/master/model/tts.py#L138 although I don't get the 1.5 and .5 instead of -.5 and +.5, perhaps this is setting the default step size to 1. for all ksi?)
-            # 1. / (1. + exp((k-u) / b)) -> 1. / (1. + exp(-(u - k) / b)) -> 1. / (1. + exp(-t)), where t is (u - k) / b
-            # knowing that sigmoid(t) = 1. / (1. + exp(-t))
-            # this results in sigmoid((u - k) / b) for each term
-            # this means both terms L and R are bounded btwn 0 and 1, and potentially more stable than exp(-softplus) shenanigans would allow
-            #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
-            #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
-            # finally since beta is bounded > 0 due to exp() activation, we note that dividing by beta and multiplying by beta are effectively the same
-            # in terms of optimization paths
-            # simply swapping "what regime" wrt values exp(x) < 1, and values exp(x) > 1
-            # with the *key* difference being a vanishing to 0 of beta (perhaps due to very negative weights for beta or other issues during training), will not explode the whole equation
-            # reweight in log space before summation?
-            #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
-            #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
-
-            # introduce sum(exp(log(alpha * sigmoid))) -> sum(exp(log(alpha) + log(sigmoid)))
-            # log(alpha) -> log_softmax
-            # logsoftmax = logits - log(reduce_sum(exp(logits), dim))
-            # log(sigmoid(q)) -> q - log(exp(q) + 1) aka q - softplus(q)
-            # term = log_alpha + q - softplus(q)
-            # https://math.stackexchange.com/questions/2320905/obtaining-derivative-of-log-of-sigmoid-function
-            #go further beyond, do multiplication in log space (so additive)
-            # then sum exps afterward
-            log_alpha = logit_alpha - log_sum_exp(logit_alpha, axis=1) # torch.log(torch.sum(torch.exp(logit_alpha), keepdim=True, dim=1))
-            log_alpha = log_alpha[..., None]
-            q_L = (u_L - kappa[..., None]) * beta[..., None]
-            termL = torch.sum(torch.exp(log_alpha + q_L - F.softplus(q_L)), keepdim=True, dim=1)
-            q_R = (u_R - kappa[..., None]) * beta[..., None]
-            termR = torch.sum(torch.exp(log_alpha + q_R - F.softplus(q_R)), keepdim=True, dim=1)
-
+            termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
             weights = termL - termR
+
             termination = 1. - termL[:, 0]
+            weights = memory_mask.transpose(0, 1)[:, None, :] * weights
             context = torch.bmm(weights, memory.permute(1, 0, 2))
             # context is B, 1, D
             # weights B, mem_T 
             extras = {}
             extras["termination"] = termination
             extras["kappa"] = kappa
+            extras["beta"] = beta
+            extras["alpha"] = alpha
         elif self.attention_type == "dca":
             # code ref:
             # https://github.com/bshall/Tacotron
@@ -5116,6 +5169,94 @@ class AttentionMelNetTier(torch.nn.Module):
             # context is B, 1, D
             # weights B, mem_T 
             extras = {}
+        elif self.attention_type == "lsa":
+            print("lsa")
+            from IPython import embed; embed(); raise ValueError()
+            # code ref:
+            # https://github.com/bshall/Tacotron
+            p = F.conv1d(F.pad(previous_attn[:, None], (self.attn_prior_length - 1, 0)), self.P[None, None])
+            p = torch.log(p.clamp_min_(1E-6)[:, 0])
+
+            G = self.V_g([self.W_g([h_i])])
+
+            g = F.conv1d(previous_attn[None], G.view(-1, 1, self.attn_dynamic_kernel_size),
+                         padding=(self.attn_dynamic_kernel_size - 1) // 2,
+                         groups=h_i.shape[0])
+            g = g.view(h_i.size(0), self.attn_dynamic_channels, -1).transpose(1, 2)
+
+            f = self.F([previous_attn.transpose(1, 0)[..., None]])
+            e = self.v([torch.tanh(self.U([f]) + self.T([g]).transpose(0, 1))])[..., 0]
+
+            e = e.transpose(1, 0) + p
+            # now B, mem_T
+            weights = F.softmax(e, dim=1)
+
+            # mask weights here
+            # technically don't sum to 1 anymore but don't want to add weight to zero info places...
+            # for now, don't mask
+            #weights = memory_mask.transpose(0, 1) * weights
+
+            context = torch.bmm(weights[:, None], memory.permute(1, 0, 2))
+            # context is B, 1, D
+            # weights B, mem_T 
+            extras = {}
+
+        elif self.attention_type == "gaussian":
+            #_attention_step(self, h_i, memory, memory_mask, ksi):
+            # condition on input sequence length
+            phi_hat = self.attn_proj([h_i])
+
+            #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
+            # clamp beta so it doesn't collapse?
+            #beta = torch.exp(torch.clamp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components], min=-4))
+            # changes based on GMMv2 of https://arxiv.org/pdf/1910.10288.pdf
+            # as well as https://arxiv.org/pdf/1811.07240.pdf
+            ksi = previous_attn
+            kappa = ksi + F.softplus(phi_hat[:, :self.attention_mixture_components])
+
+            # don't need capped beta becase we parameterize the inverse
+            # clamp beta between .1 and 3? doesn't work
+            beta = torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+            alpha = torch.exp(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components])
+
+            u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
+            #u_L = u + 0.5
+            #u_R = u - 0.5
+            #u_L = u + 1.5
+            #u_R = u + 0.5
+            #termL = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_L) * beta[..., None])))), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_R) * beta[..., None])))), keepdim=True, dim=1)
+            # could rewrite further by taking softmax out of context
+            # softmax(alpha) * exp(-softplus(a)) -> exp(alpha) * exp(-softplus(a)) / sum(exp(alpha)) -> exp(alpha - softplus(a)) / sum(exp(alpha))
+            # but would probably be less stable than "stable" softmax due to sum(exp) in denominator
+            # softplus(a) = log(1 + exp(a))
+            # with a = ((ksi - u) / beta)
+            # this overall becomes
+            # 1. / exp(softplus(a)) -> exp(-softplus(a)) -> exp(-log(1 + exp(a))) -> 1./(1 + exp(a))
+            #termL = torch.sum(alpha[..., None] * (torch.exp(-F.softplus(((kappa[..., None] - u_L)) * beta[..., None]))), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * (torch.exp(-F.softplus(((kappa[..., None] - u_R)) * beta[..., None]))), keepdim=True, dim=1)
+
+            # possible best derivation (inspired by https://github.com/Deepest-Project/MelNet/blob/master/model/tts.py#L138 although I don't get the 1.5 and .5 instead of -.5 and +.5, perhaps this is setting the default step size to 1. for all ksi?)
+            # 1. / (1. + exp((k-u) / b)) -> 1. / (1. + exp(-(u - k) / b)) -> 1. / (1. + exp(-t)), where t is (u - k) / b
+            # knowing that sigmoid(t) = 1. / (1. + exp(-t))
+            # this results in sigmoid((u - k) / b) for each term
+            # this means both terms L and R are bounded btwn 0 and 1, and potentially more stable than exp(-softplus) shenanigans would allow
+            #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            # finally since beta is bounded > 0 due to exp() activation, we note that dividing by beta and multiplying by beta are effectively the same
+            # in terms of optimization paths
+            # simply swapping "what regime" wrt values exp(x) < 1, and values exp(x) > 1
+            # with the *key* difference being a vanishing to 0 of beta (perhaps due to very negative weights for beta or other issues during training), will not explode the whole equation
+            # reweight in log space before summation?
+            weights = torch.sum(alpha[..., None] * torch.exp(-1. * ((kappa[..., None] - u) ** 2) * beta[..., None]), keepdim=True, dim=1)
+            weights = memory_mask.transpose(0, 1)[:, None, :] * weights
+            context = torch.bmm(weights, memory.permute(1, 0, 2))
+            # context is B, 1, D
+            # weights B, mem_T 
+            extras = {}
+            extras["kappa"] = kappa
+            extras["beta"] = beta
+            extras["alpha"] = alpha
         return context, weights, extras
 
     def _attention(self, cds, layer, memory, memory_mask):
@@ -5126,10 +5267,12 @@ class AttentionMelNetTier(torch.nn.Module):
         context = cds.new_zeros(B, self.hidden_size)
         if self.attention_type == "logistic":
             prev_attn = cds.new_zeros(B, self.attention_mixture_components)
-        elif self.attention_type == "relative_logistic":
+        elif self.attention_type == "sigmoid_logistic":
             prev_attn = cds.new_zeros(B, self.attention_mixture_components)
         elif self.attention_type == "dca":
             prev_attn = F.one_hot(torch.zeros(B, dtype=torch.long, device=cds.device), memory.size(0)).float()
+        elif self.attention_type == "gaussian":
+            prev_attn = cds.new_zeros(B, self.attention_mixture_components)
         else:
             raise ValueError("Unknown self.attention_type {} found".format(self.attention_type))
         #ksi = tds.new_zeros(B, self.attention_mixture_components)
@@ -5148,17 +5291,25 @@ class AttentionMelNetTier(torch.nn.Module):
             context, attn_weight, extras = self._attention_step(h_t, memory, memory_mask, prev_attn)
             if self.attention_type == "logistic":
                 prev_attn = extras["kappa"]
-            elif self.attention_type == "relative_logistic":
+            elif self.attention_type == "sigmoid_logistic":
                 prev_attn = extras["kappa"]
             elif self.attention_type == "dca":
                 prev_attn = attn_weight
+            elif self.attention_type == "gaussian":
+                prev_attn = extras["kappa"]
             else:
                 raise ValueError("Unknown argument to self.attention_type {}".format(self.attention_type))
             contexts.append(context)
             weights.append(attn_weight[None])
             all_extras.append(extras)
             h_i, c_i = h_t, c_t
-        contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) #+ torch.cat(out_hiddens, axis=0)
+        # skip hidden? for better attn control?
+        if self.attention_type == "sigmoid_logistic":
+            contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+        elif self.attention_type == "gaussian":
+            contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+        else:
+            contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) #+ torch.cat(out_hiddens, axis=0)
         #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
         #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + tds
         # decoder_T, B, D
@@ -5203,7 +5354,7 @@ class AttentionMelNetTier(torch.nn.Module):
             fd_x = self.fd_input_proj([fd_x])
             td_x = td_x.reshape((batch_size, self.n_vert, self.n_horiz, -1))
             fd_x = fd_x.reshape((batch_size, self.n_vert, self.n_horiz, -1))
-            # un reshape it
+            # un reshape it?
 
         if bypass_td is not None:
             td_x = bypass_td
@@ -5243,6 +5394,7 @@ class AttentionMelNetTier(torch.nn.Module):
             if self.has_centralized_stack:
                 if _i == (self.n_layers // 2) and self.has_attention:
                     cd_att, alignment, attn_extras = self._attention(cd_x_i, _i, memory, memory_mask)
+                    has_cd_att = True
                     # should this just replace the centralized stack here?
                     cd_x_o = self._cd_centralized_stack(cd_x_i + cd_att, _i)
                     fd_x_o = self._fd_stack(td_x_o + td_x_i, fd_x_i, _i, tds_cent=cd_x_o + cd_x_i + cd_att)
