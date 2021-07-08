@@ -3,6 +3,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+import gc
+
 import os
 import sys
 import argparse
@@ -66,6 +68,8 @@ if __name__ == "__main__":
                         help='number of layers the tier will have\n')
     parser.add_argument('--hidden_size', type=int, required=True,
                         help='hidden dimension size for every layer\n')
+    parser.add_argument('--cell_type', type=str, required=True,
+                        help='melnet cell type\n')
     parser.add_argument('--real_batch_size', type=int, required=True,
                         help='real batch size\n')
     parser.add_argument('--virtual_batch_size', type=int, required=True,
@@ -95,6 +99,7 @@ input_hidden_size = int(args.hidden_size)
 input_n_layers = int(args.n_layers)
 input_real_batch_size = int(args.real_batch_size)
 input_virtual_batch_size = int(args.virtual_batch_size)
+input_cell_type = args.cell_type
 if float(input_virtual_batch_size) / float(input_real_batch_size) != input_virtual_batch_size // input_real_batch_size:
     raise ValueError("Got non-divisible virtual batch size, virtual batch size should be a multiple of the real batch size")
 input_virtual_to_real_batch_multiple = input_virtual_batch_size // input_real_batch_size
@@ -121,14 +126,18 @@ for arg in vars(args):
 hp = HParams(input_dim=1,
              hidden_dim=input_hidden_size,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
-             learning_rate=1E-4,
+             #optimizer="adam",
+             #learning_rate=1E-5,
+             optimizer="SM3",
+             learning_rate=.05,
+             melnet_cell_type=input_cell_type,
              clip=3.5,
              n_layers_per_tier=[input_n_layers],
              melnet_init="truncated_normal",
-             #attention_type="sigmoid_logistic",
-             #attention_type="gaussian",
-             attention_type="lsa",
+             #attention_type="relative_logistic",
+             attention_type="sigmoid_logistic",
              #attention_type="logistic",
+             #attention_type="gaussian",
              #attention_type="dca",
              #melnet_init=None,
              # 256 mel channels
@@ -193,6 +202,7 @@ def build_model(hp):
 
                 self.mn_t = AttentionMelNetTier([hp.input_symbols], hp.input_image_size[0], hp.input_image_size[1],
                                                 hp.hidden_dim, hp.output_size, hp.n_layers_per_tier[0],
+                                                cell_type=hp.melnet_cell_type,
                                                 has_centralized_stack=True,
                                                 has_attention=True,
                                                 attention_type=hp.attention_type,
@@ -205,6 +215,7 @@ def build_model(hp):
                 self.mn_t = AttentionMelNetTier([hp.input_symbols], hp.input_image_size[0], hp.input_image_size[1],
                                                 hp.hidden_dim, hp.output_size, hp.n_layers_per_tier[0],
                                                 has_spatial_condition=True,
+                                                cell_type=hp.melnet_cell_type,
                                                 random_state=random_state,
                                                 init=hp.melnet_init,
                                                 device=hp.use_device,
@@ -241,7 +252,28 @@ def build_model(hp):
 
 if __name__ == "__main__":
     model = build_model(hp)
-    optimizer = torch.optim.Adam(model.parameters(), hp.learning_rate)
+    use_half = True
+    use_mixed_precision = False
+    if use_half:
+        if hp.optimizer == "adam":
+            from fp16_adam import Adam16
+            optimizer = Adam16(model.parameters(), hp.learning_rate, eps=1E-6)
+        elif hp.optimizer == "SM3":
+            from fp16_SM3 import SM3
+            optimizer = SM3(model.parameters(), hp.learning_rate, momentum=0.9, beta=0.0, eps=1E-6)
+        else:
+            raise ValueError("Unknown optimizer given to hyperparameter settings {}".format(hp.optimizer))
+    else:
+        if hp.optimizer == "adam":
+            optimizer = torch.optim.Adam(model.parameters(), hp.learning_rate, eps=1E-6)
+        else:
+            from SM3 import SM3
+            optimizer = SM3(model.parameters(), hp.learning_rate, momentum=0.9, beta=0.0, eps=1E-6)
+    # linear ramp
+    warmup_steps = 100
+    lr_lambda = lambda step: min(1., ((step + 1.) / warmup_steps))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
 
     dataset_name = folder_base.split("/")[-1]
     dataset_max_limit = fixed_minibatch_time_secs
@@ -373,6 +405,15 @@ if __name__ == "__main__":
     #saved_torch_mean = torch.tensor(speech.cached_mean_vec_[None, None, :, None]).contiguous().to(hp.use_device)
     #saved_torch_std = torch.tensor(speech.cached_std_vec_[None, None, :, None]).contiguous().to(hp.use_device)
 
+    if use_half:
+        assert use_mixed_precision is False
+        model.half()  # convert to half precision
+        for layer in model.modules():
+            layer.half()
+        [a.half() for a in model.parameters()]
+
+    scaler = torch.cuda.amp.GradScaler()
+
     noise_random_state = np.random.RandomState(111212)
     def loop(itr, extras, stateful_args):
         if extras["train"]:
@@ -426,55 +467,108 @@ if __name__ == "__main__":
 
             x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
             x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
-            # standard deviation 1 noise
+
+            if use_half:
+                torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device).half()
+                torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device).half()
+                x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device).half()
+                x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device).half()
+
             with torch.set_grad_enabled(True):
-                if input_tier_condition_tag is None:
-                    pred_out = model(x_in, x_mask=x_mask_in,
-                                     memory_condition=torch_cond_seq_data_batch,
-                                     memory_condition_mask=torch_cond_seq_data_mask,
-                                     batch_norm_flag=batch_norm_flag)
-                else:
-                    cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
-                    pred_out = model(x_in, x_mask=x_mask_in,
-                                     spatial_condition=cond,
-                                     batch_norm_flag=batch_norm_flag)
+                with torch.cuda.amp.autocast(enabled=use_mixed_precision):
+                    if input_tier_condition_tag is None:
+                        pred_out = model(x_in, x_mask=x_mask_in,
+                                         memory_condition=torch_cond_seq_data_batch,
+                                         memory_condition_mask=torch_cond_seq_data_mask,
+                                         batch_norm_flag=batch_norm_flag)
+                    else:
+                        cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+                        pred_out = model(x_in, x_mask=x_mask_in,
+                                         spatial_condition=cond,
+                                         batch_norm_flag=batch_norm_flag)
 
-                # x_in comes in discretized between 0 and 256, now scale -1 to 1
-                #loss1 = loss_function(pred_out, 2 * (x_in / 256.) - 1., n_mix=hp.n_mix)
-                # for now just do mse
-                loss1 = (pred_out - x_in) ** 2
-                # take last trailing 1 off x_mask_in for shapes to match
-                loss = (loss1 * x_mask_in).sum() / x_mask_in.sum()
-                l = loss.cpu().data.numpy()
-                if extras["train"]:
-                    (loss / step_count).backward()
-                else:
-                    loss = 0. * loss
-                    # need to do backward to avoid memory issues in valid!
-                    loss.backward()
-                    # wipe the grad immediately
-                    model.zero_grad()
+                    # x_in comes in discretized between 0 and 256, now scale -1 to 1
+                    #loss1 = loss_function(pred_out, 2 * (x_in / 256.) - 1., n_mix=hp.n_mix)
+                    # for now just do mse
+                    #loss1 = (pred_out - x_in) ** 2
 
-                if total_l is None:
-                    total_l = l / step_count
-                else:
-                    total_l += l / step_count
+                    # calculate loss in 32 but then recast to 16 bit?
+                    loss1 = torch.abs(pred_out - x_in)
+                    if use_half:
+                        loss1 = loss1.float()
+                    # need to be very careful here...
+                    #loss = ((loss1 * x_mask_in / step_count) / x_mask_in.sum()).sum()
+                    loss = ((loss1 * x_mask_in) / x_mask_in.sum()).sum()
+                    l = loss.cpu().data.numpy()
+                    if use_half:
+                        loss = loss.half()
+
+                    if extras["train"]:
+                        if use_mixed_precision:
+                            #scaler.scale(loss / step_count).backward()
+                            scaler.scale(loss).backward()
+                        else:
+                            #(loss / step_count).backward()
+                            loss.backward()
+                    else:
+                        loss = 0. * loss
+                        # need to do backward to avoid memory issues in valid!
+                        loss.backward()
+                        # wipe the grad immediately
+                        model.zero_grad()
+
+                    if total_l is None:
+
+                        #total_l = l / step_count
+                        total_l = l
+                    else:
+                        #total_l += l / step_count
+                        total_l += l
 
             if extras["train"]:
                 #clipping_grad_value_(model.named_parameters(), hp.clip, named_check=True)
-                clipping_grad_value_(model.parameters(), hp.clip)
-                optimizer.step()
+                if use_mixed_precision:
+                    scaler.unscale_(optimizer)
+                    clipping_grad_value_(model.parameters(), hp.clip)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    clipping_grad_value_(model.parameters(), hp.clip)
+                    optimizer.step()
+
+                scheduler.step()
                 optimizer.zero_grad()
+            del torch_cond_seq_data_batch
+            del torch_cond_seq_data_mask
+            del x_in
+            del x_mask_in
+            del pred_out
+            del loss
+            del loss1
+            del model.attention_alignment
+            del model.attention_extras
+            gc.collect()
+            torch.cuda.empty_cache()
         return total_l, None, None
 
     s = {"model": model,
          "optimizer": optimizer,
          "hparams": hp}
 
-    # the out-of-loop-check
+    """
     r = loop(speech, {"train": True}, None)
     r2 = loop(speech, {"train": True}, None)
+    print(r)
+    print(r2)
+
+    rs = []
+    for i in range(10):
+        print(i)
+        rx = loop(speech, {"train": True}, None)
+        rs.append(rx)
+        print(rs)
     from IPython import embed; embed(); raise ValueError()
+    """
 
     if input_tier_condition_tag is None:
         tag = str(args.experiment_name) + "_tier_{}_{}_sz_{}_{}".format(input_tier_input_tag[0], input_tier_input_tag[1],

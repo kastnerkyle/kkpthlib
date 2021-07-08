@@ -21,15 +21,100 @@ from kkpthlib import HParams
 from kkpthlib import Conv2d
 from kkpthlib import Conv2dTranspose
 
-b_mnist = fetch_binarized_mnist()
+from kkpthlib import fetch_jsb_chorales
+from kkpthlib import piano_roll_from_music_json_file
+
+
 hp = HParams(input_dim=1,
              hidden_dim=32,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
              learning_rate=1E-6,
              clip=3.5,
              batch_size=50,
+             max_sequence_length=32,
+             context_len=16,
+             force_column=False,
+             no_measure_mark=False,
+             #max_vocabulary_size=88, # len(corpus.dictionary.idx2word)
+             max_vocabulary_size=89, # len(corpus.dictionary.idx2word)
              n_epochs=1000,
              random_seed=2122)
+
+jsb = fetch_jsb_chorales()
+
+# sort into minor / major, then by key
+all_transposed = sorted([f for f in jsb["files"] if "original" not in f], key=lambda x:
+                        (x.split(os.sep)[-1].split(".")[-2].split("transposed")[0].split("-")[0],
+                         x.split(os.sep)[-1].split(".")[-2].split("transposed")[0].split("-")[1]))
+
+bwv_names = sorted(list(set([f.split(os.sep)[-1].split(".")[0] for f in all_transposed])))
+vrng = np.random.RandomState(144)
+vrng.shuffle(bwv_names)
+# 15 is ~5% of the data
+# holding out whole songs so actually a pretty hard validation set...
+valid_names = bwv_names[:15]
+train_files = [f for f in all_transposed if all([vn not in f for vn in valid_names])]
+valid_files = [f for f in all_transposed if any([vn in f for vn in valid_names])]
+
+"""
+# loop check to get min and max note values, distribution of notes
+min_note = np.inf
+max_note = -np.inf
+from collections import Counter
+note_counter = Counter()
+ranges = []
+for file_list in [train_files, valid_files]:
+    for file_idx in range(len(file_list)):
+        pr = piano_roll_from_music_json_file(file_list[file_idx], default_velocity=120, quantization_rate=.25, n_voices=4,
+                                             separate_onsets=False)
+        note_counter.update(pr.ravel())
+        this_range = np.max(pr[pr > 0]) - np.min(pr[pr > 0])
+        ranges.append(this_range)
+# looking at note dist, > 87 is rare, cap at 87
+# min value 27, total note range of 61 including 0 for rest
+# we could pad up to 64 if we want to
+# range never goes outside 41 ... should we just pad to 48 and account for global range offset manually?
+# or rather, just take out the offset since music can always be transposed... (thus undoing our data augmentation)
+"""
+
+pr_random_state = np.random.RandomState(112233)
+def get_pr_batch(batch_size, time_len=48, split="train"):
+    batch = []
+    for _ii in range(batch_size):
+        # set max range to 48
+        blank_im = np.zeros((time_len, 48))
+        while True:
+            if split == "train":
+                file_idx = pr_random_state.randint(len(train_files))
+                file_list = train_files
+            elif split == "valid":
+                file_idx = pr_random_state.randint(len(valid_files))
+                file_list = valid_files
+            else:
+                raise ValueError("Unknown split")
+            pr = piano_roll_from_music_json_file(file_list[file_idx], default_velocity=120, quantization_rate=.25, n_voices=4,
+                                                 separate_onsets=False)
+            # be sure we can actually draw a minibatch from this file... should basically always be able to
+            # want to only take batches from files with max note < 87
+            if len(pr) >= time_len:
+                break
+        start_offset = pr_random_state.randint(len(pr) - time_len)
+        stop_offset = start_offset + time_len
+        c = pr[start_offset:stop_offset]
+        assert len(c) == time_len
+        # offset so notes start from 1, leave rest at 0
+        c[c > 0] = (c[c > 0] - np.min(c[c > 0])) + 1
+        for _j in range(c.shape[-1]):
+            for _t in range(c.shape[0]):
+                el = c[_t, _j]
+                blank_im[_t, el] = 1.
+        blank_im[:, 0] = 0.
+        batch.append(blank_im)
+    np_batch = np.array(batch)
+    return np_batch
+
+train_random_state = np.random.RandomState(hp.random_seed)
+valid_random_state = np.random.RandomState(hp.random_seed + 1)
 
 def get_hparams():
     return hp
@@ -114,28 +199,11 @@ if __name__ == "__main__":
     l_fun = BernoulliCrossEntropyFromLogits()
 
     data_random_state = np.random.RandomState(hp.random_seed)
-    train_data = b_mnist["data"][b_mnist["train_indices"]]
-    valid_data = b_mnist["data"][b_mnist["valid_indices"]]
-
-    train_itr = ListIterator([train_data], batch_size=hp.batch_size, random_state=data_random_state,
-                             infinite_iterator=True)
-    valid_itr = ListIterator([valid_data], batch_size=hp.batch_size, random_state=data_random_state,
-                             infinite_iterator=True)
-
-    """
-    train_data = mnist["data"][mnist["train_indices"]]
-    train_target = mnist["target"][mnist["train_indices"]]
-    valid_data = mnist["data"][mnist["valid_indices"]]
-    valid_target = mnist["target"][mnist["valid_indices"]]
-
-    train_itr = ListIterator([train_data, train_target], batch_size=hp.batch_size, random_state=data_random_state,
-                             infinite_iterator=True)
-    valid_itr = ListIterator([valid_data, valid_target], batch_size=hp.batch_size, random_state=data_random_state,
-                             infinite_iterator=True)
-    """
 
     def loop(itr, extras, stateful_args):
-        data_batch, = next(itr)
+        data_batch = get_pr_batch(hp.batch_size)
+        from IPython import embed; embed(); raise ValueError()
+        # decide here if we keep the measure marks or no
         # N H W C
         data_batch = data_batch.reshape(data_batch.shape[0], 28, 28, 1)
         data_batch = data_batch.transpose(0, 3, 1, 2)
@@ -159,13 +227,11 @@ if __name__ == "__main__":
          "optimizer": optimizer,
          "hparams": hp}
 
-    """
     # the out-of-loop-check
-    r = loop(train_itr, {"train": True}, None)
-    r2 = loop(train_itr, {"train": True}, None)
+    r = loop(None, {"train": True}, None)
+    r2 = loop(None, {"train": True}, None)
     print("loop chk")
     from IPython import embed; embed(); raise ValueError()
-    """
 
     run_loop(loop, train_itr,
              loop, valid_itr,

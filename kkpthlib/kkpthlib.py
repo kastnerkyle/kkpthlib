@@ -9,6 +9,9 @@ from torch import nn
 from torch.autograd import Variable
 from scipy.stats import betabinom
 
+from functools import reduce
+from operator import add
+
 import copy
 
 from .hparams import HParams
@@ -1810,6 +1813,313 @@ class BiLSTMLayer(torch.nn.Module):
                  [in_proj, input_mask, torch.flip(in_proj, (0,)), torch.flip(input_mask, (0,))],
                  [h1_f_init, c1_f_init, h1_b_init, c1_b_init])
         return torch.cat([r[0], torch.flip(r[2], (0,))], dim=-1)
+
+
+class GRUCell(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_dims,
+                 num_units,
+                 output_dim=None,
+                 input_mask=None,
+                 random_state=None,
+                 name=None, init=None, scale="default",
+                 forget_bias=1.,
+                 strict=None,
+                 device="default"):
+        super(GRUCell, self).__init__()
+        # cell_dropout should be a value in [0., 1.], or None
+        # output is the thing to use in following layers, state is a tuple that feeds into the next call
+        if random_state is None:
+            raise ValueError("Must pass random_state")
+
+        if name is None:
+            name = _get_name()
+
+        input_dim = sum(list_of_input_dims)
+        hidden_dim = 3 * num_units
+
+        if init is None:
+            inp_init = None
+            h_init = None
+            out_init = None
+        elif init == "truncated_normal":
+            inp_init = "truncated_normal"
+            h_init = "truncated_normal"
+            out_init = "truncated_normal"
+        elif init == "glorot_uniform":
+            inp_init = "glorot_uniform"
+            h_init = "glorot_uniform"
+            out_init = "glorot_uniform"
+        elif init == "normal":
+            inp_init = "normal"
+            h_init = "normal"
+            out_init = "normal"
+        else:
+            raise ValueError("Unknown init argument {}".format(init))
+
+        name_gate = name + "_gru_gate"
+        name_gate_w = name + "_gru_gate_w"
+        name_gate_b = name + "_gru_gate_b"
+        gate_w_np, = make_numpy_weights(input_dim + num_units, [2 * num_units],
+                                        random_state=random_state,
+                                        init=inp_init, name=name_gate_w)
+        gate_b_np, = make_numpy_biases([2 * num_units], name=name_gate_b)
+        # for now leave them 0 then swap to URGRU
+
+        logger.info("GRUCell {} input to hidden initialized using init {}".format(name, inp_init))
+        logger.info("GRUCell {} hidden to hidden initialized using init {}".format(name, h_init))
+
+        gru_gate_obj = Linear(list_of_input_dims + [hidden_dim],
+                              2 * num_units,
+                              random_state=random_state,
+                              name=name_gate,
+                              init=(gate_w_np, gate_b_np), strict=strict,
+                              device=device)
+
+        name_proj = name + "_gru_proj"
+        name_proj_w = name + "_gru_proj_w"
+        name_proj_b = name + "_gru_proj_b"
+        proj_w_np, = make_numpy_weights(input_dim + num_units, [num_units],
+                                        random_state=random_state,
+                                        init=inp_init, name=name_proj_w)
+        proj_b_np, = make_numpy_biases([num_units], name=name_proj_b)
+
+        gru_proj_obj = Linear(list_of_input_dims + [hidden_dim],
+                              num_units,
+                              random_state=random_state,
+                              name=name_proj,
+                              init=(proj_w_np, proj_b_np), strict=strict,
+                              device=device)
+
+
+
+        if output_dim is not None:
+            raise ValueError("GRU out proj not yet implemented")
+            name_out = name + "_gru_h_to_out",
+            name_out_w = name + "_gru_h_to_out_w",
+            name_out_b = name + "_gru_h_to_out_b",
+            h_to_out_w_np, = make_numpy_weights(num_units, [output_dim],
+                                                random_state=random_state,
+                                                init=out_init, name=name_out_w)
+            h_to_out_b_np, = make_numpy_biases([output_dim], name=name_out_b)
+            h_to_out_obj = Linear([num_units], output_dim, random_state=random_state,
+                              name=name_out,
+                              init=(h_to_out_w_np, h_to_out_b_np), strict=strict,
+                              device=device)
+            self.h_to_out_obj = h_to_out_obj
+        self.gru_gate_obj = gru_gate_obj
+        self.gru_proj_obj = gru_proj_obj
+        self.num_units = num_units
+        self.input_dim = input_dim
+
+    def forward(self,
+                list_of_inputs,
+                previous_hidden, previous_cell=None,
+                output_dim=None,
+                input_mask=None,
+                cell_dropout=None):
+        # cell_dropout should be a value in [0., 1.], or None
+        # output is the thing to use in following layers, state is a tuple that feeds into the next call
+
+        input_dim = self.input_dim
+        num_units = self.num_units
+
+        ph = previous_hidden
+
+        pc = previous_cell
+        # pc should be None
+        # ignore previous cell, return None for it since this is GRU, only for compat with LSTM
+
+        gru_gate = sigmoid(self.gru_gate_obj(list_of_inputs + [ph]))
+        r, z = gru_gate[..., :self.num_units], gru_gate[..., self.num_units:]
+
+        # TODO: UR mods?
+        # https://arxiv.org/pdf/1910.09890.pdf
+
+        r_state = r * ph
+        gru_proj = tanh(self.gru_proj_obj(list_of_inputs + [r_state]))
+
+        h = z * gru_proj + (1. - z) * ph
+        if input_mask is not None:
+            h = input_mask[:, None] * h + (1. - input_mask[:, None]) * ph
+
+        final_out = h
+        return final_out, (h, None)
+
+
+class GRULayer(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_dims,
+                 num_units,
+                 output_dim=None,
+                 random_state=None,
+                 name=None,
+                 init=None,
+                 scale="default",
+                 forget_bias=1.,
+                 strict=None,
+                 device="default"):
+        super(GRULayer, self).__init__()
+        if name is None:
+            name = _get_name()
+        name = name + "_gru_layer"
+        name_proj = name + "_proj"
+        hidden_dim = 4 * num_units
+        in_proj_obj = Linear(list_of_input_dims,
+                             hidden_dim,
+                             random_state=random_state,
+                             name=name_proj,
+                             init=init,
+                             scale=scale,
+                             strict=strict,
+                             device=device)
+
+        fwd_cell_obj = GRUCell([hidden_dim],
+                                num_units,
+                                random_state=random_state,
+                                name=name + "_forward_rnn",
+                                init=init,
+                                scale=scale,
+                                device=device)
+
+        self.in_proj_obj = in_proj_obj
+        self.fwd_cell_obj = fwd_cell_obj
+        self.num_units = num_units
+
+    def forward(self, list_of_inputs,
+                previous_forward_hidden=None, previous_forward_cell=None,
+                input_mask=None,
+                cell_dropout=None,
+                strict=None):
+
+        num_units = self.num_units
+
+        in_proj = self.in_proj_obj(list_of_inputs)
+        if input_mask is None:
+            input_mask = 0. * in_proj[..., 0] + 1.
+
+        if previous_forward_hidden == None:
+            h1_f_init = 0. * in_proj[0, :, :num_units].detach()
+        else:
+            h1_f_init = previous_forward_hidden
+        if previous_forward_cell == None:
+            c1_f_init = 0. * in_proj[0, :, :num_units].detach()
+        else:
+            c1_f_init = previous_forward_cell
+
+        # GRU doesn't use cell!
+        def step(inp_t, inp_mask_t,
+                 h1_f_tm1):
+            output, s = self.fwd_cell_obj([inp_t],
+                                          h1_f_tm1, None,
+                                          input_mask=inp_mask_t,
+                                          cell_dropout=cell_dropout)
+            h1_f_t = s[0]
+            #c1_f_t = s[1]
+            return [h1_f_t,]
+
+        # should this be a "proper" flip with mask on the end
+        r = scan(step,
+                 [in_proj, input_mask],
+                 [h1_f_init])
+        return r[0], r[0], None #r[1]
+
+
+class BiGRULayer(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_dims,
+                 num_units,
+                 output_dim=None,
+                 random_state=None,
+                 name=None, init=None, scale="default",
+                 forget_bias=1.,
+                 strict=None,
+                 device="default"):
+        super(BiLSTMLayer, self).__init__()
+        if name is None:
+            name = _get_name()
+        name = name + "_bidirgru_layer"
+        name_proj = name + "_proj"
+        hidden_dim = 4 * num_units
+        in_proj_obj = Linear(list_of_input_dims,
+                             hidden_dim,
+                             random_state=random_state,
+                             name=name_proj,
+                             init=init, strict=strict,
+                             device=device)
+
+        fwd_cell_obj = GRUCell([hidden_dim],
+                                num_units,
+                                random_state=random_state,
+                                name=name + "forward_rnn",
+                                init=init,
+                                device=device)
+
+        rev_cell_obj = GRUCell([hidden_dim],
+                                 num_units,
+                                 random_state=random_state,
+                                 name=name + "reverse_rnn",
+                                 init=init,
+                                 device=device)
+
+        self.in_proj_obj = in_proj_obj
+        self.fwd_cell_obj = fwd_cell_obj
+        self.rev_cell_obj = rev_cell_obj
+        self.num_units = num_units
+
+    def forward(self, list_of_inputs,
+                previous_forward_hidden=None, previous_forward_cell=None,
+                previous_reverse_hidden=None, previous_reverse_cell=None,
+                input_mask=None,
+                cell_dropout=None,
+                strict=None):
+
+        num_units = self.num_units
+        if input_mask is None:
+            raise ValueError("No input mask currently unsupported")
+
+        in_proj = self.in_proj_obj(list_of_inputs)
+
+        if previous_forward_hidden == None:
+            h1_f_init = 0. * in_proj[0, :, :num_units].detach()
+        else:
+            h1_f_init = previous_forward_hidden
+        if previous_reverse_hidden == None:
+            h1_b_init = 0. * in_proj[0, :, :num_units].detach()
+        else:
+            h1_b_init = previous_reverse_hidden
+        if previous_forward_cell == None:
+            c1_f_init = 0. * in_proj[0, :, :num_units].detach()
+        else:
+            c1_f_init = previous_forward_cell
+
+        if previous_reverse_cell == None:
+            c1_b_init = 0. * in_proj[0, :, :num_units].detach()
+        else:
+            c1_b_init = previous_reverse_cell
+
+        # GRU doesn't use cell
+        def step(inp_t, inp_mask_t,
+                 rev_inp_t, rev_inp_mask_t,
+                 h1_f_tm1, h1_b_tm1):
+            output, s = self.fwd_cell_obj([inp_t],
+                                          h1_f_tm1, None,
+                                          input_mask=inp_mask_t,
+                                          cell_dropout=cell_dropout)
+            h1_f_t = s[0]
+
+            output, s = self.rev_cell_obj([rev_inp_t],
+                                          h1_b_tm1, None,
+                                          input_mask=rev_inp_mask_t,
+                                          cell_dropout=cell_dropout)
+            h1_b_t = s[0]
+            return h1_f_t, h1_b_t
+
+        # should this be a "proper" flip with mask on the end
+        r = scan(step,
+                 [in_proj, input_mask, torch.flip(in_proj, (0,)), torch.flip(input_mask, (0,))],
+                 [h1_f_init, h1_b_init])
+        return torch.cat([r[0], torch.flip(r[1], (0,))], dim=-1)
 
 
 class GaussianAttentionCell(torch.nn.Module):
@@ -4617,7 +4927,8 @@ class AttentionMelNetTier(torch.nn.Module):
                  has_centralized_stack=False,
                  has_spatial_condition=False,
                  has_attention=False,
-                 attention_type="gaussian",
+                 cell_type="lstm",
+                 attention_type="sigmoid_logistic",
                  attention_mixture_components=10,
                  conditional_layers=2,
                  init=None, scale="default",
@@ -4638,6 +4949,7 @@ class AttentionMelNetTier(torch.nn.Module):
             strict = get_strict_mode_default()
 
         self.input_symbols = list_of_input_symbol_sizes[0]
+        self.cell_type = cell_type
         self.hidden_size = hidden_dim
         self.output_size = output_dim
         self.has_centralized_stack = has_centralized_stack
@@ -4652,6 +4964,17 @@ class AttentionMelNetTier(torch.nn.Module):
         self.n_vert = n_vert
         self.n_horiz = n_horiz
         self.output_dim = output_dim
+
+        if self.cell_type == "lstm":
+            bidir_rnn_fn = BiLSTMLayer
+            rnn_fn = LSTMLayer
+            rnn_cell_fn = LSTMCell
+        elif self.cell_type == "gru":
+            bidir_rnn_fn = BiGRULayer
+            rnn_fn = GRULayer
+            rnn_cell_fn = GRUCell
+        else:
+            raise ValueError("Unknown cell_type, self.cell_type was {}".format(self.cell_type))
 
         #self.embed_td = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_td")
         #self.embed_fd = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_fd")
@@ -4691,17 +5014,19 @@ class AttentionMelNetTier(torch.nn.Module):
             self.cond_mn = MelNetFullContextSubTier([self.input_symbols], n_vert, n_horiz, self.hidden_size, self.conditional_layers,
                                        random_state=random_state,
                                        init=init,
+                                       cell_type=self.cell_type,
                                        name=name + "cond_mn",
                                        device=device)
+
         if self.has_centralized_stack:
             if self.has_attention:
-                self.attn_lstm_cell = LSTMCell([self.hidden_size + self.hidden_size],
-                                               self.hidden_size,
-                                               random_state=random_state,
-                                               init=init,
-                                               scale=scale,
-                                               name=name + "_attn_lstm_cell",
-                                               device=device)
+                self.attn_lstm_cell = rnn_cell_fn([self.hidden_size + self.hidden_size],
+                                                   self.hidden_size,
+                                                   random_state=random_state,
+                                                   init=init,
+                                                   scale=scale,
+                                                   name=name + "_attn_rnn_cell",
+                                                   device=device)
                 """
                 self.attn_reduction_proj = Linear([self.hidden_size,],
                                                   self.n_horiz,
@@ -4795,73 +5120,48 @@ class AttentionMelNetTier(torch.nn.Module):
                                      biases=False,
                                      device=device)
                 elif self.attention_type == "lsa":
-                    print("here")
-                    from IPython import embed; embed(); raise ValueError()
-                    # for convolutional attention
-                    # https://github.com/bshall/Tacotron/blob/6fee34a7c3a9d4ceb9215ed3063771a9287010e1/tacotron/model.py
-                    prior_length = 11
-                    alpha = .1
-                    beta = .9
-                    # expected average step size (encoder steps per decoder step) is 1 here
-                    # alpha * prior_length / (alpha + beta)
-                    # makes sense because of the extreme downsampling
-                    # roughly on 1 to 1 scale but may need to be tuned
-                    # realistically more like .8 encoder steps per decoder steps on datasets
-                    P = betabinom.pmf(np.arange(prior_length), prior_length - 1, alpha, beta)
-                    self.register_buffer("P", torch.FloatTensor(P).flip(0))
-                    # note - W_g in paper
-                    self.W_g = Linear([self.hidden_size],
-                                     self.hidden_size,
-                                     random_state=random_state,
-                                     init=init,
-                                     scale=scale,
-                                     name=name + "_attn_W_term",
-                                     device=device)
-                    dynamic_channels = 8
-                    dynamic_kernel_size = 21
-                    # note - V_g in paper
-                    self.V_g = Linear([self.hidden_size],
-                                     dynamic_channels * dynamic_kernel_size,
-                                     random_state=random_state,
-                                     init=init,
-                                     scale=scale,
-                                     name=name + "_attn_V_term",
-                                     biases=False,
-                                     device=device)
-                    static_channels = 8
-                    static_kernel_size = 21
-                    self.attn_prior_length = prior_length
-                    self.attn_alpha = alpha
-                    self.attn_beta = beta
-                    self.attn_dynamic_channels = dynamic_channels
-                    self.attn_dynamic_kernel_size = dynamic_kernel_size
-                    self.attn_static_channels = static_channels
-                    self.attn_static_kernel_size = static_kernel_size
-                    self.F = Conv1d([1], static_channels, kernel_size=(static_kernel_size, static_kernel_size), random_state=random_state,
-                                    name=name + "_attn_F_term", biases=False, device=device)
-                    self.U = Linear([static_channels],
-                                     self.hidden_size,
-                                     random_state=random_state,
-                                     init=init,
-                                     scale=scale,
-                                     name=name + "_attn_U_term",
-                                     biases=False,
-                                     device=device)
-                    self.T = Linear([dynamic_channels],
-                                     self.hidden_size,
-                                     random_state=random_state,
-                                     init=init,
-                                     scale=scale,
-                                     name=name + "_attn_T_term",
-                                     device=device)
-                    self.v = Linear([self.hidden_size],
-                                     1,
-                                     random_state=random_state,
-                                     init=init,
-                                     scale=scale,
-                                     name=name + "_attn_v_term",
-                                     biases=False,
-                                     device=device)
+                    # https://github.com/NVIDIA/tacotron2/blob/master/model.py#L29
+                    # hardcode temporarily
+                    attention_dim = 128
+                    self.query_layer = Linear([self.hidden_size],
+                                               attention_dim,
+                                               random_state=random_state,
+                                               init=init,
+                                               scale=scale,
+                                               name=name + "_attn_query_term",
+                                               biases=False,
+                                               device=device)
+                    # unused?
+                    self.memory_layer = Linear([self.hidden_size],
+                                               attention_dim,
+                                               random_state=random_state,
+                                               init=init,
+                                               scale=scale,
+                                               name=name + "_attn_memory_term",
+                                               biases=False,
+                                               device=device)
+                    self.v_layer = Linear([attention_dim],
+                                           1,
+                                           random_state=random_state,
+                                           init=init,
+                                           scale=scale,
+                                           name=name + "_attn_v_term",
+                                           biases=False,
+                                           device=device)
+                    attention_n_filters = 32
+                    attention_kernel_size = 31
+                    padding = int((attention_kernel_size - 1) / 2)
+                    self.location_conv = Conv1d([2], attention_n_filters, kernel_size=(attention_kernel_size, attention_kernel_size),
+                                                random_state=random_state,
+                                                name=name + "_attn_location_conv", biases=False, device=device)
+                    self.location_dense = Linear([attention_n_filters],
+                                                  attention_dim,
+                                                  random_state=random_state,
+                                                  init=init,
+                                                  scale=scale,
+                                                  name=name + "_attn_location_dense",
+                                                  biases=False,
+                                                  device=device)
                 elif self.attention_type == "gaussian":
                     # for logistic sigmoid attention ala melnet
                     self.attn_proj = Linear([self.hidden_size],
@@ -4876,28 +5176,28 @@ class AttentionMelNetTier(torch.nn.Module):
 
 
         for _i in range(self.n_layers):
-            self.tds_lstms_time_fw.append(LSTMLayer([self.hidden_size,],
+            self.tds_lstms_time_fw.append(rnn_fn([self.hidden_size,],
                                                     self.hidden_size,
                                                     random_state=random_state,
                                                     init=init,
                                                     scale=scale,
-                                                    name=name + "_tds_lstm_time_fw_{}".format(_i),
+                                                    name=name + "_tds_rnn_time_fw_{}".format(_i),
                                                     device=device))
 
-            self.tds_lstms_freq_fw.append(LSTMLayer([self.hidden_size,],
+            self.tds_lstms_freq_fw.append(rnn_fn([self.hidden_size,],
                                                     self.hidden_size,
                                                     random_state=random_state,
                                                     init=init,
                                                     scale=scale,
-                                                    name=name + "_tds_lstm_freq_fw_{}".format(_i),
+                                                    name=name + "_tds_rnn_freq_fw_{}".format(_i),
                                                     device=device))
 
-            self.tds_lstms_freq_bw.append(LSTMLayer([self.hidden_size,],
+            self.tds_lstms_freq_bw.append(rnn_fn([self.hidden_size,],
                                                     self.hidden_size,
                                                     random_state=random_state,
                                                     init=init,
                                                     scale=scale,
-                                                    name=name + "_tds_lstm_freq_bw_{}".format(_i),
+                                                    name=name + "_tds_rnn_freq_bw_{}".format(_i),
                                                     device=device))
 
             self.tds_projs.append(Linear([3 * self.hidden_size,],
@@ -4916,22 +5216,22 @@ class AttentionMelNetTier(torch.nn.Module):
                                           name=name + "_fds_projs_{}".format(_i),
                                           device=device))
 
-            self.fds_lstms_freq_fw.append(LSTMLayer([self.hidden_size,],
+            self.fds_lstms_freq_fw.append(rnn_fn([self.hidden_size,],
                                                     self.hidden_size,
                                                     random_state=random_state,
                                                     init=init,
                                                     scale=scale,
-                                                    name=name + "_fds_lstm_freq_fw_{}".format(_i),
+                                                    name=name + "_fds_rnn_freq_fw_{}".format(_i),
                                                     device=device))
 
 
             if self.has_centralized_stack:
-                self.cds_centralized_lstms.append(LSTMLayer([self.hidden_size,],
+                self.cds_centralized_lstms.append(rnn_fn([self.hidden_size,],
                                                              self.hidden_size,
                                                              random_state=random_state,
                                                              init=init,
                                                              scale=scale,
-                                                             name=name + "_cds_centralized_lstm_{}".format(_i),
+                                                             name=name + "_cds_centralized_rnn_{}".format(_i),
                                                              device=device))
                 self.cds_projs.append(Linear([self.hidden_size,],
                                               self.hidden_size,
@@ -5119,7 +5419,10 @@ class AttentionMelNetTier(torch.nn.Module):
             #beta = 0. * phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components] + 1.
 
             # aggressive clamping here, use softplus to help stability as well
-            beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.25, max=2.0)
+            #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.25, max=2.0)
+            #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.01, max=10.0)
+            beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.1, max=2.0)
+
             alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
 
             u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
@@ -5134,7 +5437,7 @@ class AttentionMelNetTier(torch.nn.Module):
             weights = memory_mask.transpose(0, 1)[:, None, :] * weights
             context = torch.bmm(weights, memory.permute(1, 0, 2))
             # context is B, 1, D
-            # weights B, mem_T 
+            # weights B, 1, mem_T 
             extras = {}
             extras["termination"] = termination
             extras["kappa"] = kappa
@@ -5167,40 +5470,22 @@ class AttentionMelNetTier(torch.nn.Module):
 
             context = torch.bmm(weights[:, None], memory.permute(1, 0, 2))
             # context is B, 1, D
+            # TODO: fix the dims to match, should be weights B, 1, mem_T 
             # weights B, mem_T 
             extras = {}
         elif self.attention_type == "lsa":
-            print("lsa")
-            from IPython import embed; embed(); raise ValueError()
-            # code ref:
-            # https://github.com/bshall/Tacotron
-            p = F.conv1d(F.pad(previous_attn[:, None], (self.attn_prior_length - 1, 0)), self.P[None, None])
-            p = torch.log(p.clamp_min_(1E-6)[:, 0])
-
-            G = self.V_g([self.W_g([h_i])])
-
-            g = F.conv1d(previous_attn[None], G.view(-1, 1, self.attn_dynamic_kernel_size),
-                         padding=(self.attn_dynamic_kernel_size - 1) // 2,
-                         groups=h_i.shape[0])
-            g = g.view(h_i.size(0), self.attn_dynamic_channels, -1).transpose(1, 2)
-
-            f = self.F([previous_attn.transpose(1, 0)[..., None]])
-            e = self.v([torch.tanh(self.U([f]) + self.T([g]).transpose(0, 1))])[..., 0]
-
-            e = e.transpose(1, 0) + p
-            # now B, mem_T
-            weights = F.softmax(e, dim=1)
-
-            # mask weights here
-            # technically don't sum to 1 anymore but don't want to add weight to zero info places...
-            # for now, don't mask
-            #weights = memory_mask.transpose(0, 1) * weights
-
+            processed_query = self.query_layer([h_i])
+            processed_memory = self.memory_layer([memory.permute(1, 0, 2)])
+            processed_attention = self.location_conv([previous_attn.transpose(1, 0)])
+            processed_attention_dense = self.location_dense([processed_attention]).transpose(1, 0)
+            # processed_attention_dense is batch, mem_T, attn_dim
+            weight_logits = self.v_layer([torch.tanh(processed_attention_dense + processed_memory + processed_query[:, None])])[..., 0]
+            weights = F.softmax(weight_logits, dim=1)
             context = torch.bmm(weights[:, None], memory.permute(1, 0, 2))
+            weights = weights[:, None]
             # context is B, 1, D
-            # weights B, mem_T 
+            # weights B, 1, mem_T 
             extras = {}
-
         elif self.attention_type == "gaussian":
             #_attention_step(self, h_i, memory, memory_mask, ksi):
             # condition on input sequence length
@@ -5273,9 +5558,12 @@ class AttentionMelNetTier(torch.nn.Module):
             prev_attn = F.one_hot(torch.zeros(B, dtype=torch.long, device=cds.device), memory.size(0)).float()
         elif self.attention_type == "gaussian":
             prev_attn = cds.new_zeros(B, self.attention_mixture_components)
+        elif self.attention_type == "lsa":
+            # one dim for attention, one for accumulative weights
+            prev_attn_base = cds.new_zeros(B, memory.size(0), 1)
+            prev_attn_accum = cds.new_zeros(B, memory.size(0), 1)
         else:
             raise ValueError("Unknown self.attention_type {} found".format(self.attention_type))
-        #ksi = tds.new_zeros(B, self.attention_mixture_components)
         contexts = []
         weights = []
         terminations = []
@@ -5288,13 +5576,21 @@ class AttentionMelNetTier(torch.nn.Module):
                                          input_mask=None)
             h_t, c_t = s[0], s[1]
             out_hiddens.append(h_t[None])
+
+            if self.attention_type == "lsa":
+                prev_attn = torch.cat((prev_attn_base, prev_attn_accum), dim=2)
+
             context, attn_weight, extras = self._attention_step(h_t, memory, memory_mask, prev_attn)
+
             if self.attention_type == "logistic":
                 prev_attn = extras["kappa"]
             elif self.attention_type == "sigmoid_logistic":
                 prev_attn = extras["kappa"]
             elif self.attention_type == "dca":
                 prev_attn = attn_weight
+            elif self.attention_type == "lsa":
+                prev_attn_base = attn_weight[:, 0][..., None]
+                prev_attn_accum += attn_weight[:, 0][..., None]
             elif self.attention_type == "gaussian":
                 prev_attn = extras["kappa"]
             else:
@@ -5309,7 +5605,7 @@ class AttentionMelNetTier(torch.nn.Module):
         elif self.attention_type == "gaussian":
             contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
         else:
-            contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) #+ torch.cat(out_hiddens, axis=0)
+            contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
         #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
         #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + tds
         # decoder_T, B, D
@@ -5389,6 +5685,19 @@ class AttentionMelNetTier(torch.nn.Module):
         td_x_i = td_x
         fd_x_i = fd_x
         cd_x_i = cd_x
+
+        def res(l):
+            #return l
+            return (0.5 ** 0.5) * l
+            #return layer_norm(l, eps=1E-3)
+            #return (0.5 ** 0.5) * layer_norm(l, eps=1E-4)
+
+        def layer_norm(x, dim=-1, eps=1E-5):
+            mean = torch.mean(x, dim=dim, keepdim=True)
+            var = torch.square(x - mean).mean(dim=dim, keepdim=True)
+            return (x - mean) / torch.sqrt(var + eps)
+
+
         for _i in range(self.n_layers):
             td_x_o = self._td_stack(td_x_i, _i)
             if self.has_centralized_stack:
@@ -5396,21 +5705,21 @@ class AttentionMelNetTier(torch.nn.Module):
                     cd_att, alignment, attn_extras = self._attention(cd_x_i, _i, memory, memory_mask)
                     has_cd_att = True
                     # should this just replace the centralized stack here?
-                    cd_x_o = self._cd_centralized_stack(cd_x_i + cd_att, _i)
-                    fd_x_o = self._fd_stack(td_x_o + td_x_i, fd_x_i, _i, tds_cent=cd_x_o + cd_x_i + cd_att)
+                    cd_x_o = self._cd_centralized_stack(res(cd_x_i + cd_att), _i)
+                    fd_x_o = self._fd_stack(res(td_x_o + td_x_i), fd_x_i, _i, tds_cent=res(cd_x_o + cd_x_i + cd_att))
                 else:
                     if has_cd_att is False:
                         cd_x_o = self._cd_centralized_stack(cd_x_i, _i)
-                        fd_x_o = self._fd_stack(td_x_o + td_x_i, fd_x_i, _i, tds_cent=cd_x_i + cd_x_o)
+                        fd_x_o = self._fd_stack(res(td_x_o + td_x_i), fd_x_i, _i, tds_cent=res(cd_x_i + cd_x_o))
                     else:
                         cd_x_o = self._cd_centralized_stack(cd_x_i + cd_att, _i)
-                        fd_x_o = self._fd_stack(td_x_o + td_x_i, fd_x_i, _i, tds_cent=cd_x_o + cd_x_i + cd_att)
+                        fd_x_o = self._fd_stack(res(td_x_o + td_x_i), fd_x_i, _i, tds_cent=res(cd_x_o + cd_x_i + cd_att))
             else:
-                fd_x_o = self._fd_stack(td_x_o + td_x_i, fd_x_i, _i)
-            fd_x_i = fd_x_o + fd_x_i
-            td_x_i = td_x_o + td_x_i
+                fd_x_o = self._fd_stack(res(td_x_o + td_x_i), fd_x_i, _i)
+            fd_x_i = res(fd_x_o + fd_x_i)
+            td_x_i = res(td_x_o + td_x_i)
             if self.has_centralized_stack:
-                cd_x_i = cd_x_o + cd_x_i
+                cd_x_i = res(cd_x_o + cd_x_i)
                 # don't add in the attention because we manually add it everwhere cd_x_i is used
                 #cd_x_i = cd_x_o + cd_x_i + cd_att
             # set to none to be ensure no "carryover" / errors

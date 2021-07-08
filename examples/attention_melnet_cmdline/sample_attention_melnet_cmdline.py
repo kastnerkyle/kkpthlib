@@ -129,6 +129,14 @@ sys.path.pop(0)
 
 hp = get_hparams()
 model = build_model(hp)
+
+use_half = False
+if use_half:
+    model.half()  # convert to half precision
+    for layer in model.modules():
+        layer.half()
+    [a.half() for a in model.parameters()]
+
 model_dict = torch.load(saved_model_path, map_location=hp.use_device)
 model.load_state_dict(model_dict)
 model.eval()
@@ -158,7 +166,7 @@ from kkpthlib import softmax_np
 
 data_random_state = np.random.RandomState(hp.random_seed)
 folder_base = "/usr/local/data/kkastner/robovoice/robovoice_d_25k"
-fixed_minibatch_time_secs = 6
+fixed_minibatch_time_secs = 4
 fraction_train_split = .9
 speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              wav_folder=folder_base + "/wavs/",
@@ -193,6 +201,12 @@ speech.load_mean_std_from_filepath(mean_std_path)
 saved_mean = speech.cached_mean_vec_[None, None, :, None]
 saved_std = speech.cached_std_vec_[None, None, :, None]
 
+if use_half:
+    model.half()  # convert to half precision
+    for layer in model.modules():
+        layer.half()
+    [a.half() for a in model.parameters()]
+
 torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
 torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
 
@@ -214,6 +228,12 @@ x_mask_in_np = all_x_mask_splits[::-1][input_tier_input_tag[0]][input_tier_input
 
 x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
 x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
+
+if use_half:
+    torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device).half()
+    torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device).half()
+    x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device).half()
+    x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device).half()
 
 if input_tier_condition_tag is None:
     # no noise here in pred
@@ -237,7 +257,9 @@ if args.terminate_early_attention_plot:
         mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
         text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
         # matshow vs imshow?
-        plt.imshow(teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:mel_cut, :text_cut])
+        this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:mel_cut, :text_cut]
+        this_att = this_att.astype("float32")
+        plt.imshow(this_att)
         plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
         plt.savefig("attn_{}.png".format(_i))
         plt.close()
