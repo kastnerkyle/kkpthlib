@@ -11,6 +11,7 @@ from kkpthlib.datasets import fetch_binarized_mnist
 from kkpthlib import Linear
 from kkpthlib import BernoulliCrossEntropyFromLogits
 from kkpthlib import relu
+from kkpthlib import sigmoid
 from kkpthlib import softmax
 from kkpthlib import log_softmax
 #from kkpthlib import clipping_grad_norm_
@@ -25,10 +26,10 @@ from kkpthlib import fetch_jsb_chorales
 from kkpthlib import piano_roll_from_music_json_file
 
 
-hp = HParams(input_dim=1,
+hp = HParams(input_dim=48,
              hidden_dim=32,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
-             learning_rate=1E-6,
+             learning_rate=1E-4,
              clip=3.5,
              batch_size=50,
              max_sequence_length=32,
@@ -124,17 +125,110 @@ def build_model(hp):
     class Model(nn.Module):
         def __init__(self):
             super(Model, self).__init__()
-            self.conv1 = Conv2d([hp.input_dim], 16, kernel_size=(4, 4), strides=(2, 2), border_mode=(1, 1), random_state=random_state, name="conv1")
+            # consider this an encoder block?
+            self.conv1_1 = Conv2d([hp.input_dim], 16, kernel_size=(1, 3), strides=(1, 1), border_mode=(0, 1),
+                                dilation=(1, 1),
+                                random_state=random_state, name="conv1_1")
+            self.conv1_2 = Conv2d([hp.input_dim], 16, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 3),
+                                dilation=(1, 2),
+                                random_state=random_state, name="conv1_2")
+            self.conv1_4 = Conv2d([hp.input_dim], 16, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 6),
+                                dilation=(1, 4),
+                                random_state=random_state, name="conv1_4")
+            self.conv1_8 = Conv2d([hp.input_dim], 16, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 12),
+                                dilation=(1, 8),
+                                random_state=random_state, name="conv1_8")
+            self.conv1_16 = Conv2d([hp.input_dim], 16, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 24),
+                                   dilation=(1, 16),
+                                   random_state=random_state, name="conv1_16")
+            self.conv1_reduce = Conv2d([16], 32, kernel_size=(1, 4), strides=(1, 2), border_mode=(0, 1), random_state=random_state,
+                                       name="conv1_reduce")
+
+
+            self.conv2_1 = Conv2d([32], 32, kernel_size=(1, 3), strides=(1, 1), border_mode=(0, 1),
+                                dilation=(1, 1),
+                                random_state=random_state, name="conv2_1")
+            self.conv2_2 = Conv2d([32], 32, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 3),
+                                dilation=(1, 2),
+                                random_state=random_state, name="conv2_2")
+            self.conv2_4 = Conv2d([32], 32, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 6),
+                                dilation=(1, 4),
+                                random_state=random_state, name="conv2_4")
+            self.conv2_8 = Conv2d([32], 32, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 12),
+                                dilation=(1, 8),
+                                random_state=random_state, name="conv2_8")
+            self.conv2_reduce = Conv2d([32], 64, kernel_size=(1, 4), strides=(1, 2), border_mode=(0, 1), random_state=random_state,
+                                       name="conv2_reduce")
+
+
+            self.conv3_1 = Conv2d([64], 64, kernel_size=(1, 3), strides=(1, 1), border_mode=(0, 1),
+                                dilation=(1, 1),
+                                random_state=random_state, name="conv3_1")
+            self.conv3_2 = Conv2d([64], 64, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 3),
+                                dilation=(1, 2),
+                                random_state=random_state, name="conv3_2")
+            self.conv3_4 = Conv2d([64], 64, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 6),
+                                dilation=(1, 4),
+                                random_state=random_state, name="conv3_4")
+
+
+            """
+
             self.conv2 = Conv2d([16], 32, kernel_size=(4, 4), strides=(2, 2), border_mode=(1, 1), random_state=random_state, name="conv2")
             self.conv3 = Conv2d([32], 64, kernel_size=(4, 4), strides=(1, 1), border_mode=0, random_state=random_state, name="conv3")
             self.conv4 = Conv2d([64], hp.hidden_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=0, random_state=random_state, name="conv4")
 
             self.transpose_convpre = Conv2d([hp.hidden_dim], 64, kernel_size=(1, 1), strides=(1, 1), border_mode=0, random_state=random_state, name="convpre")
-            self.transpose_conv1 = Conv2dTranspose([64], 64, kernel_size=(3, 3), strides=(1, 1), border_mode=(1, 1), random_state=random_state, name="transpose_conv1")
+            """
+            self.transpose_conv2_expand = Conv2dTranspose([64], 32, kernel_size=(1, 4), strides=(1, 2), border_mode=(0, 1), random_state=random_state, name="transpose_conv2_expand")
+
+            self.transpose_conv2_1 = Conv2dTranspose([32], 32, kernel_size=(1, 3), strides=(1, 1), border_mode=(0, 1),
+                                                     dilation=(1, 1),
+                                                     random_state=random_state, name="transpose_conv2_1")
+            self.transpose_conv2_2 = Conv2dTranspose([32], 32, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 3),
+                                                     dilation=(1, 2),
+                                                     random_state=random_state, name="transpose_conv2_2")
+            self.transpose_conv2_4 = Conv2dTranspose([32], 32, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 6),
+                                                     dilation=(1, 4),
+                                                     random_state=random_state, name="transpose_conv2_4")
+            self.transpose_conv2_8 = Conv2dTranspose([32], 32, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 12),
+                                                     dilation=(1, 8),
+                                                     random_state=random_state, name="transpose_conv2_8")
+
+
+            self.transpose_conv1_expand = Conv2dTranspose([32], 16, kernel_size=(1, 4), strides=(1, 2), border_mode=(0, 1), random_state=random_state, name="transpose_conv1_expand")
+
+            # consider this a decoder block?
+            self.transpose_conv1_1 = Conv2dTranspose([16], 16, kernel_size=(1, 3), strides=(1, 1), border_mode=(0, 1),
+                                                     dilation=(1, 1),
+                                                     random_state=random_state, name="transpose_conv1_1")
+            self.transpose_conv1_2 = Conv2dTranspose([16], 16, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 3),
+                                                     dilation=(1, 2),
+                                                     random_state=random_state, name="transpose_conv1_2")
+            self.transpose_conv1_4 = Conv2dTranspose([16], 16, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 6),
+                                                     dilation=(1, 4),
+                                                     random_state=random_state, name="transpose_conv1_4")
+            self.transpose_conv1_8 = Conv2dTranspose([16], 16, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 12),
+                                                     dilation=(1, 8),
+                                                     random_state=random_state, name="transpose_conv1_8")
+            self.transpose_conv1_16 = Conv2dTranspose([16], 16, kernel_size=(1, 4), strides=(1, 1), border_mode=(0, 24),
+                                                     dilation=(1, 16),
+                                                     random_state=random_state, name="transpose_conv1_16")
+
+            self.conv_out = Conv2d([16], hp.input_dim, kernel_size=(3, 3), strides=(1, 1), border_mode=(1, 1),
+                                   dilation=(1, 1),
+                                   random_state=random_state, name="conv_out")
+
+            """
+            self.transpose_conv1 = Conv2dTranspose([64], 64, kernel_size=(3, 3), strides=(1, 1), border_mode=(1, 1),
+                                                   dilation=(1,2)
+                                                   random_state=random_state, name="transpose_conv1")
+
             self.transpose_conv2 = Conv2dTranspose([64], 32, kernel_size=(5, 5), strides=(1, 1), border_mode=(0, 0), random_state=random_state, name="transpose_conv2")
             self.transpose_conv3 = Conv2dTranspose([32], 32, kernel_size=(4, 4), strides=(2, 2), border_mode=(2, 2), random_state=random_state, name="transpose_conv3")
             self.transpose_conv4 = Conv2dTranspose([32], 16, kernel_size=(4, 4), strides=(2, 2), border_mode=(1, 1), random_state=random_state, name="transpose_conv4")
             self.transpose_conv5 = Conv2dTranspose([16], hp.input_dim, kernel_size=(1, 1), strides=(1, 1), border_mode=(0, 0), random_state=random_state, name="transpose_conv5")
+            """
 
         def sample_gumbel(self, logits, temperature=1.):
             noise = random_state.uniform(1E-5, 1. - 1E-5, logits.shape)
@@ -149,17 +243,28 @@ def build_model(hp):
             return one_hot
 
         def forward(self, x):
-            h1 = relu(self.conv1([x]))
-            h2 = relu(self.conv2([h1]))
-            h3 = relu(self.conv3([h2]))
-            h4 = relu(self.conv4([h3]))
+            h1_1 = relu(self.conv1_1([x]))
+            h1_2 = relu(self.conv1_2([x]))
+            h1_4 = relu(self.conv1_4([x]))
+            h1_8 = relu(self.conv1_8([x]))
+            h1_16 = relu(self.conv1_16([x]))
+            h1 = h1_1 + h1_2 + h1_4 + h1_8 + h1_16
+            h1_reduce = self.conv1_reduce([h1])
 
-            self.h1 = h1
-            self.h2 = h2
-            self.h3 = h3
-            self.h4 = h4
+            h2_1 = relu(self.conv2_1([h1_reduce]))
+            h2_2 = relu(self.conv2_2([h1_reduce]))
+            h2_4 = relu(self.conv2_4([h1_reduce]))
+            h2_8 = relu(self.conv2_8([h1_reduce]))
+            h2 = h2_1 + h2_2 + h2_4 + h2_8
+            h2_reduce = self.conv2_reduce([h2])
 
-            logits = h4.reshape((h4.shape[0], h4.shape[1], -1))
+            h3_1 = relu(self.conv3_1([h2_reduce]))
+            h3_2 = relu(self.conv3_2([h2_reduce]))
+            h3_4 = relu(self.conv3_4([h2_reduce]))
+            h3 = h3_1 + h3_2 + h3_4
+
+            # discrete stuff here
+            logits = h3.reshape((h3.shape[0], h3.shape[1], -1))
 
             self.logits = logits
 
@@ -173,24 +278,26 @@ def build_model(hp):
             logpy = (y * log_softmax(logits)).sum(axis=-1, keepdims=True)
             dice = torch.exp(logpy - logpy.detach())
             sample_res = (y - py).detach() * dice + py.detach()
-            sample_res = sample_res.reshape((sample_res.shape[0], sample_res.shape[1], h4.shape[-2], h4.shape[-1])).contiguous()
+            sample_res = sample_res.reshape((sample_res.shape[0], sample_res.shape[1], h3.shape[-2], h3.shape[-1])).contiguous()
 
             self.sample_res = sample_res
 
-            pdh1 = relu(self.transpose_convpre([sample_res]))
-            dh1 = relu(self.transpose_conv1([pdh1]))
-            dh2 = relu(self.transpose_conv2([dh1]))
-            dh3 = relu(self.transpose_conv3([dh2]))
-            dh4 = relu(self.transpose_conv4([dh3]))
-            dh5 = self.transpose_conv5([dh4])
+            h2_d = relu(self.transpose_conv2_expand([sample_res]))
+            r2_1 = relu(self.transpose_conv2_1([h2_d]))
+            r2_2 = relu(self.transpose_conv2_2([h2_d]))
+            r2_4 = relu(self.transpose_conv2_4([h2_d]))
+            r2_8 = relu(self.transpose_conv2_8([h2_d]))
+            r2 = r2_1 + r2_2 + r2_4 + r2_8
 
-            self.pdh1 = pdh1
-            self.dh1 = dh1
-            self.dh2 = dh2
-            self.dh3 = dh3
-            self.dh4 = dh4
-            self.dh5 = dh5
-            return dh5, h4, logits, y, sample_res
+            h1_d = relu(self.transpose_conv1_expand([r2]))
+            r1_1 = relu(self.transpose_conv1_1([h1_d]))
+            r1_2 = relu(self.transpose_conv1_2([h1_d]))
+            r1_4 = relu(self.transpose_conv1_4([h1_d]))
+            r1_8 = relu(self.transpose_conv1_8([h1_d]))
+            r1_16 = relu(self.transpose_conv1_16([h1_d]))
+            r1 = r1_1 + r1_2 + r1_4 + r1_8 + r1_16
+            o = self.conv_out([r1])
+            return o, h3, logits, y, sample_res
     return Model().to(hp.use_device)
 
 if __name__ == "__main__":
@@ -202,18 +309,21 @@ if __name__ == "__main__":
 
     def loop(itr, extras, stateful_args):
         data_batch = get_pr_batch(hp.batch_size)
-        from IPython import embed; embed(); raise ValueError()
-        # decide here if we keep the measure marks or no
         # N H W C
-        data_batch = data_batch.reshape(data_batch.shape[0], 28, 28, 1)
+        data_batch = data_batch[..., None]
+        # N H W C -> N C H W
         data_batch = data_batch.transpose(0, 3, 1, 2)
-        #data_batch = data_batch / 255.
-        data_batch = torch.tensor(data_batch).contiguous().to(hp.use_device)
+
+        # now put the pitch dimension into channel
+        data_batch = data_batch[:, 0, :, :][:, :, None]
+
+        # decide here if we keep the measure marks or no
+        data_batch = torch.tensor(data_batch.astype("float32")).contiguous().to(hp.use_device)
 
         # output, convolutional logits, flattened logits, sampled, final sampled and reshaped
-        r, c_l_s, l_s, s1, s2 = m(data_batch)
+        out, latent_in, latent_flat_logits, gumbel_samp, hard_samp = m(data_batch)
 
-        loss = l_fun(r.reshape(-1)[:, None], data_batch.reshape(-1)[:, None]).mean()
+        loss = l_fun(out.reshape(-1)[:, None], data_batch.reshape(-1)[:, None]).mean()
         l = loss.cpu().data.numpy()
 
         optimizer.zero_grad()

@@ -37,6 +37,8 @@ parser.add_argument('--n_layers', '-n', type=int, required=True,
                     help='number of layers the tier will have\n')
 parser.add_argument('--hidden_size', type=int, required=True,
                     help='hidden dimension size for every layer\n')
+parser.add_argument('--cell_type', type=str, required=True,
+                    help='melnet cell type\n')
 parser.add_argument('--real_batch_size', type=int, required=True,
                     help='real batch size\n')
 parser.add_argument('--virtual_batch_size', type=int, required=True,

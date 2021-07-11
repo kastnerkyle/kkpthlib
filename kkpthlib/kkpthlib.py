@@ -844,8 +844,9 @@ class Conv2d(torch.nn.Module):
         #if strides != [1, 1]:
         #    raise ValueError("Alternate strides not yet supported in conv2d")
 
-        if dilation != [1, 1]:
-            raise ValueError("Alternate dilation not yet supported in conv2d")
+        #if dilation != [1, 1]:
+        #    raise ValueError("Alternate dilation not yet supported in conv2d")
+
         # kernel is H, W
         # input assumption is N C H W
         if name is None:
@@ -865,7 +866,14 @@ class Conv2d(torch.nn.Module):
                     raise ValueError("Changing strides by non-int not yet supported")
 
         if dilation != [1, 1]:
-            raise ValueError("Changing dilation not yet supported")
+            if hasattr(dilation, "__len__") and len(dilation) == 2:
+                pass
+            else:
+                try:
+                    int(dilation)
+                    dilation = [int(dilation), int(dilation)]
+                except:
+                    raise ValueError("Changing dilation by non-int not yet supported")
 
         input_channels = sum(list_of_input_dims)
         #input_height, input_width = input_height_width_tuple
@@ -965,8 +973,9 @@ class Conv2d(torch.nn.Module):
         #if strides != [1, 1]:
         #    raise ValueError("Alternate strides not yet supported in conv2d")
 
-        if dilation != [1, 1]:
-            raise ValueError("Alternate dilation not yet supported in conv2d")
+        #if dilation != [1, 1]:
+        #    raise ValueError("Alternate dilation not yet supported in conv2d")
+
         # kernel is H, W
         # input assumption is N C H W
 
@@ -981,7 +990,14 @@ class Conv2d(torch.nn.Module):
                     raise ValueError("Changing strides by non-int not yet supported")
 
         if dilation != [1, 1]:
-            raise ValueError("Changing dilation not yet supported")
+            if hasattr(dilation, "__len__") and len(dilation) == 2:
+                pass
+            else:
+                try:
+                    int(dilation)
+                    dilation = [int(dilation), int(dilation)]
+                except:
+                    raise ValueError("Changing dilation by non-int not yet supported")
 
         input_t = torch.cat(list_of_inputs, dim=-1)
 
@@ -1084,8 +1100,9 @@ class Conv2dTranspose(torch.nn.Module):
         #if strides != [1, 1]:
         #    raise ValueError("Alternate strides not yet supported in conv2d")
 
-        if dilation != [1, 1]:
-            raise ValueError("Alternate dilation not yet supported in conv2d")
+        #if dilation != [1, 1]:
+        #    raise ValueError("Alternate dilation not yet supported in conv2dTranspose")
+
         # kernel is H, W
         # input assumption is N C H W
         if name is None:
@@ -1105,7 +1122,14 @@ class Conv2dTranspose(torch.nn.Module):
                     raise ValueError("Changing strides by non-int not yet supported")
 
         if dilation != [1, 1]:
-            raise ValueError("Changing dilation not yet supported")
+            if hasattr(dilation, "__len__") and len(dilation) == 2:
+                pass
+            else:
+                try:
+                    int(dilation)
+                    dilation = [int(dilation), int(dilation)]
+                except:
+                    raise ValueError("Changing dilation by non-int not yet supported")
 
         input_channels = sum(list_of_input_dims)
         #input_height, input_width = input_height_width_tuple
@@ -1205,8 +1229,9 @@ class Conv2dTranspose(torch.nn.Module):
         #if strides != [1, 1]:
         #    raise ValueError("Alternate strides not yet supported in conv2d")
 
-        if dilation != [1, 1]:
-            raise ValueError("Alternate dilation not yet supported in conv2d")
+        #if dilation != [1, 1]:
+        #    raise ValueError("Alternate dilation not yet supported in conv2d")
+
         # kernel is H, W
         # input assumption is N C H W
 
@@ -1221,7 +1246,14 @@ class Conv2dTranspose(torch.nn.Module):
                     raise ValueError("Changing strides by non-int not yet supported")
 
         if dilation != [1, 1]:
-            raise ValueError("Changing dilation not yet supported")
+            if hasattr(dilation, "__len__") and len(dilation) == 2:
+                pass
+            else:
+                try:
+                    int(dilation)
+                    dilation = [int(dilation), int(dilation)]
+                except:
+                    raise ValueError("Changing dilation by non-int not yet supported")
 
         input_t = torch.cat(list_of_inputs, dim=-1)
 

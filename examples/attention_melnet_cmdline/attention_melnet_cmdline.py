@@ -4,6 +4,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import gc
+import math
 
 import os
 import sys
@@ -129,7 +130,7 @@ hp = HParams(input_dim=1,
              #optimizer="adam",
              #learning_rate=1E-5,
              optimizer="SM3",
-             learning_rate=.05,
+             learning_rate=.01,
              melnet_cell_type=input_cell_type,
              clip=3.5,
              n_layers_per_tier=[input_n_layers],
@@ -154,7 +155,7 @@ hp = HParams(input_dim=1,
 
 data_random_state = np.random.RandomState(hp.random_seed)
 folder_base = "/usr/local/data/kkastner/robovoice/robovoice_d_25k"
-fixed_minibatch_time_secs = 6
+fixed_minibatch_time_secs = 4
 fraction_train_split = .9
 speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              wav_folder=folder_base + "/wavs/",
@@ -269,9 +270,27 @@ if __name__ == "__main__":
         else:
             from SM3 import SM3
             optimizer = SM3(model.parameters(), hp.learning_rate, momentum=0.9, beta=0.0, eps=1E-6)
-    # linear ramp
-    warmup_steps = 100
-    lr_lambda = lambda step: min(1., ((step + 1.) / warmup_steps))
+
+    # code from https://towardsdatascience.com/adaptive-and-cyclical-learning-rates-using-pytorch-2bf904d18dee
+    def cyclical_lr(stepsize, min_lr, max_lr):
+        # Scaler: we can adapt this if we do not want the triangular CLR
+        scaler = lambda x: .95 * x
+
+        # Lambda function to calculate the LR
+        lr_lambda = lambda it: min_lr + (max_lr - min_lr) * relative(it, stepsize)
+
+        # Additional function to see where on the cycle we are
+        def relative(it, stepsize):
+            cycle = math.floor(1 + it / (2 * stepsize))
+            x = abs(it / stepsize - 2 * cycle + 1)
+            return max(0, (1 - x)) * scaler(cycle)
+        return lr_lambda
+
+    #lr_lambda = lambda step: min(1., ((step + 1.) / warmup_steps))
+    step_size = 500
+    end_lr = .05
+    factor = 10
+    lr_lambda = cyclical_lr(step_size, min_lr=end_lr / factor, max_lr=end_lr)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
@@ -425,6 +444,7 @@ if __name__ == "__main__":
 
         total_l = None
         step_count = input_virtual_to_real_batch_multiple
+        assert step_count >= 1
         for _step in range(step_count):
             if extras["train"]:
                 train_el = speech.get_train_utterances(input_real_batch_size)
@@ -497,8 +517,8 @@ if __name__ == "__main__":
                     if use_half:
                         loss1 = loss1.float()
                     # need to be very careful here...
-                    #loss = ((loss1 * x_mask_in / step_count) / x_mask_in.sum()).sum()
-                    loss = ((loss1 * x_mask_in) / x_mask_in.sum()).sum()
+                    loss = ((loss1 * x_mask_in / step_count) / x_mask_in.sum()).sum()
+                    #loss = ((loss1 * x_mask_in) / x_mask_in.sum()).sum()
                     l = loss.cpu().data.numpy()
                     if use_half:
                         loss = loss.half()
@@ -518,26 +538,13 @@ if __name__ == "__main__":
                         model.zero_grad()
 
                     if total_l is None:
-
                         #total_l = l / step_count
                         total_l = l
                     else:
                         #total_l += l / step_count
                         total_l += l
 
-            if extras["train"]:
-                #clipping_grad_value_(model.named_parameters(), hp.clip, named_check=True)
-                if use_mixed_precision:
-                    scaler.unscale_(optimizer)
-                    clipping_grad_value_(model.parameters(), hp.clip)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    clipping_grad_value_(model.parameters(), hp.clip)
-                    optimizer.step()
-
-                scheduler.step()
-                optimizer.zero_grad()
+            # delete intermediates to save memory
             del torch_cond_seq_data_batch
             del torch_cond_seq_data_mask
             del x_in
@@ -549,6 +556,33 @@ if __name__ == "__main__":
             del model.attention_extras
             gc.collect()
             torch.cuda.empty_cache()
+
+        if extras["train"]:
+            #clipping_grad_value_(model.named_parameters(), hp.clip, named_check=True)
+            if use_mixed_precision:
+                scaler.unscale_(optimizer)
+                clipping_grad_value_(model.parameters(), hp.clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                clipping_grad_value_(model.parameters(), hp.clip)
+                optimizer.step()
+
+            scheduler.step()
+            optimizer.zero_grad()
+        """
+        del torch_cond_seq_data_batch
+        del torch_cond_seq_data_mask
+        del x_in
+        del x_mask_in
+        del pred_out
+        del loss
+        del loss1
+        del model.attention_alignment
+        del model.attention_extras
+        gc.collect()
+        torch.cuda.empty_cache()
+        """
         return total_l, None, None
 
     s = {"model": model,
