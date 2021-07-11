@@ -1035,10 +1035,10 @@ def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
         logger.info("JSB Chorales not yet cached, processing...")
         logger.info("Total number of Bach pieces to process from music21: {}".format(len(all_bach_paths)))
     for it, p_bach in enumerate(all_bach_paths):
-        if "riemenschneider" in p_bach:
+        if "riemenschneider" in str(p_bach):
             # skip certain files we don't care about
             continue
-        p = corpus.parse(p_bach)
+        p = corpus.parse(str(p_bach))
         if len(p.parts) not in only_pieces_with_n_voices:
             if verbose:
                 logger.info("Skipping file {}, {} due to undesired voice count...".format(it, p_bach))
