@@ -185,10 +185,10 @@ tier_depth_str = str(input_tier_input_tag[0])
 
 # hardcoded per-dimension mean and std for mel data from the training iterator, read from a file
 full_cached_mean_std_name_for_experiment = "{}_max{}secs_{}splits_{}sz_{}tierdepth_mean_std.npz".format(dataset_name,
-                                                                                                    dataset_max_limit,
-                                                                                                    axis_splits_str,
-                                                                                                    axis_size_str,
-                                                                                                    tier_depth_str)
+                                                                                                        dataset_max_limit,
+                                                                                                        axis_splits_str,
+                                                                                                        axis_size_str,
+                                                                                                        tier_depth_str)
 mean_std_cache = os.getcwd() + "/mean_std_cache/"
 mean_std_path = mean_std_cache + full_cached_mean_std_name_for_experiment
 if not os.path.exists(mean_std_path):
@@ -249,12 +249,12 @@ else:
                      spatial_condition=cond,
                      batch_norm_flag=batch_norm_flag)
 
-teacher_forced_pred = pred_out
-teacher_forced_attn = model.attention_alignment
-
 import matplotlib.pyplot as plt
 
 if args.terminate_early_attention_plot:
+    teacher_forced_pred = pred_out
+    teacher_forced_attn = model.attention_alignment
+
     for _i in range(hp.real_batch_size):
         mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
         text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
@@ -326,24 +326,130 @@ def sample_dml(l, n_mix=10, only_mean=True, deterministic=True, sampling_tempera
     #out = out.permute(0, 3, 1, 2)
     return out
 
+folder = "teacher_forced_images"
+if not os.path.exists(folder):
+    os.mkdir(folder)
+
 for _i in range(hp.real_batch_size):
+    teacher_forced_pred = pred_out
+    teacher_forced_attn = model.attention_alignment
+
     reduced_mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
     full_mel_cut = int(data_mask[_i].sum())
 
     this_x_in = x_in[_i][None].cpu().data.numpy()
     unnormalized = this_x_in * saved_std + saved_mean
-    from IPython import embed; embed(); raise ValueError()
-    plt.imshow((this_x_in * saved_std + saved_mean)[0, :reduced_mel_cut, :, 0])
-    plt.savefig("small_x{}.png".format(_i))
+    plt.imshow(unnormalized[0, :reduced_mel_cut, :, 0])
+    plt.savefig(folder + os.sep + "small_x{}.png".format(_i))
     plt.close()
-
 
     # no normalization on initial data
     unnormalized_full = data_batch[_i, :full_mel_cut, :]
     plt.imshow(unnormalized_full)
-    plt.savefig("data_x{}.png".format(_i))
+    plt.savefig(folder + os.sep + "data_x{}.png".format(_i))
     plt.close()
 
+    text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
+    # matshow vs imshow?
+    this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:reduced_mel_cut, :text_cut]
+    this_att = this_att.astype("float32")
+    plt.imshow(this_att)
+    plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
+    plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
+    plt.close()
+
+time_len = x_in_np.shape[1]
+bias_til = time_len // 2
+remaining_steps = time_len - bias_til
+sample_buffer = 0. * x_in_np
+# 1. means value is used, 0. means it is masked. Can be different with transformers...
+sample_mask = 0. * x_mask_in_np + 1.
+sample_buffer[:, :bias_til] = x_in_np[:, :bias_til]
+original_buffer = copy.deepcopy(x_in_np)
+import time
+begin_time = time.time()
+for time_step in range(remaining_steps):
+    for mel_step in range(x_in_np.shape[2]):
+        cur_time = time.time()
+        this_step = bias_til + time_step
+        print("step {},{} of {},{}".format(this_step, mel_step, time_len, x_in_np.shape[2]))
+        torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
+        torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
+
+        """
+        all_x_splits = []
+        x_t = data_batch[..., None]
+        for aa in input_axis_split_list:
+            all_x_splits.append(split_np(x_t, axis=aa))
+            x_t = all_x_splits[-1][0]
+        x_in_np = all_x_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+        x_in_np = (x_in_np - saved_mean) / saved_std
+
+        all_x_mask_splits = []
+        # broadcast mask over frequency so we can downsample
+        x_mask_t = data_mask[..., None, None] + 0. * data_batch[..., None]
+        for aa in input_axis_split_list:
+            all_x_mask_splits.append(split_np(x_mask_t, axis=aa))
+            x_mask_t = all_x_mask_splits[-1][0]
+        x_mask_in_np = all_x_mask_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+
+        x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
+        x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
+        """
+        x_in = torch.tensor(sample_buffer).contiguous().to(hp.use_device)
+        x_mask_in = torch.tensor(sample_mask).contiguous().to(hp.use_device)
+
+        if use_half:
+            torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device).half()
+            torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device).half()
+            x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device).half()
+            x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device).half()
+
+        if input_tier_condition_tag is None:
+            # no noise here in pred
+            pred_out = model(x_in, x_mask=x_mask_in,
+                             memory_condition=torch_cond_seq_data_batch,
+                             memory_condition_mask=torch_cond_seq_data_mask,
+                             batch_norm_flag=batch_norm_flag)
+        else:
+            raise ValueError("implement cond tier sampling")
+            cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+            pred_out = model(x_in, x_mask=x_mask_in,
+                             spatial_condition=cond,
+                             batch_norm_flag=batch_norm_flag)
+
+        teacher_forced_pred = pred_out
+        teacher_forced_attn = model.attention_alignment
+        sample_buffer[:, this_step, mel_step] = pred_out[:, this_step, mel_step].cpu().data.numpy()
+        end_time = time.time()
+        print("minibatch time {} secs".format(end_time - cur_time))
+
+sample_completed = time.time()
+
+folder = "sampled_forced_images"
+if not os.path.exists(folder):
+    os.mkdir(folder)
+
+for _i in range(hp.real_batch_size):
+    unnormalized = sample_buffer * saved_std + saved_mean
+    plt.imshow(unnormalized[_i, :, :, 0])
+    plt.savefig(folder + os.sep + "small_sampled_x{}.png".format(_i))
+    plt.close()
+
+    # matshow vs imshow?
+    this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:, :]
+    this_att = this_att.astype("float32")
+    plt.imshow(this_att)
+    plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
+    plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
+    plt.close()
+
+np.save(folder + "/" + "raw_samples.npy", sample_buffer)
+np.save(folder + "/" + "unnormalized_samples.npy", sample_buffer * saved_std + saved_mean)
+np.save(folder + "/" + "attn_activation.npy", teacher_forced_attn.cpu().data.numpy())
+np.save(folder + "/" + "minibatch_input.npy", original_buffer)
+print("finished sampling in {} sec".format(sample_completed - begin_time))
+from IPython import embed; embed(); raise ValueError()
 
 for _i in range(hp.real_batch_size):
     mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())

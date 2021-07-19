@@ -4825,6 +4825,7 @@ class MelNetFullContextSubTier(torch.nn.Module):
                  n_horiz,
                  hidden_dim,
                  n_layers,
+                 cell_type="lstm",
                  init=None, scale="default",
                  biases=True, bias_offset=0.,
                  name=None,
@@ -4842,6 +4843,19 @@ class MelNetFullContextSubTier(torch.nn.Module):
         if strict is None:
             strict = get_strict_mode_default()
 
+        self.cell_type = cell_type
+
+        if self.cell_type == "lstm":
+            bidir_rnn_fn = BiLSTMLayer
+            rnn_fn = LSTMLayer
+            rnn_cell_fn = LSTMCell
+        elif self.cell_type == "gru":
+            bidir_rnn_fn = BiGRULayer
+            rnn_fn = GRULayer
+            rnn_cell_fn = GRUCell
+        else:
+            raise ValueError("Unknown cell_type, self.cell_type was {}".format(self.cell_type))
+
         self.input_symbols = list_of_input_symbol_sizes[0]
         self.hidden_size = hidden_dim
 
@@ -4850,45 +4864,51 @@ class MelNetFullContextSubTier(torch.nn.Module):
         self.n_vert = n_vert
         self.n_horiz = n_horiz
 
-        self.embed = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed")
+        self.input_proj = Linear([1],
+                                            self.hidden_size,
+                                             random_state=random_state,
+                                             init=init,
+                                             scale=scale,
+                                             name=name + "_input_proj",
+                                             device=device)
 
-        self.lstms_time_fw = nn.ModuleList()
-        self.lstms_time_bw = nn.ModuleList()
-        self.lstms_freq_fw = nn.ModuleList()
-        self.lstms_freq_bw = nn.ModuleList()
+        self.rnn_time_fw = nn.ModuleList()
+        self.rnn_time_bw = nn.ModuleList()
+        self.rnn_freq_fw = nn.ModuleList()
+        self.rnn_freq_bw = nn.ModuleList()
         self.projs = nn.ModuleList()
 
         for _i in range(self.n_layers):
-            self.lstms_time_fw.append(LSTMLayer([self.hidden_size,],
+            self.rnn_time_fw.append(rnn_fn([self.hidden_size,],
                                                     self.hidden_size,
                                                     random_state=random_state,
                                                     init=init,
                                                     scale=scale,
-                                                    name=name + "_lstm_time_fw_{}".format(_i),
+                                                    name=name + "_rnn_time_fw_{}".format(_i),
                                                     device=device))
 
-            self.lstms_time_bw.append(LSTMLayer([self.hidden_size,],
+            self.rnn_time_bw.append(rnn_fn([self.hidden_size,],
                                                     self.hidden_size,
                                                     random_state=random_state,
                                                     init=init,
                                                     scale=scale,
-                                                    name=name + "_lstm_time_bw_{}".format(_i),
+                                                    name=name + "_rnn_time_bw_{}".format(_i),
                                                     device=device))
 
-            self.lstms_freq_fw.append(LSTMLayer([self.hidden_size,],
+            self.rnn_freq_fw.append(rnn_fn([self.hidden_size,],
                                                     self.hidden_size,
                                                     random_state=random_state,
                                                     init=init,
                                                     scale=scale,
-                                                    name=name + "_lstm_freq_fw_{}".format(_i),
+                                                    name=name + "_rnn_freq_fw_{}".format(_i),
                                                     device=device))
 
-            self.lstms_freq_bw.append(LSTMLayer([self.hidden_size,],
+            self.rnn_freq_bw.append(rnn_fn([self.hidden_size,],
                                                     self.hidden_size,
                                                     random_state=random_state,
                                                     init=init,
                                                     scale=scale,
-                                                    name=name + "_lstm_freq_bw_{}".format(_i),
+                                                    name=name + "_rnn_freq_bw_{}".format(_i),
                                                     device=device))
 
             self.projs.append(Linear([4 * self.hidden_size,],
@@ -4911,16 +4931,16 @@ class MelNetFullContextSubTier(torch.nn.Module):
         return inp.reshape((self.n_vert, self.batch_size * self.n_horiz, -1))
 
     def _stack(self, nds, layer):
-        freq_lstm_fw_h, _, __ = self.lstms_freq_fw[layer]([nds])
-        freq_lstm_bw_h, _, __ = self.lstms_freq_bw[layer]([torch.flip(nds, [0])])
-        freq_lstm_h = torch.cat((freq_lstm_fw_h, torch.flip(freq_lstm_bw_h, [0])), dim=-1)
-        freq_lstm_h = self._freq2time(freq_lstm_h)
+        freq_rnn_fw_h, _, __ = self.rnn_freq_fw[layer]([nds])
+        freq_rnn_bw_h, _, __ = self.rnn_freq_bw[layer]([torch.flip(nds, [0])])
+        freq_rnn_h = torch.cat((freq_rnn_fw_h, torch.flip(freq_rnn_bw_h, [0])), dim=-1)
+        freq_rnn_h = self._freq2time(freq_rnn_h)
 
         nds_time = self._freq2time(nds)
-        time_lstm_fw_h, _, __ = self.lstms_time_fw[layer]([nds_time])
-        time_lstm_bw_h, _, __ = self.lstms_time_bw[layer]([torch.flip(nds_time, [0])])
-        time_lstm_h = torch.cat((time_lstm_fw_h, torch.flip(time_lstm_bw_h, [0])), dim=-1)
-        combined_h = torch.cat((freq_lstm_h, time_lstm_h), dim=-1)
+        time_rnn_fw_h, _, __ = self.rnn_time_fw[layer]([nds_time])
+        time_rnn_bw_h, _, __ = self.rnn_time_bw[layer]([torch.flip(nds_time, [0])])
+        time_rnn_h = torch.cat((time_rnn_fw_h, torch.flip(time_rnn_bw_h, [0])), dim=-1)
+        combined_h = torch.cat((freq_rnn_h, time_rnn_h), dim=-1)
         res = self.projs[layer]([combined_h])
         res = self._time2freq(res)
         return (0.5 ** 0.5) * (nds + res)
@@ -4934,12 +4954,12 @@ class MelNetFullContextSubTier(torch.nn.Module):
             raise ValueError("Only support list_of_inputs length 1 for now")
 
         x = list_of_inputs[0]
-        c_x = x
-        c_x, c_e = self.embed(c_x)
 
-        batch_size = c_x.shape[0]
+        batch_size = x.shape[0]
         self.batch_size = batch_size
-        c_x = c_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+
+        c_x = x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+        c_x = self.input_proj([c_x])
         c_x = c_x.permute(1, 0, 2)
         for _i in range(self.n_layers):
             c_x = self._stack(c_x, _i)
@@ -5043,7 +5063,7 @@ class AttentionMelNetTier(torch.nn.Module):
             self.cds_projs = nn.ModuleList()
 
         if self.has_spatial_condition:
-            self.cond_mn = MelNetFullContextSubTier([self.input_symbols], n_vert, n_horiz, self.hidden_size, self.conditional_layers,
+            self.cond_mn = MelNetFullContextSubTier([1], n_vert, n_horiz, self.hidden_size, self.conditional_layers,
                                        random_state=random_state,
                                        init=init,
                                        cell_type=self.cell_type,
@@ -5079,6 +5099,14 @@ class AttentionMelNetTier(torch.nn.Module):
                                              device=device)
                 elif self.attention_type == "sigmoid_logistic":
                     self.attn_proj = Linear([self.hidden_size],
+                                             3 * self.attention_mixture_components,
+                                             random_state=random_state,
+                                             init=init,
+                                             scale=scale,
+                                             name=name + "_attn_proj",
+                                             device=device)
+                elif self.attention_type == "sigmoid_logistic_alt":
+                    self.attn_proj = Linear([3 * self.hidden_size],
                                              3 * self.attention_mixture_components,
                                              random_state=random_state,
                                              init=init,
@@ -5475,6 +5503,48 @@ class AttentionMelNetTier(torch.nn.Module):
             extras["kappa"] = kappa
             extras["beta"] = beta
             extras["alpha"] = alpha
+        elif self.attention_type == "sigmoid_logistic_alt":
+            #_attention_step(self, h_i, memory, memory_mask, ksi):
+            # condition on input sequence length
+            phi_hat = self.attn_proj([h_i])
+
+            #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
+            # clamp beta so it doesn't collapse?
+            #beta = torch.exp(torch.clamp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components], min=-4))
+            # changes based on GMMv2 of https://arxiv.org/pdf/1910.10288.pdf
+            # as well as https://arxiv.org/pdf/1811.07240.pdf
+            ksi = previous_attn
+            kappa = ksi + 3. * torch.sigmoid(phi_hat[:, :self.attention_mixture_components])
+            #beta = (F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-4)
+            #beta = torch.clamp(torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.5)
+            # fix beta to 1 - hack city but works!
+            #beta = 0. * phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components] + 1.
+
+            # aggressive clamping here, use softplus to help stability as well
+            #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.25, max=2.0)
+            #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.01, max=10.0)
+            beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.1, max=2.0)
+
+            alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+
+            u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
+            u_L = u + 0.5
+            u_R = u - 0.5
+
+            termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            weights = termL - termR
+
+            termination = 1. - termL[:, 0]
+            weights = memory_mask.transpose(0, 1)[:, None, :] * weights
+            context = torch.bmm(weights, memory.permute(1, 0, 2))
+            # context is B, 1, D
+            # weights B, 1, mem_T 
+            extras = {}
+            extras["termination"] = termination
+            extras["kappa"] = kappa
+            extras["beta"] = beta
+            extras["alpha"] = alpha
         elif self.attention_type == "dca":
             # code ref:
             # https://github.com/bshall/Tacotron
@@ -5586,6 +5656,8 @@ class AttentionMelNetTier(torch.nn.Module):
             prev_attn = cds.new_zeros(B, self.attention_mixture_components)
         elif self.attention_type == "sigmoid_logistic":
             prev_attn = cds.new_zeros(B, self.attention_mixture_components)
+        elif self.attention_type == "sigmoid_logistic_alt":
+            prev_attn = cds.new_zeros(B, self.attention_mixture_components)
         elif self.attention_type == "dca":
             prev_attn = F.one_hot(torch.zeros(B, dtype=torch.long, device=cds.device), memory.size(0)).float()
         elif self.attention_type == "gaussian":
@@ -5612,11 +5684,15 @@ class AttentionMelNetTier(torch.nn.Module):
             if self.attention_type == "lsa":
                 prev_attn = torch.cat((prev_attn_base, prev_attn_accum), dim=2)
 
-            context, attn_weight, extras = self._attention_step(h_t, memory, memory_mask, prev_attn)
+            h_comb = torch.cat([cds[_i], context.squeeze(1), h_t], dim=-1)
+            #context, attn_weight, extras = self._attention_step(h_t, memory, memory_mask, prev_attn)
+            context, attn_weight, extras = self._attention_step(h_comb, memory, memory_mask, prev_attn)
 
             if self.attention_type == "logistic":
                 prev_attn = extras["kappa"]
             elif self.attention_type == "sigmoid_logistic":
+                prev_attn = extras["kappa"]
+            elif self.attention_type == "sigmoid_logistic_alt":
                 prev_attn = extras["kappa"]
             elif self.attention_type == "dca":
                 prev_attn = attn_weight
@@ -5633,6 +5709,8 @@ class AttentionMelNetTier(torch.nn.Module):
             h_i, c_i = h_t, c_t
         # skip hidden? for better attn control?
         if self.attention_type == "sigmoid_logistic":
+            contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+        if self.attention_type == "sigmoid_logistic_alt":
             contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
         elif self.attention_type == "gaussian":
             contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
@@ -5716,7 +5794,8 @@ class AttentionMelNetTier(torch.nn.Module):
         has_cd_att = False
         td_x_i = td_x
         fd_x_i = fd_x
-        cd_x_i = cd_x
+        if self.has_centralized_stack:
+            cd_x_i = cd_x
 
         def res(l):
             #return l

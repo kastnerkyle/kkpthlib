@@ -136,7 +136,7 @@ hp = HParams(input_dim=1,
              n_layers_per_tier=[input_n_layers],
              melnet_init="truncated_normal",
              #attention_type="relative_logistic",
-             attention_type="sigmoid_logistic",
+             attention_type="sigmoid_logistic_alt",
              #attention_type="logistic",
              #attention_type="gaussian",
              #attention_type="dca",
@@ -488,11 +488,17 @@ if __name__ == "__main__":
             x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
             x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
 
+            spatial_cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+            if input_tier_condition_tag is not None:
+                x_cond_in = torch.tensor(spatial_cond).contiguous().to(hp.use_device)
+
             if use_half:
                 torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device).half()
                 torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device).half()
                 x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device).half()
                 x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device).half()
+                if input_tier_condition_tag is not None:
+                    x_cond_in = torch.tensor(spatial_cond).contiguous().to(hp.use_device).half()
 
             with torch.set_grad_enabled(True):
                 with torch.cuda.amp.autocast(enabled=use_mixed_precision):
@@ -502,9 +508,8 @@ if __name__ == "__main__":
                                          memory_condition_mask=torch_cond_seq_data_mask,
                                          batch_norm_flag=batch_norm_flag)
                     else:
-                        cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
                         pred_out = model(x_in, x_mask=x_mask_in,
-                                         spatial_condition=cond,
+                                         spatial_condition=x_cond_in,
                                          batch_norm_flag=batch_norm_flag)
 
                     # x_in comes in discretized between 0 and 256, now scale -1 to 1
@@ -552,8 +557,11 @@ if __name__ == "__main__":
             del pred_out
             del loss
             del loss1
-            del model.attention_alignment
-            del model.attention_extras
+            if input_tier_condition_tag is None:
+                del model.attention_alignment
+                del model.attention_extras
+            else:
+                del x_cond_in
             gc.collect()
             torch.cuda.empty_cache()
 
