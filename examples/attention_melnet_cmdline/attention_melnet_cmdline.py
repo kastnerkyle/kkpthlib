@@ -71,6 +71,10 @@ if __name__ == "__main__":
                         help='hidden dimension size for every layer\n')
     parser.add_argument('--cell_type', type=str, required=True,
                         help='melnet cell type\n')
+    parser.add_argument('--optimizer', type=str, required=True,
+                        help='optimizer type\n')
+    parser.add_argument('--learning_rate', type=str, required=True,
+                        help='learning rate\n')
     parser.add_argument('--real_batch_size', type=int, required=True,
                         help='real batch size\n')
     parser.add_argument('--virtual_batch_size', type=int, required=True,
@@ -106,6 +110,8 @@ if float(input_virtual_batch_size) / float(input_real_batch_size) != input_virtu
 input_virtual_to_real_batch_multiple = input_virtual_batch_size // input_real_batch_size
 assert input_virtual_to_real_batch_multiple > 0
 input_tier_input_tag = [int(el) for el in args.tier_input_tag.split(",")]
+input_learning_rate = float(args.learning_rate)
+input_optimizer = str(args.optimizer)
 
 assert len(input_size_at_depth) == 2
 assert len(input_tier_input_tag) == 2
@@ -127,17 +133,18 @@ for arg in vars(args):
 hp = HParams(input_dim=1,
              hidden_dim=input_hidden_size,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
-             #optimizer="adam",
-             #learning_rate=1E-5,
-             optimizer="SM3",
-             learning_rate=.01,
+             optimizer=input_optimizer,
+             learning_rate=input_learning_rate,
+             #optimizer="SM3",
+             #learning_rate=.01,
+             #learning_rate=.005,
              melnet_cell_type=input_cell_type,
              clip=3.5,
              n_layers_per_tier=[input_n_layers],
              melnet_init="truncated_normal",
+             attention_type="logistic",
              #attention_type="relative_logistic",
-             attention_type="sigmoid_logistic_alt",
-             #attention_type="logistic",
+             #attention_type="sigmoid_logistic_alt",
              #attention_type="gaussian",
              #attention_type="dca",
              #melnet_init=None,
@@ -288,9 +295,11 @@ if __name__ == "__main__":
 
     #lr_lambda = lambda step: min(1., ((step + 1.) / warmup_steps))
     step_size = 500
-    end_lr = .05
-    factor = 10
-    lr_lambda = cyclical_lr(step_size, min_lr=end_lr / factor, max_lr=end_lr)
+    end_lr = hp.learning_rate
+    factor = 20
+    # no cyclic lr here
+    lr_lambda = lambda step: min(1., step / 1000.)
+    #lr_lambda = cyclical_lr(step_size, min_lr=end_lr / factor, max_lr=end_lr)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
@@ -334,7 +343,6 @@ if __name__ == "__main__":
             print("mean/var estimate count {} of {}".format(count, n_sample_estimate))
             els = speech.get_utterances(subbatch, speech.train_keys, skip_mel=False)
             cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(els,
-                                                                                                mean_std_per_bin_normalization=False,
                                                                                                 quantize_to_n_bins=None)
             all_x_splits = []
             x_t = data_batch[..., None]
@@ -488,8 +496,8 @@ if __name__ == "__main__":
             x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
             x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
 
-            spatial_cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
             if input_tier_condition_tag is not None:
+                spatial_cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
                 x_cond_in = torch.tensor(spatial_cond).contiguous().to(hp.use_device)
 
             if use_half:

@@ -56,6 +56,11 @@ parser.add_argument('--n_previous_save_steps', type=str, default=None,
 parser.add_argument('--terminate_early_attention_plot', action="store_true",
                     help='flag to terminate early for attention plotting meta-scripts')
 
+parser.add_argument('--batch_skips', type=int, default=0,
+                    help='number of batches to skip before sampling - allows us to sample different examples!')
+parser.add_argument('--use_longest', action="store_true",
+                    help='flag to use the longest of N examples for sampling due to biasing')
+
 parser.add_argument('--stored_sampled_tier_data', action="store", nargs='*', type=str, default=None,
                     help='all previously sampled tier data, in order from beginning tier to previous from left to right. Last array assumed to be the conditioning input')
 
@@ -148,6 +153,7 @@ input_size_at_depth = [int(el) for el in args.size_at_depth.split(",")]
 input_hidden_size = int(args.hidden_size)
 input_n_layers = int(args.n_layers)
 input_real_batch_size = int(args.real_batch_size)
+input_batch_skips =int(args.batch_skips)
 input_virtual_batch_size = int(args.virtual_batch_size)
 input_tier_input_tag = [int(el) for el in args.tier_input_tag.split(",")]
 
@@ -194,7 +200,28 @@ mean_std_path = mean_std_cache + full_cached_mean_std_name_for_experiment
 if not os.path.exists(mean_std_path):
     raise ValueError("Unable to find cached mean std info at {}".format(mean_std_path))
 
-valid_el = speech.get_valid_utterances(hp.real_batch_size)
+if input_batch_skips > 0:
+    for _ in range(input_batch_skips):
+        tmp = speech.get_valid_utterances(hp.real_batch_size)
+
+# TODO: fix?
+if args.use_longest:
+    # sample 50 minibatches, find longest N examples of that...
+    print("Performing length selection to choose base samples for biasing")
+    valid_el = None
+    for _ in range(50):
+        this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
+        if valid_el is None:
+            valid_el = this_valid_el
+        else:
+            for candidate in range(len(this_valid_el)):
+                for kept in range(len(valid_el)):
+                    if this_valid_el[candidate][2].shape[0] > valid_el[kept][2].shape[0]:
+                        valid_el[kept] = this_valid_el[candidate]
+                        break
+else:
+    valid_el = speech.get_valid_utterances(hp.real_batch_size)
+
 cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
 batch_norm_flag = 1.
 
@@ -259,7 +286,7 @@ if args.terminate_early_attention_plot:
         mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
         text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
         # matshow vs imshow?
-        this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:mel_cut, :text_cut]
+        this_att = teacher_forced_attn[:, _i].cpu().data.numpy()[:mel_cut, :text_cut]
         this_att = this_att.astype("float32")
         plt.imshow(this_att)
         plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
@@ -351,7 +378,7 @@ for _i in range(hp.real_batch_size):
 
     text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
     # matshow vs imshow?
-    this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:reduced_mel_cut, :text_cut]
+    this_att = teacher_forced_attn[:, _i].cpu().data.numpy()[:reduced_mel_cut, :text_cut]
     this_att = this_att.astype("float32")
     plt.imshow(this_att)
     plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
@@ -437,7 +464,7 @@ for _i in range(hp.real_batch_size):
     plt.close()
 
     # matshow vs imshow?
-    this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:, :]
+    this_att = teacher_forced_attn[:, _i].cpu().data.numpy()[:, :]
     this_att = this_att.astype("float32")
     plt.imshow(this_att)
     plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))

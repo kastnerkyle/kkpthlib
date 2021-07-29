@@ -5090,7 +5090,7 @@ class AttentionMelNetTier(torch.nn.Module):
                 """
                 if self.attention_type == "logistic":
                     # for logistic sigmoid attention ala melnet
-                    self.attn_proj = Linear([self.hidden_size],
+                    self.attn_proj = Linear([3 * self.hidden_size],
                                              3 * self.attention_mixture_components,
                                              random_state=random_state,
                                              init=init,
@@ -5098,7 +5098,7 @@ class AttentionMelNetTier(torch.nn.Module):
                                              name=name + "_attn_proj",
                                              device=device)
                 elif self.attention_type == "sigmoid_logistic":
-                    self.attn_proj = Linear([self.hidden_size],
+                    self.attn_proj = Linear([3 * self.hidden_size],
                                              3 * self.attention_mixture_components,
                                              random_state=random_state,
                                              init=init,
@@ -5106,6 +5106,15 @@ class AttentionMelNetTier(torch.nn.Module):
                                              name=name + "_attn_proj",
                                              device=device)
                 elif self.attention_type == "sigmoid_logistic_alt":
+                    self.attn_proj = Linear([3 * self.hidden_size],
+                                             3 * self.attention_mixture_components,
+                                             random_state=random_state,
+                                             init=init,
+                                             scale=scale,
+                                             name=name + "_attn_proj",
+                                             device=device)
+                elif self.attention_type == "gaussian":
+                    # for logistic sigmoid attention ala melnet
                     self.attn_proj = Linear([3 * self.hidden_size],
                                              3 * self.attention_mixture_components,
                                              random_state=random_state,
@@ -5222,15 +5231,6 @@ class AttentionMelNetTier(torch.nn.Module):
                                                   name=name + "_attn_location_dense",
                                                   biases=False,
                                                   device=device)
-                elif self.attention_type == "gaussian":
-                    # for logistic sigmoid attention ala melnet
-                    self.attn_proj = Linear([self.hidden_size],
-                                             3 * self.attention_mixture_components,
-                                             random_state=random_state,
-                                             init=init,
-                                             scale=scale,
-                                             name=name + "_attn_proj",
-                                             device=device)
                 else:
                     raise ValueError("Unknown value in initialization for attention_type in AttnMelNetTier, got {}".format(attention_type))
 
@@ -5369,6 +5369,48 @@ class AttentionMelNetTier(torch.nn.Module):
         # TODO: location sensitive attention
         # https://gist.github.com/acetylSv/9dcff15bc0e895c0190c5942b573c28b
         if self.attention_type == "logistic":
+            #_attention_step(self, h_i, memory, memory_mask, ksi):
+            # condition on input sequence length
+            phi_hat = self.attn_proj([h_i])
+
+            #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
+            # clamp beta so it doesn't collapse?
+            #beta = torch.exp(torch.clamp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components], min=-4))
+            # changes based on GMMv2 of https://arxiv.org/pdf/1910.10288.pdf
+            # as well as https://arxiv.org/pdf/1811.07240.pdf
+            ksi = previous_attn
+            kappa = ksi + (3. * sigmoid(phi_hat[:, :self.attention_mixture_components]) + .05)
+
+            beta = (5. * sigmoid(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + .1)
+            # min beta .1
+            # max beta 10
+            alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+
+            u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
+            u_L = u + 0.5
+            u_R = u - 0.5
+            #termL = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_L) * beta[..., None])))), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_R) * beta[..., None])))), keepdim=True, dim=1)
+            #termL = 1. / (1. + (torch.exp((kappa[..., None] - u_L) * beta[..., None])))
+            #termR = 1. / (1. + (torch.exp((kappa[..., None] - u_R) * beta[..., None])))
+            pL = (u_L - kappa[..., None]) * beta[..., None]
+            pR = (u_R - kappa[..., None]) * beta[..., None]
+            termL = torch.sigmoid(pL)
+            termR = torch.sigmoid(pR)
+            alpha_termL = alpha[..., None] * termL
+            alpha_termR = alpha[..., None] * termR
+            weights = torch.sum(alpha_termL, dim=1) - torch.sum(alpha_termR, dim=1)
+
+            termination = 1. - torch.sum(alpha_termL, keepdim=True, dim=1)[:, 0]
+            weights = memory_mask.transpose(0, 1) * weights
+            context = torch.bmm(weights[:, None], memory.permute(1, 0, 2))
+            # context is B, 1, D
+            # weights B, mem_T 
+            extras = {}
+            extras["termination"] = termination
+            extras["kappa"] = kappa
+            extras["beta"] = beta
+        elif self.attention_type == "logistic_hack":
             #_attention_step(self, h_i, memory, memory_mask, ksi):
             # condition on input sequence length
             phi_hat = self.attn_proj([h_i])
@@ -5602,7 +5644,6 @@ class AttentionMelNetTier(torch.nn.Module):
             kappa = ksi + F.softplus(phi_hat[:, :self.attention_mixture_components])
 
             # don't need capped beta becase we parameterize the inverse
-            # clamp beta between .1 and 3? doesn't work
             beta = torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
             alpha = torch.exp(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components])
 

@@ -1068,7 +1068,8 @@ def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
                     kt = "minor"
                 core_name = base_fpath + ".{}-{}-original.json".format(k.name.split(" ")[0], kt)
                 music21_parse_and_save_json(p, core_name, tempo_factor=1)
-                logger.info("Writing {}".format(core_name))
+                if verbose:
+                    logger.info("Writing {}".format(core_name))
             for t in ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]:
                 if 'major' in k.name:
                     kt = "major"
@@ -1097,8 +1098,8 @@ def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
     return dataset_path
 
 
-def fetch_jsb_chorales():
-    jsb_dataset_path = check_fetch_jsb_chorales()
+def fetch_jsb_chorales(verbose=True):
+    jsb_dataset_path = check_fetch_jsb_chorales(verbose=verbose)
     json_files = [jsb_dataset_path + os.sep + fname for fname in sorted(os.listdir(jsb_dataset_path)) if ".json" in fname]
     return {"files": json_files}
 
