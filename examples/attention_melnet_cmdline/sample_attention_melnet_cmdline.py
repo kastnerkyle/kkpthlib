@@ -39,6 +39,10 @@ parser.add_argument('--hidden_size', type=int, required=True,
                     help='hidden dimension size for every layer\n')
 parser.add_argument('--cell_type', type=str, required=True,
                     help='melnet cell type\n')
+parser.add_argument('--optimizer', type=str, required=True,
+                    help='optimizer type\n')
+parser.add_argument('--learning_rate', type=str, required=True,
+                    help='learning rate\n')
 parser.add_argument('--real_batch_size', type=int, required=True,
                     help='real batch size\n')
 parser.add_argument('--virtual_batch_size', type=int, required=True,
@@ -61,8 +65,8 @@ parser.add_argument('--batch_skips', type=int, default=0,
 parser.add_argument('--use_longest', action="store_true",
                     help='flag to use the longest of N examples for sampling due to biasing')
 
-parser.add_argument('--stored_sampled_tier_data', action="store", nargs='*', type=str, default=None,
-                    help='all previously sampled tier data, in order from beginning tier to previous from left to right. Last array assumed to be the conditioning input')
+parser.add_argument('--stored_sampled_tier_data', type=str, default=None,
+                    help='all previously sampled tier data, in order from beginning tier to previous from left to right. Last array assumed to be the conditioning input. comma separated string, should be path to unnormalized data')
 
 parser.add_argument('--random_seed', '-r', type=int, default=2133,
                     help='random seed to use when sampling (default 2133)')
@@ -123,6 +127,12 @@ if args.direct_saved_model_definition == saved_model_def_default:
     saved_model_definition_path = temp[0][0]
 else:
     saved_model_definition_path = args.direct_saved_model_definition
+
+if args.stored_sampled_tier_data is not None:
+    stored_sampled_tier_data_paths = args.stored_sampled_tier_data.split(",")
+    input_stored_conditioning = np.load(stored_sampled_tier_data_paths[-1])
+else:
+    input_stored_conditioning = None
 
 
 from importlib import import_module
@@ -209,6 +219,7 @@ if args.use_longest:
     # sample 50 minibatches, find longest N examples of that...
     print("Performing length selection to choose base samples for biasing")
     valid_el = None
+    kept_indices = list(range(hp.real_batch_size))
     for _ in range(50):
         this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
         if valid_el is None:
@@ -218,6 +229,7 @@ if args.use_longest:
                 for kept in range(len(valid_el)):
                     if this_valid_el[candidate][2].shape[0] > valid_el[kept][2].shape[0]:
                         valid_el[kept] = this_valid_el[candidate]
+                        kept_indices[kept] = candidate
                         break
 else:
     valid_el = speech.get_valid_utterances(hp.real_batch_size)
@@ -271,7 +283,13 @@ if input_tier_condition_tag is None:
                      memory_condition_mask=torch_cond_seq_data_mask,
                      batch_norm_flag=batch_norm_flag)
 else:
-    cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+    cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+    # conditioning input currently unnormalized
+    if input_stored_conditioning is not None:
+        cond_np = input_stored_conditioning
+    cond = torch.tensor(cond_np).contiguous().to(hp.use_device)
+    if use_half:
+        cond = torch.tensor(cond_np).contiguous().to(hp.use_device).half()
     pred_out = model(x_in, x_mask=x_mask_in,
                      spatial_condition=cond,
                      batch_norm_flag=batch_norm_flag)
@@ -359,7 +377,6 @@ if not os.path.exists(folder):
 
 for _i in range(hp.real_batch_size):
     teacher_forced_pred = pred_out
-    teacher_forced_attn = model.attention_alignment
 
     reduced_mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
     full_mel_cut = int(data_mask[_i].sum())
@@ -376,14 +393,20 @@ for _i in range(hp.real_batch_size):
     plt.savefig(folder + os.sep + "data_x{}.png".format(_i))
     plt.close()
 
-    text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
-    # matshow vs imshow?
-    this_att = teacher_forced_attn[:, _i].cpu().data.numpy()[:reduced_mel_cut, :text_cut]
-    this_att = this_att.astype("float32")
-    plt.imshow(this_att)
-    plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
-    plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
-    plt.close()
+    if input_tier_condition_tag is None:
+        teacher_forced_attn = model.attention_alignment
+        text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
+        # matshow vs imshow?
+        this_att = teacher_forced_attn[:, _i].cpu().data.numpy()[:reduced_mel_cut, :text_cut]
+        this_att = this_att.astype("float32")
+        plt.imshow(this_att)
+        plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
+        plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
+        plt.close()
+    else:
+        plt.imshow(cond_np[_i, :, :, 0])
+        plt.savefig(folder + os.sep + "cond_small_x{}.png".format(_i))
+        plt.close()
 
 time_len = x_in_np.shape[1]
 bias_til = time_len // 2
@@ -439,14 +462,20 @@ for time_step in range(remaining_steps):
                              memory_condition_mask=torch_cond_seq_data_mask,
                              batch_norm_flag=batch_norm_flag)
         else:
-            raise ValueError("implement cond tier sampling")
-            cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+            cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+            #input_stored_conditioning = None
+            # conditioning input currently unnormalized
+            if input_stored_conditioning is not None:
+                cond_np = input_stored_conditioning
+            cond = torch.tensor(cond_np).contiguous().to(hp.use_device)
+            if use_half:
+                cond = torch.tensor(cond_np).contiguous().to(hp.use_device).half()
             pred_out = model(x_in, x_mask=x_mask_in,
                              spatial_condition=cond,
                              batch_norm_flag=batch_norm_flag)
 
         teacher_forced_pred = pred_out
-        teacher_forced_attn = model.attention_alignment
+        #teacher_forced_attn = model.attention_alignment
         sample_buffer[:, this_step, mel_step] = pred_out[:, this_step, mel_step].cpu().data.numpy()
         end_time = time.time()
         print("minibatch time {} secs".format(end_time - cur_time))
@@ -464,17 +493,26 @@ for _i in range(hp.real_batch_size):
     plt.close()
 
     # matshow vs imshow?
-    this_att = teacher_forced_attn[:, _i].cpu().data.numpy()[:, :]
-    this_att = this_att.astype("float32")
-    plt.imshow(this_att)
-    plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
-    plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
-    plt.close()
+    if input_tier_condition_tag is None:
+        teacher_forced_attn = model.attention_alignment
+        this_att = teacher_forced_attn[:, _i].cpu().data.numpy()[:, :]
+        this_att = this_att.astype("float32")
+        plt.imshow(this_att)
+        plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
+        plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
+        plt.close()
+    else:
+        plt.imshow(cond_np[_i, :, :, 0])
+        plt.savefig(folder + os.sep + "cond_small_x{}.png".format(_i))
+        plt.close()
 
 np.save(folder + "/" + "raw_samples.npy", sample_buffer)
 np.save(folder + "/" + "unnormalized_samples.npy", sample_buffer * saved_std + saved_mean)
-np.save(folder + "/" + "attn_activation.npy", teacher_forced_attn.cpu().data.numpy())
 np.save(folder + "/" + "minibatch_input.npy", original_buffer)
+if input_tier_condition_tag is None:
+    np.save(folder + "/" + "attn_activation.npy", teacher_forced_attn.cpu().data.numpy())
+else:
+    np.save(folder + "/" + "unnormalized_cond_input.npy", cond_np)
 print("finished sampling in {} sec".format(sample_completed - begin_time))
 from IPython import embed; embed(); raise ValueError()
 
