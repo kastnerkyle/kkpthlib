@@ -64,7 +64,12 @@ parser.add_argument('--batch_skips', type=int, default=0,
                     help='number of batches to skip before sampling - allows us to sample different examples!')
 parser.add_argument('--use_longest', action="store_true",
                     help='flag to use the longest of N examples for sampling due to biasing')
+parser.add_argument('--use_sample_index', type=str, default="0,0",
+                    help='flag to use for deterministic sampling of same entry')
 
+
+parser.add_argument('--output_dir', type=str, default=None,
+                    help='base directory to output sampled data')
 parser.add_argument('--stored_sampled_tier_data', type=str, default=None,
                     help='all previously sampled tier data, in order from beginning tier to previous from left to right. Last array assumed to be the conditioning input. comma separated string, should be path to unnormalized data')
 
@@ -128,9 +133,84 @@ if args.direct_saved_model_definition == saved_model_def_default:
 else:
     saved_model_definition_path = args.direct_saved_model_definition
 
+input_axis_split_list = [int(args.axis_splits[i]) for i in range(len(args.axis_splits))]
+input_size_at_depth = [int(el) for el in args.size_at_depth.split(",")]
+input_hidden_size = int(args.hidden_size)
+input_n_layers = int(args.n_layers)
+input_real_batch_size = int(args.real_batch_size)
+input_batch_skips =int(args.batch_skips)
+input_virtual_batch_size = int(args.virtual_batch_size)
+input_tier_input_tag = [int(el) for el in args.tier_input_tag.split(",")]
+input_use_sample_index = [int(el) for el in args.use_sample_index.split(",")]
+input_output_dir = args.output_dir if args.output_dir[-1] == "/" else args.output_dir + "/"
+
+assert len(input_size_at_depth) == 2
+assert len(input_tier_input_tag) == 2
+if args.tier_condition_tag is not None:
+    input_tier_condition_tag = [int(el) for el in args.tier_condition_tag.split(",")]
+    assert len(input_tier_condition_tag) == 2
+else:
+    input_tier_condition_tag = None
+
 if args.stored_sampled_tier_data is not None:
     stored_sampled_tier_data_paths = args.stored_sampled_tier_data.split(",")
-    input_stored_conditioning = np.load(stored_sampled_tier_data_paths[-1])
+    if len(stored_sampled_tier_data_paths) == 1:
+        input_stored_conditioning = np.load(stored_sampled_tier_data_paths[-1])
+    else:
+        #x_in_np = all_x_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+        # need to figure out how to combine all the saved data into one input
+        built_conditioning = None
+        # remember there is some kind of eff by 1 / reverse
+        for _n, el in enumerate(stored_sampled_tier_data_paths):
+            if built_conditioning is None:
+                built_conditioning = np.load(el)
+            else:
+                next_conditioning = np.load(el)
+                comb_dims = (next_conditioning.shape[0],
+                             built_conditioning.shape[1] + next_conditioning.shape[1],
+                             built_conditioning.shape[2] + next_conditioning.shape[2],
+                             next_conditioning.shape[-1])
+                # reverse split list since it is done in depth order (shallow to deep)
+                this_split = input_axis_split_list[::-1][_n]
+                if this_split == 1:
+                    buffer_np = np.zeros((input_real_batch_size, next_conditioning.shape[1], comb_dims[2], 1)).astype("float32")
+                    buffer_np[:, :, ::2, :] = built_conditioning
+                    buffer_np[:, :, 1::2, :] = next_conditioning
+                    input_stored_conditioning = buffer_np.astype("float32")
+                elif this_split == 2:
+                    buffer_np = np.zeros((input_real_batch_size, comb_dims[1], next_conditioning.shape[2], 1)).astype("float32")
+                    buffer_np[:, ::2, :, :] = built_conditioning
+                    buffer_np[:, 1::2, :, :] = next_conditioning
+                else:
+                    raise ValueError("Unknown split value {} for split index {} from (reversed) split list {}".format(this_split, _n, input_axis_split_list[::-1]))
+                built_conditioning = buffer_np.astype("float32")
+        input_stored_conditioning = copy.deepcopy(built_conditioning)
+
+        """
+        if input_axis_split_list[input_tier_input_tag[0]] == 2:
+            buffer_np = np.zeros((input_real_batch_size, input_size_at_depth[0], input_size_at_depth[1], 1)).astype("float32")
+            input_stored_conditioning_a = np.load(stored_sampled_tier_data_paths[-2])
+            input_stored_conditioning_b = np.load(stored_sampled_tier_data_paths[-1])
+            buffer_np[:, ::2, :, :] = input_stored_conditioning_a
+            buffer_np[:, 1::2, :, :] = input_stored_conditioning_b
+            input_stored_conditioning = buffer_np.astype("float32")
+        elif input_axis_split_list[input_tier_input_tag[0]] == 1:
+            buffer_np = np.zeros((input_real_batch_size, input_size_at_depth[0], input_size_at_depth[1], 1)).astype("float32")
+            input_stored_conditioning_a = np.load(stored_sampled_tier_data_paths[-2])
+            input_stored_conditioning_b = np.load(stored_sampled_tier_data_paths[-1])
+            buffer_np[:, :, ::2, :] = input_stored_conditioning_a
+            buffer_np[:, :, 1::2, :] = input_stored_conditioning_b
+            input_stored_conditioning = buffer_np.astype("float32")
+        """
+    if input_stored_conditioning.shape[1] != input_size_at_depth[0] or input_stored_conditioning.shape[2] != input_size_at_depth[1]:
+        err_str = "stored sampled tier data passed via --stored_stampled_tier_data={}".format(args.stored_sampled_tier_data)
+        err_str += "\n"
+        err_str += "does not have the correct shape after processing!"
+        err_str += "\n"
+        err_str += "combined shape of numpy arrays should match --size_at_depth={}".format(input_size_at_depth)
+        err_str += "\n"
+        err_str += "however, current combined shape is {},{}".format(input_stored_conditioning.shape[1], input_stored_conditioning.shape[2])
+        raise ValueError(err_str)
 else:
     input_stored_conditioning = None
 
@@ -157,23 +237,6 @@ if use_half:
 model_dict = torch.load(saved_model_path, map_location=hp.use_device)
 model.load_state_dict(model_dict)
 model.eval()
-
-input_axis_split_list = [int(args.axis_splits[i]) for i in range(len(args.axis_splits))]
-input_size_at_depth = [int(el) for el in args.size_at_depth.split(",")]
-input_hidden_size = int(args.hidden_size)
-input_n_layers = int(args.n_layers)
-input_real_batch_size = int(args.real_batch_size)
-input_batch_skips =int(args.batch_skips)
-input_virtual_batch_size = int(args.virtual_batch_size)
-input_tier_input_tag = [int(el) for el in args.tier_input_tag.split(",")]
-
-assert len(input_size_at_depth) == 2
-assert len(input_tier_input_tag) == 2
-if args.tier_condition_tag is not None:
-    input_tier_condition_tag = [int(el) for el in args.tier_condition_tag.split(",")]
-    assert len(input_tier_condition_tag) == 2
-else:
-    input_tier_condition_tag = None
 
 from kkpthlib.datasets import EnglishSpeechCorpus
 from kkpthlib.utils import split
@@ -219,9 +282,11 @@ if args.use_longest:
     # sample 50 minibatches, find longest N examples of that...
     print("Performing length selection to choose base samples for biasing")
     valid_el = None
-    kept_indices = list(range(hp.real_batch_size))
+    kept_indices = [[0] * hp.real_batch_size, list(range(hp.real_batch_size))]
+    itr_offset = 0
     for _ in range(50):
         this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
+        itr_offset += 1
         if valid_el is None:
             valid_el = this_valid_el
         else:
@@ -229,8 +294,13 @@ if args.use_longest:
                 for kept in range(len(valid_el)):
                     if this_valid_el[candidate][2].shape[0] > valid_el[kept][2].shape[0]:
                         valid_el[kept] = this_valid_el[candidate]
-                        kept_indices[kept] = candidate
+                        kept_indices[0][kept] = itr_offset
+                        kept_indices[1][kept] = candidate
                         break
+elif input_use_sample_index[0] != 0 or input_use_sample_index[1] != 0:
+    for _ in range(input_use_sample_index[0]):
+        this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
+    valid_el = [this_valid_el[input_use_sample_index[1]]] * hp.real_batch_size
 else:
     valid_el = speech.get_valid_utterances(hp.real_batch_size)
 
@@ -278,10 +348,11 @@ if use_half:
 
 if input_tier_condition_tag is None:
     # no noise here in pred
-    pred_out = model(x_in, x_mask=x_mask_in,
-                     memory_condition=torch_cond_seq_data_batch,
-                     memory_condition_mask=torch_cond_seq_data_mask,
-                     batch_norm_flag=batch_norm_flag)
+    with torch.no_grad():
+        pred_out = model(x_in, x_mask=x_mask_in,
+                         memory_condition=torch_cond_seq_data_batch,
+                         memory_condition_mask=torch_cond_seq_data_mask,
+                         batch_norm_flag=batch_norm_flag)
 else:
     cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
     # conditioning input currently unnormalized
@@ -290,9 +361,10 @@ else:
     cond = torch.tensor(cond_np).contiguous().to(hp.use_device)
     if use_half:
         cond = torch.tensor(cond_np).contiguous().to(hp.use_device).half()
-    pred_out = model(x_in, x_mask=x_mask_in,
-                     spatial_condition=cond,
-                     batch_norm_flag=batch_norm_flag)
+    with torch.no_grad():
+        pred_out = model(x_in, x_mask=x_mask_in,
+                         spatial_condition=cond,
+                         batch_norm_flag=batch_norm_flag)
 
 import matplotlib.pyplot as plt
 
@@ -371,7 +443,10 @@ def sample_dml(l, n_mix=10, only_mean=True, deterministic=True, sampling_tempera
     #out = out.permute(0, 3, 1, 2)
     return out
 
-folder = "teacher_forced_images"
+folder = input_output_dir + "teacher_forced_images/"
+if not os.path.exists(input_output_dir):
+    os.mkdir(input_output_dir)
+
 if not os.path.exists(folder):
     os.mkdir(folder)
 
@@ -457,10 +532,11 @@ for time_step in range(remaining_steps):
 
         if input_tier_condition_tag is None:
             # no noise here in pred
-            pred_out = model(x_in, x_mask=x_mask_in,
-                             memory_condition=torch_cond_seq_data_batch,
-                             memory_condition_mask=torch_cond_seq_data_mask,
-                             batch_norm_flag=batch_norm_flag)
+            with torch.no_grad():
+                pred_out = model(x_in, x_mask=x_mask_in,
+                                 memory_condition=torch_cond_seq_data_batch,
+                                 memory_condition_mask=torch_cond_seq_data_mask,
+                                 batch_norm_flag=batch_norm_flag)
         else:
             cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
             #input_stored_conditioning = None
@@ -470,9 +546,10 @@ for time_step in range(remaining_steps):
             cond = torch.tensor(cond_np).contiguous().to(hp.use_device)
             if use_half:
                 cond = torch.tensor(cond_np).contiguous().to(hp.use_device).half()
-            pred_out = model(x_in, x_mask=x_mask_in,
-                             spatial_condition=cond,
-                             batch_norm_flag=batch_norm_flag)
+            with torch.no_grad():
+                pred_out = model(x_in, x_mask=x_mask_in,
+                                 spatial_condition=cond,
+                                 batch_norm_flag=batch_norm_flag)
 
         teacher_forced_pred = pred_out
         #teacher_forced_attn = model.attention_alignment
@@ -482,7 +559,7 @@ for time_step in range(remaining_steps):
 
 sample_completed = time.time()
 
-folder = "sampled_forced_images"
+folder = input_output_dir + "sampled_forced_images/"
 if not os.path.exists(folder):
     os.mkdir(folder)
 
@@ -514,6 +591,7 @@ if input_tier_condition_tag is None:
 else:
     np.save(folder + "/" + "unnormalized_cond_input.npy", cond_np)
 print("finished sampling in {} sec".format(sample_completed - begin_time))
+sys.exit()
 from IPython import embed; embed(); raise ValueError()
 
 for _i in range(hp.real_batch_size):

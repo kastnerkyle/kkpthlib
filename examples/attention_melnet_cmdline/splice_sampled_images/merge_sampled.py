@@ -3,8 +3,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-t00 = np.load("tier0_0_sampled/unnormalized_samples.npy")
-t01_c00 = np.load("tier0_1_cond0_0_sampled/unnormalized_samples.npy")
+#t00 = np.load("tier0_0_sampled/unnormalized_samples.npy")
+#t01_c00 = np.load("tier0_1_cond0_0_sampled/unnormalized_samples.npy")
+t00 = np.load("tier4_1_cond4_0_sampled_chain/unnormalized_cond_input.npy")
+t01_c00 = np.load("tier4_1_cond4_0_sampled_chain/unnormalized_samples.npy")
 
 comb = np.concatenate((0. * t00, 0. * t01_c00), axis=2)
 comb[:, :, ::2, :] = t00
