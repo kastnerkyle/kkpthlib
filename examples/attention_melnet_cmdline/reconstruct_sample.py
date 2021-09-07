@@ -342,6 +342,7 @@ cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_miniba
 
 filename = list(el[0][3].keys())[0] + ".wav"
 wav_path = folder_base + "/wavs/" + filename
+from IPython import embed; embed(); raise ValueError()
 fs, d = wavfile.read(wav_path)
 x = d.astype('float32') / (2 ** 15)
 n_fft = 6 * 256
