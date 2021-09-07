@@ -171,8 +171,6 @@ def execute(cmd):
 
 scripts = [tier0_0_args, tier0_1_cond0_0_args, tier1_1_cond1_0_args, tier2_1_cond2_0_args, tier3_1_cond3_0_args, tier4_1_cond4_0_args]
 for _i, cmd_args in enumerate(scripts):
-    if _i < 4:
-        continue
     #print(cmd_args.format_args_as_string())
     for el in execute(cmd_args.format_args_as_string()):
         print(el, end="")
