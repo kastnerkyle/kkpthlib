@@ -450,6 +450,16 @@ if not os.path.exists(input_output_dir):
 if not os.path.exists(folder):
     os.mkdir(folder)
 
+import json
+from collections import OrderedDict
+
+if valid_el is not None:
+    sample_info_path = folder + "text_info.json"
+    cleaned_valid_el = valid_el[0][3]
+    with open(sample_info_path, 'w') as f:
+        json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
+        f.write(json_string)
+
 for _i in range(hp.real_batch_size):
     teacher_forced_pred = pred_out
 
@@ -562,6 +572,13 @@ sample_completed = time.time()
 folder = input_output_dir + "sampled_forced_images/"
 if not os.path.exists(folder):
     os.mkdir(folder)
+
+if valid_el is not None:
+    sample_info_path = folder + "text_info.json"
+    with open(sample_info_path, 'w') as f:
+        cleaned_valid_el = valid_el[0][3]
+        json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
+        f.write(json_string)
 
 for _i in range(hp.real_batch_size):
     unnormalized = sample_buffer * saved_std + saved_mean
