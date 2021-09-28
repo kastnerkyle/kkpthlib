@@ -173,12 +173,16 @@ def stft(X, fftsize=128, step="half", mean_normalize=True, real=False,
     """
     Compute STFT for 1D real valued input X
     """
+    if real == True and compute_onesided == True:
+        raise ValueError("Onesided only necessary for real == False")
     if real:
         local_fft = fftpack.rfft
+        # was cut = -1, changed!
         cut = -1
     else:
         local_fft = fftpack.fft
         cut = None
+
     if compute_onesided:
         cut = fftsize // 2 + 1
     if mean_normalize:

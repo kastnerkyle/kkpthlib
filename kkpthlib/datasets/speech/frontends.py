@@ -5,7 +5,7 @@ class EnglishPhonemeLookup(dict):
         basedir = "/".join(__file__.split("/")[:-1])
         with open(basedir + "/en_lang/phones.txt", "r") as f:
             lines = f.readlines()
-        phone_syms = [l.split(" ")[0] for l in lines]
+        phone_syms = [l.strip().split(" ")[0] for l in lines]
         for _n, ps in enumerate(phone_syms):
             super().__setitem__(ps, _n)
 

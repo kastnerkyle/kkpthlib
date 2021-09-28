@@ -142,9 +142,10 @@ hp = HParams(input_dim=1,
              clip=3.5,
              n_layers_per_tier=[input_n_layers],
              melnet_init="truncated_normal",
-             attention_type="logistic",
+             #attention_type="logistic",
+             #attention_type="sigmoid_logistic",
              #attention_type="relative_logistic",
-             #attention_type="sigmoid_logistic_alt",
+             attention_type="sigmoid_logistic_alt",
              #attention_type="gaussian",
              #attention_type="dca",
              #melnet_init=None,
@@ -154,7 +155,7 @@ hp = HParams(input_dim=1,
              # mixture of logistics n_mix == 10
              #output_size=2 * 10 + 10,
              output_size=1,
-             text_input_symbols=51, #len(speech.phone_lookup),
+             text_input_symbols=196, #51, #len(speech.phone_lookup),
              input_image_size=input_size_at_depth,
              real_batch_size=input_real_batch_size,
              virtual_batch_size=input_virtual_batch_size,
@@ -170,6 +171,19 @@ speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              fixed_minibatch_time_secs=fixed_minibatch_time_secs,
                              train_split=fraction_train_split,
                              random_state=data_random_state)
+
+
+"""
+els = speech.get_utterances(1, speech.train_keys, skip_mel=False)
+cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(els,
+                                                                                    quantize_to_n_bins=None)
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+plt.imshow(data_batch[0], cmap="viridis")
+plt.savefig("tmp_mel.png")
+from IPython import embed; embed(); raise ValueError()
+"""
 
 # want to see these every 5000 train samples, every 1250 valid samples have been processed from dataset
 n_train_steps_per = 5000 // input_virtual_batch_size
@@ -533,6 +547,10 @@ if __name__ == "__main__":
                     loss = ((loss1 * x_mask_in / step_count) / x_mask_in.sum()).sum()
                     #loss = ((loss1 * x_mask_in) / x_mask_in.sum()).sum()
                     l = loss.cpu().data.numpy()
+                    if np.isnan(l):
+                        print("NAN in loss! Dropping into debug")
+                        from IPython import embed; embed(); raise ValueError()
+
                     if use_half:
                         loss = loss.half()
 
@@ -549,6 +567,11 @@ if __name__ == "__main__":
                         loss.backward()
                         # wipe the grad immediately
                         model.zero_grad()
+
+                    for n, v in model.named_parameters():
+                        if torch.any(torch.isnan(v.grad)):
+                            print("Found nan in grad!")
+                            from IPython import embed; embed(); raise ValueError()
 
                     if total_l is None:
                         #total_l = l / step_count
@@ -604,7 +627,6 @@ if __name__ == "__main__":
     s = {"model": model,
          "optimizer": optimizer,
          "hparams": hp}
-
     """
     r = loop(speech, {"train": True}, None)
     r2 = loop(speech, {"train": True}, None)

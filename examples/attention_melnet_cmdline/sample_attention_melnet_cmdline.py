@@ -78,7 +78,6 @@ parser.add_argument('--random_seed', '-r', type=int, default=2133,
 parser.add_argument('--data_seed', '-d', type=int, default=144,
                     help='random seed to use when seeding the sampling (default 144)')
 parser.add_argument('--sample_len', type=int, default=1024,
-
                     help='how long of a sequence to sample (default 1024)')
 
 parser.add_argument('--temperature', type=float, default=.9,
@@ -142,6 +141,8 @@ input_batch_skips =int(args.batch_skips)
 input_virtual_batch_size = int(args.virtual_batch_size)
 input_tier_input_tag = [int(el) for el in args.tier_input_tag.split(",")]
 input_use_sample_index = [int(el) for el in args.use_sample_index.split(",")]
+if args.output_dir is None:
+    raise ValueError("No output_dir passed! Required for sampling")
 input_output_dir = args.output_dir if args.output_dir[-1] == "/" else args.output_dir + "/"
 
 assert len(input_size_at_depth) == 2
@@ -369,6 +370,14 @@ else:
 import matplotlib.pyplot as plt
 
 if args.terminate_early_attention_plot:
+    # take output dir directly for terminate early attention plot
+    folder = input_output_dir
+    if not os.path.exists(input_output_dir):
+        os.mkdir(input_output_dir)
+
+    if not os.path.exists(folder):
+        os.mkdir(folder)
+
     teacher_forced_pred = pred_out
     teacher_forced_attn = model.attention_alignment
 
@@ -376,11 +385,11 @@ if args.terminate_early_attention_plot:
         mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
         text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
         # matshow vs imshow?
-        this_att = teacher_forced_attn[:, _i].cpu().data.numpy()[:mel_cut, :text_cut]
+        this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:mel_cut, :text_cut]
         this_att = this_att.astype("float32")
         plt.imshow(this_att)
         plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
-        plt.savefig("attn_{}.png".format(_i))
+        plt.savefig(folder + "attn_{}.png".format(_i))
         plt.close()
 
     import sys

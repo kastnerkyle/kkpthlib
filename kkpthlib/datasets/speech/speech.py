@@ -5,6 +5,7 @@ import time
 import copy
 from scipy import signal
 from scipy.io import wavfile
+from collections import OrderedDict
 from .frontends import EnglishPhonemeLookup
 from .audio_processing.audio_tools import herz_to_mel, mel_to_herz
 from .audio_processing.audio_tools import stft, istft
@@ -23,6 +24,7 @@ class EnglishSpeechCorpus(object):
                        min_length_symbols=7, max_length_symbols=200,
                        min_length_time_secs=2, max_length_time_secs=None,
                        fixed_minibatch_time_secs=6,
+                       build_skiplist=True,
                        random_state=None):
         self.metadata_csv = metadata_csv
         self.wav_folder = wav_folder
@@ -143,7 +145,7 @@ class EnglishSpeechCorpus(object):
         """
         self.pause_duration_breakpoints = [0.01, 0.0625, 0.1325, 0.25]
         self.phone_lookup = EnglishPhonemeLookup()
-        # each sil starts with # , so #0, #1, #2, #3, #4
+        # each sil starts with ! , so !0, !1, !2, !3, !4
 
         sil_val = len(self.phone_lookup.keys())
         # +1 because 0:0.01, 0.01:0.0625, 0.0625:0.1325, 0.1325:0.25, 0.25:inf
@@ -151,17 +153,128 @@ class EnglishSpeechCorpus(object):
             self.phone_lookup["!{}".format(_i)] = sil_val
             sil_val += 1
 
+        # add start symbol
+        self.phone_lookup["$"] = sil_val
+        sil_val += 1
+        # add started on a continue symbol
+        self.phone_lookup["&"] = sil_val
+        sil_val += 1
         # add eos symbol
         self.phone_lookup["~"] = sil_val
         sil_val += 1
-        # add pad
+        # add pad symbol
         self.phone_lookup["_"] = sil_val
         assert len(self.phone_lookup.keys()) == len(np.unique(list(self.phone_lookup.keys())))
+
+        self.build_skiplist = build_skiplist
+        if self.build_skiplist:
+            # should be deterministic if we run the same script 2x
+            random_state_val = random_state.randint(10000)
+            skiplist_base_dir = os.getcwd() + "/skiplist_cache/"
+            skiplist_base_path = skiplist_base_dir + "{}".format(metadata_csv.split(".csv")[0].replace("/", "-"))
+            skiplist_train_path = skiplist_base_path + "_keyval{}_train_skip.txt".format(random_state_val)
+            keeplist_train_path = skiplist_base_path + "_keyval{}_train_keep.txt".format(random_state_val)
+
+            skiplist_valid_path = skiplist_base_path + "_keyval{}_valid_skip.txt".format(random_state_val)
+            keeplist_valid_path = skiplist_base_path + "_keyval{}_valid_keep.txt".format(random_state_val)
+
+            if not os.path.exists(skiplist_base_dir):
+                os.mkdir(skiplist_base_dir)
+
+            if not all([os.path.exists(p) for p in [skiplist_train_path, keeplist_train_path, skiplist_valid_path, keeplist_valid_path]]):
+                # info for skip / keep lists is missing, must create it
+                checks = ["noise", "sil", "oov", "#", "laughter", "<eps>"]
+
+                train_failed_checks = OrderedDict()
+                train_passed_checks = OrderedDict()
+                for n, k in enumerate(self.train_keys):
+                    utt = self.get_utterances(1, [self.train_keys[n]], do_not_filter=True)
+                    utt_key = list(utt[0][3].keys())[0]
+                    words = utt[0][3][utt_key]["full_alignment"]["words"]
+                    for i in range(len(words)):
+                        for j in range(len(words[i]["phones"])):
+                            p = words[i]["phones"][j]["phone"]
+                            for c in checks:
+                                if c in p:
+                                    if k not in train_failed_checks:
+                                        train_failed_checks[k] = [(n, k, c)]
+                                    else:
+                                        train_failed_checks[k].append((n, k, c))
+                    if k not in train_failed_checks:
+                        train_passed_checks[k] = True
+                    print("Building skiplist for train" + "," + str(n) + "," + k + " :::  " + utt[0][3][utt_key]["transcript"])
+                # be sure there havent somehow been elements put into both lists
+                for tk in train_passed_checks.keys():
+                    assert tk not in train_failed_checks
+
+                valid_failed_checks = OrderedDict()
+                valid_passed_checks = OrderedDict()
+                for n, k in enumerate(self.valid_keys):
+                    utt = self.get_utterances(1, [self.valid_keys[n]], do_not_filter=True)
+                    utt_key = list(utt[0][3].keys())[0]
+                    words = utt[0][3][utt_key]["full_alignment"]["words"]
+                    for i in range(len(words)):
+                        for j in range(len(words[i]["phones"])):
+                            p = words[i]["phones"][j]["phone"]
+                            for c in checks:
+                                if c in p:
+                                    if k not in valid_failed_checks:
+                                        valid_failed_checks[k] = [(n, k, c)]
+                                    else:
+                                        valid_failed_checks[k].append((n, k, c))
+                    if k not in valid_failed_checks:
+                        valid_passed_checks[k] = True
+                    print("Building skiplist for valid" + "," + str(n) + "," + k + " :::  " + utt[0][3][utt_key]["transcript"])
+
+                for vk in valid_passed_checks.keys():
+                    assert vk not in valid_failed_checks
+                    assert vk not in train_passed_checks
+                    assert vk not in train_failed_checks
+                for vk in valid_failed_checks.keys():
+                    assert vk not in train_passed_checks
+                    assert vk not in train_failed_checks
+                # be sure there havent somehow been elements put into both lists, and no train/valid cross-pollination
+
+                # we are to the critical point, writing the info out!
+                with open(skiplist_train_path, "w") as f:
+                    f.write("\n".join(list(train_failed_checks)))
+                    print("Wrote skiplist for {}".format(skiplist_train_path))
+
+                with open(keeplist_train_path, "w") as f:
+                    f.write("\n".join(list(train_passed_checks)))
+                    print("Wrote keeplist for {}".format(keeplist_train_path))
+
+                with open(skiplist_valid_path, "w") as f:
+                    f.write("\n".join(list(valid_failed_checks)))
+                    print("Wrote skiplist for {}".format(skiplist_valid_path))
+
+                with open(keeplist_valid_path, "w") as f:
+                    f.write("\n".join(list(valid_passed_checks)))
+                    print("Wrote keeplist for {}".format(keeplist_valid_path))
+
+            # now we can assume the skip/keep lists exist, lets double check the current train/val keys against the one written out
+            # then prune down
+            with open(keeplist_train_path, "r") as f:
+                loaded_train_keep_keys = [el.strip() for el in f.readlines()]
+            with open(keeplist_valid_path, "r") as f:
+                loaded_valid_keep_keys = [el.strip() for el in f.readlines()]
+            self.train_keep_keys = [k for k in self.train_keys if k in loaded_train_keep_keys]
+            self.valid_keep_keys = [k for k in self.valid_keys if k in loaded_valid_keep_keys]
+
+            self._batch_utts_queue = []
+            self._batch_used_keys_queue = []
+            # sanity check we didnt delete the whole dataset
+            assert len(self.train_keep_keys) > (len(self.train_keys) // 10)
+            assert len(self.valid_keep_keys) > (len(self.valid_keys) // 10)
+            # sanity check train keys wasnt so short we got 0
+            assert len(self.train_keep_keys) > 0
+            assert len(self.valid_keep_keys) > 0
 
     def get_utterances(self, size, all_keys, skip_mel=False,
                        min_length_words=None, max_length_words=None,
                        min_length_symbols=None, max_length_symbols=None,
-                       min_length_time_secs=None, max_length_time_secs=None):
+                       min_length_time_secs=None, max_length_time_secs=None,
+                       do_not_filter=False):
         if min_length_words is None:
             min_length_words = self.min_length_words
         if max_length_words is None:
@@ -176,6 +289,7 @@ class EnglishSpeechCorpus(object):
             max_length_time_secs = self.max_length_time_secs
 
         utts = []
+        used_keys = []
         # get a bigger extent, so if some don't match out filters we can keep going
         idx = self.random_state.choice(len(all_keys), 100 * size)
         for ii in idx:
@@ -192,25 +306,44 @@ class EnglishSpeechCorpus(object):
             char_length = len(utt[-1][core_key]["transcript"])
             # just use the min for filtering, should be close in length for most cases
             symbol_length = min(char_length, phoneme_length)
-            if word_length > max_length_words or word_length < min_length_words:
-                continue
-            if symbol_length > max_length_symbols or symbol_length < min_length_symbols:
-                continue
-            if time_length > max_length_time_secs or time_length < min_length_time_secs:
-                continue
+            if do_not_filter:
+                pass
+            else:
+                if word_length > max_length_words or word_length < min_length_words:
+                    continue
+                if symbol_length > max_length_symbols or symbol_length < min_length_symbols:
+                    continue
+                if time_length > max_length_time_secs or time_length < min_length_time_secs:
+                    # we could split this into subparts? potentially to make use of more data...
+                    continue
 
             utts.append(utt)
+            used_keys.append(all_keys[ii])
             if len(utts) >= size:
                 break
         if len(utts) < size:
             raise ValueError("Unable to build correct length in get_utterances! Something has gone very wrong, debug this!")
+
+        self._batch_used_keys_queue.append(used_keys)
+        self._batch_used_keys_queue = self._batch_used_keys_queue[-5:]
+
+        self._batch_utts_queue.append(utts)
+        self._batch_utts_queue = self._batch_utts_queue[-5:]
         return utts
 
     def get_train_utterances(self, size, skip_mel=False):
-        return self.get_utterances(size, self.train_keys, skip_mel=skip_mel)
+        if self.build_skiplist:
+            # we skip elements which had poor recognition
+            return self.get_utterances(size, self.train_keep_keys, skip_mel=skip_mel)
+        else:
+            return self.get_utterances(size, self.train_keys, skip_mel=skip_mel)
 
     def get_valid_utterances(self, size, skip_mel=False):
-        return self.get_utterances(size, self.valid_keys, skip_mel=skip_mel)
+        if self.build_skiplist:
+            # we skip elements which had poor recognition
+            return self.get_utterances(size, self.valid_keep_keys, skip_mel=skip_mel)
+        else:
+            return self.get_utterances(size, self.valid_keys, skip_mel=skip_mel)
 
     def load_mean_std_from_filepath(self, filepath):
         if not os.path.exists(filepath):
@@ -221,9 +354,9 @@ class EnglishSpeechCorpus(object):
         self.cached_count_ = d["frame_count"].copy()
 
     def format_minibatch(self, utterances,
-                               symbol_type="phoneme",
-                               pause_duration_breakpoints=None,
-                               quantize_to_n_bins=None):
+                         symbol_type="phoneme",
+                         pause_duration_breakpoints=None,
+                         quantize_to_n_bins=None):
         if pause_duration_breakpoints is None:
             pause_duration_breakpoints = self.pause_duration_breakpoints
         phoneme_sequences = []
@@ -261,13 +394,13 @@ class EnglishSpeechCorpus(object):
                 # reverse iterate pause duration breakpoints to quantized gap values
                 gaps_arr = gaps_arr.astype("int32")
                 phone_group_syms = [[pgi["phone"] for pgi in pg] for pg in phone_groups]
-                flat_phones_and_gaps = []
+                flat_phones_and_gaps = ["$"]
                 for _n in range(len(phone_group_syms)):
                     flat_phones_and_gaps.append("!{}".format(gaps_arr[_n]))
                     flat_phones_and_gaps.extend(phone_group_syms[_n])
                 flat_phones_and_gaps.append("~")
                 flat_phones_and_gaps.append("!{}".format(gaps_arr[-1]))
-                seq_as_ints = [self.phone_lookup[s.split("_")[0]] for s in flat_phones_and_gaps]
+                seq_as_ints = [self.phone_lookup[s] for s in flat_phones_and_gaps]
                 phoneme_sequences.append(seq_as_ints)
         # pad it out so all are same length
         max_seq_len = max([len(ps) for ps in phoneme_sequences])
@@ -340,7 +473,7 @@ class EnglishSpeechCorpus(object):
     def melspectrogram_denormalize(self, ms):
         from IPython import embed; embed(); raise ValueError()
 
-    def _melspectrogram_preprocess(self, data, sample_rate):
+    def _old_melspectrogram_preprocess(self, data, sample_rate):
         # takes in a raw sequence scaled between -1 and 1 (such as loaded from a wav file)
 
         # 'Center freqs' of mel bands - uniformly spaced between limits
@@ -394,6 +527,66 @@ class EnglishSpeechCorpus(object):
             return 20 * np.log10(np.maximum(min_level, a))
 
         abs_stft = np.abs(stft(preemphasis_filtered, fftsize=n_fft, step=n_step, real=True))
+        melspec_ref = _amp_to_db(np.dot(mel_weights, abs_stft.T)) - ref_level_db
+        melspec_clip = np.clip((melspec_ref - min_level_db) / -min_level_db, 0, 1)
+        return melspec_clip.T
+
+    def _melspectrogram_preprocess(self, data, sample_rate):
+        # takes in a raw sequence scaled between -1 and 1 (such as loaded from a wav file)
+
+        # 'Center freqs' of mel bands - uniformly spaced between limits
+        x = data
+        sr = sample_rate
+
+        n_mels = self.n_mels
+
+        fmin = self.mel_freq_min
+        fmax = self.mel_freq_max
+
+        n_fft = self.stft_size
+        n_step = self.stft_step
+
+        # preemphasis filter
+        coef = self.preemphasis_coef
+        b = np.array([1.0, -coef], x.dtype)
+        a = np.array([1.0], x.dtype)
+        preemphasis_filtered = signal.lfilter(b, a, x)
+
+        # mel weights
+        # nfft - 1 because onesided=False cuts off last bin
+        weights = np.zeros((n_mels, n_fft - 1), dtype="float32")
+
+        fftfreqs = np.linspace(0, float(sr) / 2., n_fft - 1, endpoint=True)
+
+        min_mel = herz_to_mel(fmin)
+        max_mel = herz_to_mel(fmax)
+        mels = np.linspace(min_mel, max_mel, n_mels + 2)
+        mel_f = mel_to_herz(mels)[:, 0]
+
+        fdiff = np.diff(mel_f)
+        ramps = np.subtract.outer(mel_f, fftfreqs)
+
+        for i in range(n_mels):
+            # lower and upper slopes for all bins
+            lower = -ramps[i] / float(fdiff[i])
+            upper = ramps[i + 2] / float(fdiff[i + 1])
+
+            # .. then intersect them with each other and zero
+            weights[i] = np.maximum(0., np.minimum(lower, upper))
+        # slaney style norm
+        enorm = 2.0 / (mel_f[2 : n_mels + 2] - mel_f[:n_mels])
+        weights *= enorm[:, np.newaxis]
+        mel_weights = weights
+
+        # do stft
+        ref_level_db = self.ref_level_db
+        min_level_db = self.min_level_db
+        def _amp_to_db(a):
+            min_level = np.exp(min_level_db / 20. * np.log(10))
+            return 20 * np.log10(np.maximum(min_level, a))
+
+        # ONE SIDED MUST BE FALSE!!!!!!!!
+        abs_stft = np.abs(stft(preemphasis_filtered, fftsize=n_fft, step=n_step, real=True, compute_onesided=False))
         melspec_ref = _amp_to_db(np.dot(mel_weights, abs_stft.T)) - ref_level_db
         melspec_clip = np.clip((melspec_ref - min_level_db) / -min_level_db, 0, 1)
         return melspec_clip.T

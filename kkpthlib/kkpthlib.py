@@ -5306,6 +5306,8 @@ class AttentionMelNetTier(torch.nn.Module):
                                scale=scale,
                                name=name + "_output_proj",
                                device=device)
+        # used for hook registering alternative softplus for numerical stability
+        self._softplus = None
 
     def _time2freq(self, inp):
         inp = inp.reshape((self.n_vert, self.batch_size, self.n_horiz, -1))
@@ -5507,6 +5509,9 @@ class AttentionMelNetTier(torch.nn.Module):
             #_attention_step(self, h_i, memory, memory_mask, ksi):
             # condition on input sequence length
             phi_hat = self.attn_proj([h_i])
+            # cast to 32 bit
+            orig_dtype = phi_hat.dtype
+            phi_hat = phi_hat.float()
 
             #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
             # clamp beta so it doesn't collapse?
@@ -5514,7 +5519,51 @@ class AttentionMelNetTier(torch.nn.Module):
             # changes based on GMMv2 of https://arxiv.org/pdf/1910.10288.pdf
             # as well as https://arxiv.org/pdf/1811.07240.pdf
             ksi = previous_attn
-            kappa = ksi + F.softplus(phi_hat[:, :self.attention_mixture_components])
+            ksi = ksi.float()
+
+            """
+            if self._softplus is None:
+                # hook it into the main module to keep a reference around
+                self._softplus = torch.nn.Softplus()
+                '''
+                     output z  (grad_output)
+                     ___________
+                     |         |
+                     |  layer  |
+                     |_________|
+
+                     input x  (grad_input)
+                '''
+                def hook(module, grad_input, grad_output):
+                    return (sigmoid(grad_output[0]),)
+
+                self._softplus.register_backward_hook(hook)
+
+            alt_softplus = self._softplus
+            """
+
+            def alt_log1p(x):
+                # https://www.johndcook.com/blog/2012/07/25/trick-for-computing-log1x/
+                # we dirty hack this to avoid div by 0 since torch.where has issues with NaN grad
+                # if *either* branch has inf
+                # https://github.com/pytorch/pytorch/issues/4132
+                y = 1. + x
+                z = y - 1.
+                res = 0. * x
+                z_mask = (z == 0)
+                res[z_mask] = x[z_mask]
+                z_nonmask = (z != 0)
+                res[z_nonmask] = x[z_nonmask] * torch.log(y[z_nonmask]) / (z[z_nonmask])
+                #return torch.where(z == 0, x, x * torch.log(y) / z)
+                return res
+
+            def alt_softplus(x):
+                # https://stackoverflow.com/questions/44230635/avoid-overflow-with-softplus-function-in-python
+                return alt_log1p(torch.exp(-torch.abs(x))) + torch.where(x > 0, x, 0. * x)
+
+            kappa = ksi + alt_softplus(phi_hat[:, :self.attention_mixture_components]) #+ 1E-2
+            #kappa = ksi + swish(phi_hat[:, :self.attention_mixture_components])
+
             #beta = (F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-4)
             #beta = torch.clamp(torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.5)
             # fix beta to 1 - hack city but works!
@@ -5523,20 +5572,93 @@ class AttentionMelNetTier(torch.nn.Module):
             # aggressive clamping here, use softplus to help stability as well
             #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.25, max=2.0)
             #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.01, max=10.0)
-            beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.1, max=2.0)
+            #beta = F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+
+            beta = alt_softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components] + 3.)
+            # add constant 3 to beta, so the default for beta is "large" at init
+            # model can learn biases to overcome this if it wants small beta
+
+            #beta = swish(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+            #beta = swish(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
 
             alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+            #alpha = F.softplus(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components]) + 1E-2
+            #alpha = F.log_softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
 
             u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
+            #u_L = u + 0.5
+            #u_R = u - 0.5
+
+            # try like this for the following reason...
+            # eqn 22 of paper
+            # F(u + .5; g) - F(u - 0.5; g)
+            # means F(u; g) = 1./(1 + exp((k - u) / B))
+            # we can interpret this as either SUBTITUTING u + 0.5 for u, or simply adding/subtracting on 0.5. This would swap the 2 terms
+            # interpreting as simply adding 0.5 to the end means
+            # sigm(x) = 1./(1+exp(-x))
+            # x = ((-k + u) / B) = ((u - k) / B)
+            # sigm((u - .5 - k) / B) as the left hand
+            # sigm((u + .5 - k) / B) as the right hand
+            # alternately, interpreting as substituting u - .5 for u
+            # sigm((u + .5 - k) / B) as the left hand
+            # sigm((u - .5 - k) / B) as the right hand
+            # noting that we can multiply or divide by beta, if beta is constrained from 0 to inf
+            # since / by a number from 0->1 is the same as multiplying by 1->inf
+            # aka beta can parameterize the division term, or 1 / division
+            # parameterizing the 1 / division means that we don't face edge cases for beta near 0, as 1/inf -> 0 and 1/0. -> inf
             u_L = u + 0.5
             u_R = u - 0.5
 
-            termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
-            termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
-            weights = termL - termR
+            """
+            alternative?
+            TANH(t) = [1 - exp(-2t)]/[1 + exp(-2t)]  for  t>=0
+            and
+            TANH(t) = [exp(2t) - 1]/[exp(2t) + 1] for t<0
+            """
 
-            termination = 1. - termL[:, 0]
+            # we approximate tanh with x/(1+abs(x))
+            def alt_tanh(x):
+                return x / (1. + torch.abs(x))
+            # logistic can be expressed as 1/2 + 1/2 * tanh((x - u)/(2 * s)) instead of sigmoid
+            # if beta is 1/s, this is .5 * beta
+            def term(u, k, b):
+                return .5 + .5 * alt_tanh((u - k) * .5 * b)
+
+            #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+
+            termL = torch.sum(alpha[..., None] * term(u_L, kappa[..., None], beta[..., None]), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * term(u_R, kappa[..., None], beta[..., None]), keepdim=True, dim=1)
+
+            diff = (term(u_L, kappa[..., None], beta[..., None]) - term(u_R, kappa[..., None], beta[..., None]))
+            weights = torch.sum(alpha[..., None] * diff, keepdim=True, dim=1)
+
+            #termL = torch.logsumexp(alpha[..., None] + torch.nn.functional.logsigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR = torch.logsumexp(alpha[..., None] + torch.nn.functional.logsigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR_mask = torch.abs(termR < 1).type(termR.dtype)
+            #termR = termR * termR_mask + 1 * (1. - termR_mask)
+
+            #weights = termL - termR
+
+            #weights = torch.exp(termL) - torch.exp(termR)
+            #weights = torch.exp(termL / termR)
+
+            #termL = alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None]))
+            #termR = alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None]))
+            #termL = torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None]))
+            #termR = torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None]))
+
+            #weights = torch.sum(alpha[..., None] * (termL - termR), keepdim=True, dim=1)
+
+            termination = 1. - torch.exp(termL[:, 0])
             weights = memory_mask.transpose(0, 1)[:, None, :] * weights
+
+            weights = weights.to(orig_dtype)
+            kappa = kappa.to(orig_dtype)
+            beta = beta.to(orig_dtype)
+            alpha = alpha.to(orig_dtype)
+            termination = termination.to(orig_dtype)
+
             context = torch.bmm(weights, memory.permute(1, 0, 2))
             # context is B, 1, D
             # weights B, 1, mem_T 
@@ -5549,6 +5671,9 @@ class AttentionMelNetTier(torch.nn.Module):
             #_attention_step(self, h_i, memory, memory_mask, ksi):
             # condition on input sequence length
             phi_hat = self.attn_proj([h_i])
+            # cast to 32 bit
+            orig_dtype = phi_hat.dtype
+            phi_hat = phi_hat.float()
 
             #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
             # clamp beta so it doesn't collapse?
@@ -5556,7 +5681,51 @@ class AttentionMelNetTier(torch.nn.Module):
             # changes based on GMMv2 of https://arxiv.org/pdf/1910.10288.pdf
             # as well as https://arxiv.org/pdf/1811.07240.pdf
             ksi = previous_attn
-            kappa = ksi + 3. * torch.sigmoid(phi_hat[:, :self.attention_mixture_components])
+            ksi = ksi.float()
+
+            """
+            if self._softplus is None:
+                # hook it into the main module to keep a reference around
+                self._softplus = torch.nn.Softplus()
+                '''
+                     output z  (grad_output)
+                     ___________
+                     |         |
+                     |  layer  |
+                     |_________|
+
+                     input x  (grad_input)
+                '''
+                def hook(module, grad_input, grad_output):
+                    return (sigmoid(grad_output[0]),)
+
+                self._softplus.register_backward_hook(hook)
+
+            alt_softplus = self._softplus
+            """
+
+            def alt_log1p(x):
+                # https://www.johndcook.com/blog/2012/07/25/trick-for-computing-log1x/
+                # we dirty hack this to avoid div by 0 since torch.where has issues with NaN grad
+                # if *either* branch has inf
+                # https://github.com/pytorch/pytorch/issues/4132
+                y = 1. + x
+                z = y - 1.
+                res = 0. * x
+                z_mask = (z == 0)
+                res[z_mask] = x[z_mask]
+                z_nonmask = (z != 0)
+                res[z_nonmask] = x[z_nonmask] * torch.log(y[z_nonmask]) / (z[z_nonmask])
+                #return torch.where(z == 0, x, x * torch.log(y) / z)
+                return res
+
+            def alt_softplus(x):
+                # https://stackoverflow.com/questions/44230635/avoid-overflow-with-softplus-function-in-python
+                return alt_log1p(torch.exp(-torch.abs(x))) + torch.where(x > 0, x, 0. * x)
+
+            kappa = ksi + alt_softplus(phi_hat[:, :self.attention_mixture_components]) + 1E-3
+            #kappa = ksi + swish(phi_hat[:, :self.attention_mixture_components])
+
             #beta = (F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-4)
             #beta = torch.clamp(torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.5)
             # fix beta to 1 - hack city but works!
@@ -5565,20 +5734,92 @@ class AttentionMelNetTier(torch.nn.Module):
             # aggressive clamping here, use softplus to help stability as well
             #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.25, max=2.0)
             #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.01, max=10.0)
-            beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.1, max=2.0)
+            #beta = F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+
+            beta = alt_softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-3
+
+            #beta = swish(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+            #beta = swish(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
 
             alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+            #alpha = F.softplus(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components]) + 1E-2
+            #alpha = F.log_softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
 
             u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
+            #u_L = u + 0.5
+            #u_R = u - 0.5
+
+            # try like this for the following reason...
+            # eqn 22 of paper
+            # F(u + .5; g) - F(u - 0.5; g)
+            # means F(u; g) = 1./(1 + exp((k - u) / B))
+            # we can interpret this as either SUBTITUTING u + 0.5 for u, or simply adding/subtracting on 0.5. This would swap the 2 terms
+            # interpreting as simply adding 0.5 to the end means
+            # sigm(x) = 1./(1+exp(-x))
+            # x = ((-k + u) / B) = ((u - k) / B)
+            # sigm((u - .5 - k) / B) as the left hand
+            # sigm((u + .5 - k) / B) as the right hand
+            # alternately, interpreting as substituting u - .5 for u
+            # sigm((u + .5 - k) / B) as the left hand
+            # sigm((u - .5 - k) / B) as the right hand
+            # noting that we can multiply or divide by beta, if beta is constrained from 0 to inf
+            # since / by a number from 0->1 is the same as multiplying by 1->inf
+            # aka beta can parameterize the division term, or 1 / division
+            # parameterizing the 1 / division means that we don't face edge cases for beta near 0, as 1/inf -> 0 and 1/0. -> inf
+            # however, it means that making small beta we have less precision due to floating point
             u_L = u + 0.5
             u_R = u - 0.5
 
-            termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
-            termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
-            weights = termL - termR
+            """
+            alternative?
+            TANH(t) = [1 - exp(-2t)]/[1 + exp(-2t)]  for  t>=0
+            and
+            TANH(t) = [exp(2t) - 1]/[exp(2t) + 1] for t<0
+            """
 
-            termination = 1. - termL[:, 0]
+            # we approximate tanh with x/(1+abs(x))
+            def alt_tanh(x):
+                return x / (1. + torch.abs(x))
+            # logistic can be expressed as 1/2 + 1/2 * tanh((x - u)/(2 * s)) instead of sigmoid
+            # if beta is 1/s, this is .5 * beta
+            def term(u, k, b):
+                return .5 + .5 * alt_tanh(.5 * (u - k) / b)
+
+            #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+
+            termL = torch.sum(alpha[..., None] * term(u_L, kappa[..., None], beta[..., None]), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * term(u_R, kappa[..., None], beta[..., None]), keepdim=True, dim=1)
+
+            diff = (term(u_L, kappa[..., None], beta[..., None]) - term(u_R, kappa[..., None], beta[..., None]))
+            weights = torch.sum(alpha[..., None] * diff, keepdim=True, dim=1)
+
+            #termL = torch.logsumexp(alpha[..., None] + torch.nn.functional.logsigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR = torch.logsumexp(alpha[..., None] + torch.nn.functional.logsigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR_mask = torch.abs(termR < 1).type(termR.dtype)
+            #termR = termR * termR_mask + 1 * (1. - termR_mask)
+
+            #weights = termL - termR
+
+            #weights = torch.exp(termL) - torch.exp(termR)
+            #weights = torch.exp(termL / termR)
+
+            #termL = alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None]))
+            #termR = alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None]))
+            #termL = torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None]))
+            #termR = torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None]))
+
+            #weights = torch.sum(alpha[..., None] * (termL - termR), keepdim=True, dim=1)
+
+            termination = 1. - torch.exp(termL[:, 0])
             weights = memory_mask.transpose(0, 1)[:, None, :] * weights
+
+            weights = weights.to(orig_dtype)
+            kappa = kappa.to(orig_dtype)
+            beta = beta.to(orig_dtype)
+            alpha = alpha.to(orig_dtype)
+            termination = termination.to(orig_dtype)
+
             context = torch.bmm(weights, memory.permute(1, 0, 2))
             # context is B, 1, D
             # weights B, 1, mem_T 
@@ -5750,20 +5991,20 @@ class AttentionMelNetTier(torch.nn.Module):
             h_i, c_i = h_t, c_t
         # skip hidden? for better attn control?
         if self.attention_type == "sigmoid_logistic":
-            contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+            out_contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
         if self.attention_type == "sigmoid_logistic_alt":
-            contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+            out_contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
         elif self.attention_type == "gaussian":
-            contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+            out_contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
         else:
-            contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+            out_contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
         #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
         #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + tds
         # decoder_T, B, D
         # absolutely no bypassing this?
         # decoder_T, B, encoder_T
         alignments = torch.cat(weights, axis=0)
-        return contexts, alignments, all_extras
+        return out_contexts, alignments, all_extras
 
     # conditional first tier
     def forward(self, list_of_inputs, list_of_spatial_conditions=None, bypass_td=None, bypass_fd=None, skip_input_embed=False,
