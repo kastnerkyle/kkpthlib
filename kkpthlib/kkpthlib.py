@@ -5736,7 +5736,7 @@ class AttentionMelNetTier(torch.nn.Module):
             #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.01, max=10.0)
             #beta = F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
 
-            beta = alt_softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-3
+            beta = alt_softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
 
             #beta = swish(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
             #beta = swish(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
@@ -5783,7 +5783,9 @@ class AttentionMelNetTier(torch.nn.Module):
             # logistic can be expressed as 1/2 + 1/2 * tanh((x - u)/(2 * s)) instead of sigmoid
             # if beta is 1/s, this is .5 * beta
             def term(u, k, b):
-                return .5 + .5 * alt_tanh(.5 * (u - k) / b)
+                #return .5 + .5 * alt_tanh(.5 * (u - k) / b)
+                # limit min beta to .01
+                return .5 + .5 * alt_tanh(.5 * (u - k) * (b + .01))
 
             #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
             #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
@@ -5813,6 +5815,10 @@ class AttentionMelNetTier(torch.nn.Module):
 
             termination = 1. - torch.exp(termL[:, 0])
             weights = memory_mask.transpose(0, 1)[:, None, :] * weights
+
+            # grad scaling here
+            grad_rescale = 1. / np.sqrt(self.attention_mixture_components)
+            weights = (1. - grad_rescale) * weights.detach() + grad_rescale * weights
 
             weights = weights.to(orig_dtype)
             kappa = kappa.to(orig_dtype)

@@ -172,6 +172,20 @@ speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              train_split=fraction_train_split,
                              random_state=data_random_state)
 
+"""
+s = 0
+while True:
+    els = speech.get_utterances(input_real_batch_size, speech.train_keys, skip_mel=False)
+    #els = speech.get_utterances(input_real_batch_size, speech.valid_keys, skip_mel=False)
+    cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(els,
+                                                                                        quantize_to_n_bins=None)
+
+    print("format test {}".format(s))
+    from IPython import embed; embed(); raise ValueError()
+    s += 1
+    if s > 10:
+        from IPython import embed; embed(); raise ValueError()
+"""
 
 """
 els = speech.get_utterances(1, speech.train_keys, skip_mel=False)

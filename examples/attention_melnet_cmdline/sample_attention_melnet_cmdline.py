@@ -254,6 +254,7 @@ speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              wav_folder=folder_base + "/wavs/",
                              alignment_folder=folder_base + "/alignment_json/",
                              fixed_minibatch_time_secs=fixed_minibatch_time_secs,
+                             extract_subsequences=False,
                              train_split=fraction_train_split,
                              random_state=data_random_state)
 

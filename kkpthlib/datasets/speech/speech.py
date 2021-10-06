@@ -23,6 +23,7 @@ class EnglishSpeechCorpus(object):
                        min_length_words=3, max_length_words=100,
                        min_length_symbols=7, max_length_symbols=200,
                        min_length_time_secs=2, max_length_time_secs=None,
+                       extract_subsequences=True,
                        fixed_minibatch_time_secs=6,
                        build_skiplist=True,
                        random_state=None):
@@ -40,6 +41,7 @@ class EnglishSpeechCorpus(object):
         if max_length_time_secs is None:
             max_length_time_secs = fixed_minibatch_time_secs
         self.max_length_time_secs = max_length_time_secs
+        self.extract_subsequences = extract_subsequences
 
         self.cached_mean_vec_ = None
         self.cached_std_vec_ = None
@@ -156,7 +158,7 @@ class EnglishSpeechCorpus(object):
         # add start symbol
         self.phone_lookup["$"] = sil_val
         sil_val += 1
-        # add started on a continue symbol
+        # add continuation symbol
         self.phone_lookup["&"] = sil_val
         sil_val += 1
         # add eos symbol
@@ -274,6 +276,7 @@ class EnglishSpeechCorpus(object):
                        min_length_words=None, max_length_words=None,
                        min_length_symbols=None, max_length_symbols=None,
                        min_length_time_secs=None, max_length_time_secs=None,
+                       extract_subsequences=None,
                        do_not_filter=False):
         if min_length_words is None:
             min_length_words = self.min_length_words
@@ -287,6 +290,8 @@ class EnglishSpeechCorpus(object):
             min_length_time_secs = self.min_length_time_secs
         if max_length_time_secs is None:
             max_length_time_secs = self.max_length_time_secs
+        if extract_subsequences is None:
+            extract_subsequences = self.extract_subsequences
 
         utts = []
         used_keys = []
@@ -294,10 +299,13 @@ class EnglishSpeechCorpus(object):
         idx = self.random_state.choice(len(all_keys), 100 * size)
         for ii in idx:
             utt = self._fetch_utterance(all_keys[ii], skip_mel=skip_mel)
+            utt[3]["flagged_for_subsequence"] = False
+
             # fs, d, melspec, info
             core_key = list(utt[-1].keys())[0]
             word_length = len(utt[-1][core_key]["transcript"].split(" "))
-            time_length = len(utt[1]) / float(utt[0])
+            # add on 4 window buffer to time length calc
+            time_length = (len(utt[1]) + (4 * self.stft_size)) / float(utt[0])
             #print("{}".format(utt[-1][core_key]["transcript"]))
             #print("time_length {}".format(time_length))
             phoneme_parts = [len(el["phones"]) for el in utt[-1][core_key]["full_alignment"]["words"]]
@@ -313,9 +321,59 @@ class EnglishSpeechCorpus(object):
                     continue
                 if symbol_length > max_length_symbols or symbol_length < min_length_symbols:
                     continue
-                if time_length > max_length_time_secs or time_length < min_length_time_secs:
-                    # we could split this into subparts? potentially to make use of more data...
+                if time_length < min_length_time_secs:
                     continue
+                if self.extract_subsequences == False:
+                    if time_length > max_length_time_secs:
+                        continue
+                else:
+                    if time_length >= min_length_time_secs:
+                        # since self.extract_subsequences was set at init, we check that there is at least 1 valid subsequence
+                        # when splitting on word boundaries
+                        # looking for gaps between words of a moderate length for the ideal split (>.01s)
+                        this_k = list(utt[3].keys())[0]
+                        aligned_words = utt[3][this_k]["full_alignment"]["words"]
+                        w_0 = np.array([w["end"] for w in aligned_words[:-1]])
+                        w_1 = np.array([w["start"] for w in aligned_words[1:]])
+                        gaps = w_1 - w_0
+                        if np.any(gaps > .01):
+                            # there is at least one valid split point
+                            # now we check that the split subsequence has at least one part
+                            # which is a valid length subsequence aka
+                            proposed_splits = list(np.where(gaps > .01)[0])
+                            all_proposed_subwords = []
+                            for p in proposed_splits:
+                                if p == (len(aligned_words) - 1):
+                                    # skip checking if it is at the very end
+                                    continue
+                                # +1 because we use the *end* of the entries!
+                                all_proposed_subwords.append(aligned_words[:p+1])
+                                all_proposed_subwords.append(aligned_words[p+1:])
+
+                            for subwords in all_proposed_subwords:
+                                subword_length = len(subwords)
+
+                                subphoneme_length = [len(sw["phones"]) for sw in subwords]
+                                subchar_length = [len(sw["alignedWord"]) for sw in subwords]
+
+                                # add on len(phoneme_parts) - 1 to account for added spaces
+                                subphoneme_length = sum(subphoneme_length) + len(subphoneme_length) + 1
+                                subchar_length = sum(subchar_length) + len(subchar_length) + 1
+                                # just use the min for filtering, should be close in length for most cases
+                                subsymbol_length = min(subchar_length, subphoneme_length)
+                                subtime_length = subwords[-1]["end"] - subwords[0]["start"]
+
+                                if subword_length > max_length_words or subword_length < min_length_words:
+                                    continue
+                                if subsymbol_length > max_length_symbols or subsymbol_length < min_length_symbols:
+                                    continue
+                                if subtime_length < min_length_time_secs:
+                                    continue
+                                utt[3]["flagged_for_subsequence"] = True
+                                break
+                        else:
+                            # no splits of > .01, ignore this utt for processing
+                            continue
 
             utts.append(utt)
             used_keys.append(all_keys[ii])
@@ -356,11 +414,28 @@ class EnglishSpeechCorpus(object):
     def format_minibatch(self, utterances,
                          symbol_type="phoneme",
                          pause_duration_breakpoints=None,
+                         write_out_debug_info=False,
                          quantize_to_n_bins=None):
         if pause_duration_breakpoints is None:
             pause_duration_breakpoints = self.pause_duration_breakpoints
+
         phoneme_sequences = []
         melspec_sequences = []
+
+        fs, _, _, _ = utterances[0]
+        overlap_len = ((self.max_length_time_secs * fs) + self.stft_size) % self.stft_size
+        max_frame_count = (((self.max_length_time_secs * fs) + self.stft_size) - overlap_len) / self.stft_step
+        divisors = [2, 4, 8]
+        for di in divisors:
+            # nearest divisble number above, works because largest divisor divides by smaller
+            # we need something that has a length in time (frames) divisible by 2 4 and 8 due to the nature of melnet
+            # same for frequency but frequency is a power of 2 so no need to check it
+            q = int(max_frame_count / di)
+            if float(max_frame_count / di) == int(max_frame_count / di):
+                max_frame_count = di * q
+            else:
+                max_frame_count = di * (q + 1)
+        assert max_frame_count == int(max_frame_count)
 
         if symbol_type != "phoneme":
             raise ValueError("Only supporting symbol_type phoneme for now")
@@ -368,12 +443,170 @@ class EnglishSpeechCorpus(object):
         if symbol_type == "phoneme":
             if self.alignment_folder is None:
                 raise ValueError("symbol_type phoneme minibatch formatting not supported without 'aligment_folder' argument to speech corpus init!")
-            for utt in utterances:
+            for u_i, utt in enumerate(utterances):
                 fs, d, melspec, al = utt
-                melspec_sequences.append(melspec)
                 k = list(al.keys())[0]
-                phone_groups = [el["phones"] for el in al[k]["full_alignment"]["words"]]
-                start_stop = [(el["start"], el["end"]) for el in al[k]["full_alignment"]["words"]]
+                words = al[k]["full_alignment"]["words"]
+                # start_to_end is no crop
+                crop_type = "start_to_end"
+                if al["flagged_for_subsequence"] == True or melspec.shape[0] > max_frame_count:
+                    # assume gap check was done already
+                    w_0 = np.array([w["end"] for w in words[:-1]])
+                    w_1 = np.array([w["start"] for w in words[1:]])
+                    gaps = w_1 - w_0
+                    # there is at least one valid split point
+                    # now we check that the split subsequence has at least one part
+                    # which is a valid length subsequence aka
+                    # add 1 because the split is at the end of the word
+                    proposed_splits = list(np.where(gaps > .01)[0] + 1)
+                    start_to_mid = []
+                    mid_to_mid = []
+                    mid_to_end = []
+                    # assume we can always cut on the end of a word to make a chunk fit within "fixed_minibatch_time_secs"
+                    for ii, p in enumerate(proposed_splits):
+                        # here we build "fake" subsets, putting in 3 categories
+                        # start:somewhere
+                        # somewhere:somewhere
+                        # somewhere:end
+                        # want to (ideally) do a 33% chance for each type
+                        # need to check a lot per each split
+                        # if nothing else, we *can* split on a random word to make it fit the minibatch size / max_time_length_secs
+                        all_non_self_splits = [p2 for jj, p2 in enumerate(proposed_splits) if jj != ii]
+                        all_non_self_splits = [0] + all_non_self_splits + [len(words)]
+                        # inclusive split since gap check was at the end
+                        for jj, p2 in enumerate(all_non_self_splits):
+                            le = min(p, p2)
+                            re = max(p, p2)
+                            tsplit = words[le:re]
+                            # 4 window buffer on check (2 each side)
+                            sub_dur = tsplit[-1]["end"] - tsplit[0]["start"] + (1. / fs * 4 * self.stft_size)
+                            if sub_dur > self.min_length_time_secs and sub_dur < self.max_length_time_secs:
+                                if le == 0:
+                                    # last entry in tuple for whether it was cropped or whole
+                                    start_to_mid.append((tsplit, le, re, False))
+                                elif le != 0 and re != len(words):
+                                    mid_to_mid.append((tsplit, le, re, False))
+                                elif re == len(words):
+                                    mid_to_end.append((tsplit, le, re, False))
+                                else:
+                                    print("fall through case in crop check should never happen, 1")
+                                    from IPython import embed; embed(); raise ValueError()
+                            elif sub_dur > self.max_length_time_secs:
+                                # if still too long, crop it short to the nearest word to self.max_length_time_secs 
+                                # if has start or mid le crop the end
+                                # if end crop from start to be sure and include end
+                                if le == 0 or re != len(words):
+                                    # was beginning or mid chunk, crop the end of segment
+                                    re_tmp = le + 1
+                                    while True:
+                                        tsplit_tmp = words[le:re_tmp]
+                                        sub_dur_tmp = tsplit_tmp[-1]["end"] - tsplit_tmp[0]["start"] + (1. / fs * 4 * self.stft_size)
+                                        # include a 4 window buffer on the max length check
+                                        if (sub_dur_tmp + (1./fs * 4 * self.stft_size)) > self.max_length_time_secs:
+                                            # we assume here that one word cannot put us above the max length
+                                            tsplit = words[le:re_tmp - 1]
+                                            if le == 0:
+                                                start_to_mid.append((tsplit, le, re_tmp -1, True))
+                                            else:
+                                                mid_to_mid.append((tsplit, le, re_tmp -1, True))
+                                            break
+                                        if re_tmp >= re:
+                                            print("fall through case in crop check should never happen, 2")
+                                            from IPython import embed; embed(); raise ValueError()
+                                            break
+                                        re_tmp = re_tmp + 1
+                                else:
+                                    # crop the front, was an end segment
+                                    le_tmp = re - 1
+                                    while True:
+                                        tsplit_tmp = words[le_tmp:re]
+                                        sub_dur_tmp = tsplit_tmp[-1]["end"] - tsplit_tmp[0]["start"] + (1. / fs * 4 * self.stft_size)
+                                        # include a 4 window buffer on the max length check
+                                        if sub_dur_tmp > self.max_length_time_secs:
+                                            # we assume here that one word cannot put us above the max length
+                                            tsplit = words[le_tmp + 1:re]
+                                            mid_to_end.append((tsplit, le_tmp, re, True))
+                                            break
+                                        if le_tmp <= le:
+                                            print("fall through case in crop check should never happen, 3")
+                                            from IPython import embed; embed(); raise ValueError()
+                                            break
+                                        le_tmp = le_tmp - 1
+                            else:
+                                # chunk was too short to use due to configured min length
+                                pass
+                    # choose a single crop to use from availables
+                    # prefer non-cropped versions, but if a cropped one is necessary use that instead
+                    selected_seq = None
+                    for is_cropped in [False, True]:
+                        start_to_mid_tmp = [t for t in start_to_mid if t[-1] == is_cropped]
+                        mid_to_mid_tmp = [t for t in mid_to_mid if t[-1] == is_cropped]
+                        mid_to_end_tmp = [t for t in mid_to_end if t[-1] == is_cropped]
+                        choices = [0, 1, 2]
+                        comb = [start_to_mid_tmp, mid_to_mid_tmp, mid_to_end_tmp]
+                        # shuffle choices of start to mid mid to mid mid to end
+                        self.random_state.shuffle(choices)
+                        for c in choices:
+                            if len(comb[c]) == 0:
+                                pass
+                            else:
+                                selected = self.random_state.choice(len(comb[c]))
+                                selected_seq = comb[c][selected]
+                                if c == 0:
+                                    crop_type = "start_to_mid"
+                                elif c == 1:
+                                    crop_type = "mid_to_mid"
+                                elif c == 2:
+                                    crop_type = "mid_to_end"
+                                break
+                        if selected_seq is not None:
+                            break
+
+                        if is_cropped and selected_seq is None:
+                            print("ERROR IN CROP SELECTION! DEBUG THIS")
+                            from IPython import embed; embed(); raise ValueError()
+                    # now that we (finally) selected the subcrop, cut d to match (accounting for the fact that we already cut off some samples)!
+                    # recalculate melspec
+                    # set words to the part we cut
+                    # replace d with sliced version, recalculate melspec, split && truncate the alignment to a subsequence which is valid
+                    # according to the initial rules of the data loader
+                    words = selected_seq[0]
+
+                    # some amount may have already been trimmed, need to account for this when calculating the offset slice bounds
+                    # since the original alignment times are based on a wav file with no cuts!
+                    pre_offset = utt[3]["start_offset_precut_in_samples"]
+
+                    end_in_samples = fs * words[-1]["end"]
+                    end_in_samples -= pre_offset
+                    end_in_samples = int(max(end_in_samples, 0))
+
+                    start_in_samples = fs * words[0]["start"]
+                    start_in_samples -= pre_offset
+                    start_in_samples = int(max(start_in_samples, 0))
+
+                    gap_samp = end_in_samples - start_in_samples + (4 * self.stft_size)
+                    gap_s = gap_samp / float(fs)
+                    if gap_s > self.max_length_time_secs:
+                        print("ERROR FORMATTING CROP SAMPLE, DEBUG!")
+                        from IPython import embed; embed(); raise ValueError()
+
+                    # get new wav and melspec cuts
+                    # should we window the wav cut?
+                    # already has pre-emph filtering...
+                    d2 = copy.deepcopy(d[start_in_samples:end_in_samples])
+                    melspec2 = copy.deepcopy(self._melspectrogram_preprocess(d2, fs))
+                    if melspec2.shape[0] > max_frame_count:
+                        print("ERROR IN FRAME COUNT FOR CROP SAMPLE, DEBUG!")
+                        from IPython import embed; embed(); raise ValueError()
+
+                    del melspec
+                    del d
+                    melspec = melspec2
+                    d = d2
+
+                melspec_sequences.append(melspec)
+                phone_groups = [el["phones"] for el in words]#al[k]["full_alignment"]["words"]]
+                start_stop = [(el["start"], el["end"]) for el in words]#al[k]["full_alignment"]["words"]]
                 gaps = []
                 last_end = 0
                 for _s in start_stop:
@@ -394,14 +627,41 @@ class EnglishSpeechCorpus(object):
                 # reverse iterate pause duration breakpoints to quantized gap values
                 gaps_arr = gaps_arr.astype("int32")
                 phone_group_syms = [[pgi["phone"] for pgi in pg] for pg in phone_groups]
-                flat_phones_and_gaps = ["$"]
+
+                # change flat phones and gaps based on if it was start_to_mid mid_to_mid mid_to_end or un-cropped (start to end)
+                if "start_to" in crop_type:
+                    # start of sentence symbol
+                    flat_phones_and_gaps = ["$"]
+                else:
+                    # continuation symbol
+                    flat_phones_and_gaps = ["&"]
                 for _n in range(len(phone_group_syms)):
                     flat_phones_and_gaps.append("!{}".format(gaps_arr[_n]))
                     flat_phones_and_gaps.extend(phone_group_syms[_n])
-                flat_phones_and_gaps.append("~")
+
+                if "to_end" in crop_type:
+                    # eos symbol
+                    flat_phones_and_gaps.append("~")
+                else:
+                    # continuation symbol
+                    flat_phones_and_gaps.append("&")
                 flat_phones_and_gaps.append("!{}".format(gaps_arr[-1]))
                 seq_as_ints = [self.phone_lookup[s] for s in flat_phones_and_gaps]
                 phoneme_sequences.append(seq_as_ints)
+
+                if write_out_debug_info:
+                    # test write to listen to some samples
+                    from kkpthlib.datasets.speech.audio_processing.audio_tools import soundsc
+                    fldr = "tmp_test_debug_minibatch_format/"
+                    if not os.path.exists(fldr):
+                        os.mkdir(fldr)
+                    wavfile.write(fldr + "out_{}.wav".format(u_i), fs, soundsc(d))
+                    full_w = al[list(al.keys())[0]]["transcript"]
+                    part_w = " ".join([w["word"] for w in words])
+                    with open(fldr + "out_{}.txt".format(u_i), "w") as f:
+                        f.write("Part: {}\n".format(part_w))
+                        f.write("Full: {}\n".format(full_w))
+
         # pad it out so all are same length
         max_seq_len = max([len(ps) for ps in phoneme_sequences])
         # mask and padded sequence
@@ -410,22 +670,14 @@ class EnglishSpeechCorpus(object):
         phoneme_sequences = [ps + (max_seq_len - len(ps)) * [self.phone_lookup["_"]] for ps in phoneme_sequences]
         phoneme_sequences = np.array(phoneme_sequences).astype("float32").T
 
-        overlap_len = ((self.max_length_time_secs * fs) + self.stft_size) % self.stft_size
-
-        max_frame_count = (((self.max_length_time_secs * fs) + self.stft_size) - overlap_len) / self.stft_step
-        divisors = [2, 4, 8]
-        for di in divisors:
-            # nearest divisble number above, works because largest divisor divides by smaller
-            q = int(max_frame_count / di)
-            if float(max_frame_count / di) == int(max_frame_count / di):
-                max_frame_count = di * q
-            else:
-                max_frame_count = di * (q + 1)
-        assert max_frame_count == int(max_frame_count)
         melspec_seq_mask = [[1.] * ms.shape[0] + [0.] * int(max_frame_count - ms.shape[0]) for ms in melspec_sequences]
         melspec_seq_mask = np.array(melspec_seq_mask)
         padded_melspec_sequences = []
-        for ms in melspec_sequences:
+        for el_i, ms in enumerate(melspec_sequences):
+            if ms.shape[0] > max_frame_count:
+                print("got melspec shape larger than theoretical max frame count?")
+                from IPython import embed; embed(); raise ValueError()
+
             melspec_padded = 0. * melspec[:1, :] + np.zeros((int(max_frame_count), 1)).astype("float32")
             melspec_padded[:len(ms)] = ms
             padded_melspec_sequences.append(melspec_padded)
@@ -460,7 +712,15 @@ class EnglishSpeechCorpus(object):
             start_in_samples = int(max(start_in_samples, 0))
             # cut a little bit before the start
             if self.cut_on_alignment:
+                overall_len = len(d)
                 d = d[start_in_samples:end_in_samples]
+                this_info["original_len_samples"] = overall_len
+                this_info["start_offset_precut_in_samples"] = start_in_samples
+                this_info["end_offset_precut_in_samples"] = overall_len - end_in_samples
+            else:
+                this_info["original_len_samples"] = overall_len
+                this_info["start_offset_precut_in_samples"] = 0
+                this_info["end_offset_precut_in_samples"] = 0
             this_info[basename]["full_alignment"] = alignment
             this_info[basename]["transcript"] = alignment["transcript"]
         if skip_mel:
