@@ -6017,6 +6017,7 @@ class AttentionMelNetTier(torch.nn.Module):
                       memory=None, memory_mask=None):
         # by default embed the inputs, otherwise bypass
         # condidering axis 2 time 3 frequency
+        # batch, mel_time, mel_freq, feats
 
         # shift and project the input
         if len(list_of_inputs) > 1:
@@ -6092,6 +6093,1426 @@ class AttentionMelNetTier(torch.nn.Module):
             #return (0.5 ** 0.5) * layer_norm(l, eps=1E-4)
 
         def layer_norm(x, dim=-1, eps=1E-5):
+            mean = torch.mean(x, dim=dim, keepdim=True)
+            var = torch.square(x - mean).mean(dim=dim, keepdim=True)
+            return (x - mean) / torch.sqrt(var + eps)
+
+
+        for _i in range(self.n_layers):
+            td_x_o = self._td_stack(td_x_i, _i)
+            if self.has_centralized_stack:
+                if _i == (self.n_layers // 2) and self.has_attention:
+                    cd_att, alignment, attn_extras = self._attention(cd_x_i, _i, memory, memory_mask)
+                    has_cd_att = True
+                    # should this just replace the centralized stack here?
+                    cd_x_o = self._cd_centralized_stack(res(cd_x_i + cd_att), _i)
+                    fd_x_o = self._fd_stack(res(td_x_o + td_x_i), fd_x_i, _i, tds_cent=res(cd_x_o + cd_x_i + cd_att))
+                else:
+                    if has_cd_att is False:
+                        cd_x_o = self._cd_centralized_stack(cd_x_i, _i)
+                        fd_x_o = self._fd_stack(res(td_x_o + td_x_i), fd_x_i, _i, tds_cent=res(cd_x_i + cd_x_o))
+                    else:
+                        cd_x_o = self._cd_centralized_stack(cd_x_i + cd_att, _i)
+                        fd_x_o = self._fd_stack(res(td_x_o + td_x_i), fd_x_i, _i, tds_cent=res(cd_x_o + cd_x_i + cd_att))
+            else:
+                fd_x_o = self._fd_stack(res(td_x_o + td_x_i), fd_x_i, _i)
+            fd_x_i = res(fd_x_o + fd_x_i)
+            td_x_i = res(td_x_o + td_x_i)
+            if self.has_centralized_stack:
+                cd_x_i = res(cd_x_o + cd_x_i)
+                # don't add in the attention because we manually add it everwhere cd_x_i is used
+                #cd_x_i = cd_x_o + cd_x_i + cd_att
+            # set to none to be ensure no "carryover" / errors
+            td_x_o = None
+            fd_x_o = None
+            cd_x_o = None
+        out = self.out_proj([fd_x_i])
+        out = out.reshape((self.n_horiz, self.batch_size, self.n_vert, self.output_size))
+        out = out.permute((1, 2, 0, 3))
+        if self.has_attention:
+            return out, alignment, attn_extras
+        else:
+            return out
+
+
+class YAMNetFullContextSubTier(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_sizes,
+                 n_vert,
+                 n_horiz,
+                 hidden_dim,
+                 n_layers,
+                 # defaults for 380/900 setup
+                 n_heads=10,
+                 head_dim=38,
+                 inner_dim=900,
+                 init=None,
+                 scale="default",
+                 biases=True,
+                 bias_offset=0.,
+                 name=None,
+                 cell_dropout=1.,
+                 use_centralized_stack=False,
+                 random_state=None, strict=None,
+                 dtype="default", device="default"):
+        super(YAMNetFullContextSubTier, self).__init__()
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass instance of np.random.RandomState!")
+
+        if strict is None:
+            strict = get_strict_mode_default()
+
+        self.input_size = sum(list_of_input_sizes)
+
+        self.hidden_size = hidden_dim
+
+        self.cell_dropout = cell_dropout
+        self.n_layers = n_layers
+        self.n_vert = n_vert
+        self.n_horiz = n_horiz
+
+        self.n_heads = n_heads
+        self.head_dim = head_dim
+        self.inner_dim = inner_dim
+
+        self.input_proj = Linear([self.input_size],
+                                 self.hidden_size,
+                                 random_state=random_state,
+                                 init=init,
+                                 scale=scale,
+                                 name=name + "_input_proj",
+                                 device=device)
+
+        self.seq_time_fw = nn.ModuleList()
+        self.seq_time_bw = nn.ModuleList()
+        self.seq_freq_fw = nn.ModuleList()
+        self.seq_freq_bw = nn.ModuleList()
+        self.projs = nn.ModuleList()
+
+        for _i in range(self.n_layers):
+            memory_len=10
+            context_len=0
+            time_fw_layer = AWDTransformerXLDecoderBlock([self.hidden_size,],
+                                                          name=name + "_seq_time_fw_{}".format(_i),
+                                                          n_layers=self.n_layers,
+                                                          n_heads=self.n_heads,
+                                                          head_dim=self.head_dim,
+                                                          model_dim=self.hidden_size,
+                                                          inner_dim=self.inner_dim,
+                                                          random_state=random_state,
+                                                          memory_len=memory_len,
+                                                          context_len=context_len,
+                                                          init=init,
+                                                          scale=scale,
+                                                          device=device)
+            self.seq_time_fw.append(time_fw_layer)
+
+            time_bw_layer = AWDTransformerXLDecoderBlock([self.hidden_size,],
+                                                          name=name + "_seq_time_bw_{}".format(_i),
+                                                          n_layers=self.n_layers,
+                                                          n_heads=self.n_heads,
+                                                          head_dim=self.head_dim,
+                                                          model_dim=self.hidden_size,
+                                                          inner_dim=self.inner_dim,
+                                                          random_state=random_state,
+                                                          memory_len=memory_len,
+                                                          context_len=context_len,
+                                                          init=init,
+                                                          scale=scale,
+                                                          device=device)
+            self.seq_time_bw.append(time_bw_layer)
+
+            freq_fw_layer = AWDTransformerXLDecoderBlock([self.hidden_size,],
+                                                          name=name + "_seq_freq_fw_{}".format(_i),
+                                                          n_layers=self.n_layers,
+                                                          n_heads=self.n_heads,
+                                                          head_dim=self.head_dim,
+                                                          model_dim=self.hidden_size,
+                                                          inner_dim=self.inner_dim,
+                                                          random_state=random_state,
+                                                          memory_len=memory_len,
+                                                          context_len=context_len,
+                                                          init=init,
+                                                          scale=scale,
+                                                          device=device)
+            self.seq_freq_fw.append(freq_fw_layer)
+
+            freq_bw_layer = AWDTransformerXLDecoderBlock([self.hidden_size,],
+                                                          name=name + "_seq_freq_bw_{}".format(_i),
+                                                          n_layers=self.n_layers,
+                                                          n_heads=self.n_heads,
+                                                          head_dim=self.head_dim,
+                                                          model_dim=self.hidden_size,
+                                                          inner_dim=self.inner_dim,
+                                                          random_state=random_state,
+                                                          memory_len=memory_len,
+                                                          context_len=context_len,
+                                                          init=init,
+                                                          scale=scale,
+                                                          device=device)
+            self.seq_freq_bw.append(freq_bw_layer)
+
+            self.projs.append(Linear([4 * self.hidden_size,],
+                                      self.hidden_size,
+                                      random_state=random_state,
+                                      init=init,
+                                      scale=scale,
+                                      name=name + "_projs_{}".format(_i),
+                                      device=device))
+
+    def _time2freq(self, inp):
+        inp = inp.reshape((self.n_vert, self.batch_size, self.n_horiz, -1))
+        inp = inp.permute(2, 1, 0, 3)
+        return inp.reshape((self.n_horiz, self.batch_size * self.n_vert, -1))
+
+    def _freq2time(self, inp):
+        # batch size set in forward!
+        inp = inp.reshape((self.n_horiz, self.batch_size, self.n_vert, -1))
+        inp = inp.permute(2, 1, 0, 3)
+        return inp.reshape((self.n_vert, self.batch_size * self.n_horiz, -1))
+
+    def _stack(self, nds, layer):
+        freq_rnn_fw_h, _ = self.seq_freq_fw[layer](nds)
+        freq_rnn_bw_h, _ = self.seq_freq_bw[layer](torch.flip(nds, [0]))
+        freq_rnn_h = torch.cat((freq_rnn_fw_h, torch.flip(freq_rnn_bw_h, [0])), dim=-1)
+        freq_rnn_h = self._freq2time(freq_rnn_h)
+
+        nds_time = self._freq2time(nds)
+        time_rnn_fw_h, _ = self.seq_time_fw[layer](nds_time)
+        time_rnn_bw_h, _ = self.seq_time_bw[layer](torch.flip(nds_time, [0]))
+        time_rnn_h = torch.cat((time_rnn_fw_h, torch.flip(time_rnn_bw_h, [0])), dim=-1)
+        combined_h = torch.cat((freq_rnn_h, time_rnn_h), dim=-1)
+        res = self.projs[layer]([combined_h])
+        res = self._time2freq(res)
+        return (0.5 ** 0.5) * (nds + res)
+
+    def forward(self, list_of_inputs):
+        # by default embed the inputs, otherwise bypass
+        # condidering axis 2 time 3 frequency
+        # batch, mel_time, mel_freq, feats
+
+        # shift and project the input
+        if len(list_of_inputs) > 1:
+            raise ValueError("Only support list_of_inputs length 1 for now")
+
+        x = list_of_inputs[0]
+
+        batch_size = x.shape[0]
+        self.batch_size = batch_size
+
+        c_x = x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+        c_x = self.input_proj([c_x])
+        c_x = c_x.permute(1, 0, 2)
+        for _i in range(self.n_layers):
+            c_x = self._stack(c_x, _i)
+        out = c_x.reshape((self.n_horiz, self.batch_size, self.n_vert, self.hidden_size))
+        out = out.permute((1, 2, 0, 3))
+        return out
+
+
+class YAMTransformerBlock(torch.nn.Module):
+    def __init__(self,
+                 list_of_input_symbol_sizes,
+                 n_vert,
+                 n_horiz,
+                 hidden_dim,
+                 output_dim,
+                 n_layers,
+                 has_centralized_stack=False,
+                 has_spatial_condition=False,
+                 spatial_condition_input_size=None,
+                 spatial_condition_n_layers=2,
+                 spatial_condition_n_heads=10,
+                 spatial_condition_head_dim=38,
+                 spatial_condition_inner_dim=900,
+                 has_attention=False,
+                 transformer_inner_layers=2,
+                 # defaults for hidden_dim=380...
+                 transformer_n_heads=10,
+                 transformer_head_dim=38,
+                 transformer_inner_dim=900,
+                 cell_type="lstm",
+                 attention_type="sigmoid_logistic",
+                 attention_mixture_components=10,
+                 init=None, scale="default",
+                 biases=True, bias_offset=0.,
+                 name=None,
+                 cell_dropout=1.,
+                 use_centralized_stack=False,
+                 random_state=None, strict=None,
+                 dtype="default", device="default"):
+        super(YAMTransformerBlock, self).__init__()
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass instance of np.random.RandomState!")
+
+        if strict is None:
+            strict = get_strict_mode_default()
+
+        self.input_symbols = list_of_input_symbol_sizes[0]
+        self.cell_type = cell_type
+        self.hidden_size = hidden_dim
+        self.output_size = output_dim
+        self.has_centralized_stack = has_centralized_stack
+
+        self.has_spatial_condition = has_spatial_condition
+        self.spatial_condition_n_layers = spatial_condition_n_layers
+        self.spatial_condition_n_heads = spatial_condition_n_heads
+        self.spatial_condition_head_dim = spatial_condition_head_dim
+        self.spatial_condition_inner_dim = spatial_condition_inner_dim
+
+        self.attention_mixture_components = attention_mixture_components
+        self.has_attention = has_attention
+        self.attention_type = attention_type
+
+        self.transformer_inner_layers = transformer_inner_layers
+        self.transformer_n_heads = transformer_n_heads
+        self.transformer_head_dim = transformer_head_dim
+        self.transformer_inner_dim = transformer_inner_dim
+
+        self.cell_dropout = cell_dropout
+        self.n_layers = n_layers
+        self.n_vert = n_vert
+        self.n_horiz = n_horiz
+        self.output_dim = output_dim
+
+        if self.cell_type == "lstm":
+            bidir_rnn_fn = BiLSTMLayer
+            rnn_fn = LSTMLayer
+            rnn_cell_fn = LSTMCell
+        elif self.cell_type == "gru":
+            bidir_rnn_fn = BiGRULayer
+            rnn_fn = GRULayer
+            rnn_cell_fn = GRUCell
+        else:
+            raise ValueError("Unknown cell_type, self.cell_type was {}".format(self.cell_type))
+
+        #self.embed_td = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_td")
+        #self.embed_fd = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_fd")
+        self.td_input_proj = Linear([1],
+                                             self.hidden_size,
+                                             random_state=random_state,
+                                             init=init,
+                                             scale=scale,
+                                             name=name + "_td_input_proj",
+                                             device=device)
+        self.fd_input_proj = Linear([1],
+                                             self.hidden_size,
+                                             random_state=random_state,
+                                             init=init,
+                                             scale=scale,
+                                             name=name + "_fd_input_proj",
+                                             device=device)
+
+        self.tds_seq_time_fw = nn.ModuleList()
+        self.tds_seq_freq_fw = nn.ModuleList()
+        self.tds_seq_freq_bw = nn.ModuleList()
+        self.tds_projs = nn.ModuleList()
+        self.fds_projs = nn.ModuleList()
+        self.fds_seq_freq_fw = nn.ModuleList()
+        if self.has_centralized_stack:
+            self.centralized_input_proj = Linear([self.n_horiz],
+                                                 self.hidden_size,
+                                                 random_state=random_state,
+                                                 init=init,
+                                                 scale=scale,
+                                                 name=name + "_centralized_input_proj",
+                                                 device=device)
+            self.cds_centralized_lstms = nn.ModuleList()
+            self.cds_projs = nn.ModuleList()
+
+        if self.has_spatial_condition:
+            if spatial_condition_input_size is None:
+                raise ValueError("has_spatial_condition was True, but no spatial_condition_input_size specified!")
+            self.spatial_condition_input_size = spatial_condition_input_size
+            self.cond_net = YAMNetFullContextSubTier([spatial_condition_input_size],
+                                                     n_vert,
+                                                     n_horiz,
+                                                     self.hidden_size,
+                                                     self.spatial_condition_n_layers,
+                                                     n_heads=self.spatial_condition_n_heads,
+                                                     head_dim=self.spatial_condition_head_dim,
+                                                     inner_dim=self.spatial_condition_inner_dim,
+                                                     random_state=random_state,
+                                                     init=init,
+                                                     name=name + "cond_YAMNet",
+                                                     device=device)
+
+        if self.has_centralized_stack:
+            if self.has_attention:
+                self.attn_lstm_cell = rnn_cell_fn([self.hidden_size + self.hidden_size],
+                                                   self.hidden_size,
+                                                   random_state=random_state,
+                                                   init=init,
+                                                   scale=scale,
+                                                   name=name + "_attn_rnn_cell",
+                                                   device=device)
+                """
+                self.attn_reduction_proj = Linear([self.hidden_size,],
+                                                  self.n_horiz,
+                                                  random_state=random_state,
+                                                  init=init,
+                                                  scale=scale,
+                                                  name=name + "_attention_reduction_proj",
+                                                  device=device)
+                """
+                if self.attention_type == "logistic":
+                    # for logistic sigmoid attention ala melnet
+                    self.attn_proj = Linear([3 * self.hidden_size],
+                                             3 * self.attention_mixture_components,
+                                             random_state=random_state,
+                                             init=init,
+                                             scale=scale,
+                                             name=name + "_attn_proj",
+                                             device=device)
+                elif self.attention_type == "sigmoid_logistic":
+                    self.attn_proj = Linear([3 * self.hidden_size],
+                                             3 * self.attention_mixture_components,
+                                             random_state=random_state,
+                                             init=init,
+                                             scale=scale,
+                                             name=name + "_attn_proj",
+                                             device=device)
+                elif self.attention_type == "sigmoid_logistic_alt":
+                    self.attn_proj = Linear([3 * self.hidden_size],
+                                             3 * self.attention_mixture_components,
+                                             random_state=random_state,
+                                             init=init,
+                                             scale=scale,
+                                             name=name + "_attn_proj",
+                                             device=device)
+                elif self.attention_type == "gaussian":
+                    # for logistic sigmoid attention ala melnet
+                    self.attn_proj = Linear([3 * self.hidden_size],
+                                             3 * self.attention_mixture_components,
+                                             random_state=random_state,
+                                             init=init,
+                                             scale=scale,
+                                             name=name + "_attn_proj",
+                                             device=device)
+                elif self.attention_type == "dca":
+                    # for convolutional attention
+                    # https://github.com/bshall/Tacotron/blob/6fee34a7c3a9d4ceb9215ed3063771a9287010e1/tacotron/model.py
+                    prior_length = 11
+                    alpha = .1
+                    beta = .9
+                    # expected average step size (encoder steps per decoder step) is 1 here
+                    # alpha * prior_length / (alpha + beta)
+                    # makes sense because of the extreme downsampling
+                    # roughly on 1 to 1 scale but may need to be tuned
+                    # realistically more like .8 encoder steps per decoder steps on datasets
+                    P = betabinom.pmf(np.arange(prior_length), prior_length - 1, alpha, beta)
+                    self.register_buffer("P", torch.FloatTensor(P).flip(0))
+                    # note - W_g in paper
+                    self.W_g = Linear([self.hidden_size],
+                                     self.hidden_size,
+                                     random_state=random_state,
+                                     init=init,
+                                     scale=scale,
+                                     name=name + "_attn_W_term",
+                                     device=device)
+                    dynamic_channels = 8
+                    dynamic_kernel_size = 21
+                    # note - V_g in paper
+                    self.V_g = Linear([self.hidden_size],
+                                     dynamic_channels * dynamic_kernel_size,
+                                     random_state=random_state,
+                                     init=init,
+                                     scale=scale,
+                                     name=name + "_attn_V_term",
+                                     biases=False,
+                                     device=device)
+                    static_channels = 8
+                    static_kernel_size = 21
+                    self.attn_prior_length = prior_length
+                    self.attn_alpha = alpha
+                    self.attn_beta = beta
+                    self.attn_dynamic_channels = dynamic_channels
+                    self.attn_dynamic_kernel_size = dynamic_kernel_size
+                    self.attn_static_channels = static_channels
+                    self.attn_static_kernel_size = static_kernel_size
+                    self.F = Conv1d([1], static_channels, kernel_size=(static_kernel_size, static_kernel_size), random_state=random_state,
+                                    name=name + "_attn_F_term", biases=False, device=device)
+                    self.U = Linear([static_channels],
+                                     self.hidden_size,
+                                     random_state=random_state,
+                                     init=init,
+                                     scale=scale,
+                                     name=name + "_attn_U_term",
+                                     biases=False,
+                                     device=device)
+                    self.T = Linear([dynamic_channels],
+                                     self.hidden_size,
+                                     random_state=random_state,
+                                     init=init,
+                                     scale=scale,
+                                     name=name + "_attn_T_term",
+                                     device=device)
+                    self.v = Linear([self.hidden_size],
+                                     1,
+                                     random_state=random_state,
+                                     init=init,
+                                     scale=scale,
+                                     name=name + "_attn_v_term",
+                                     biases=False,
+                                     device=device)
+                elif self.attention_type == "lsa":
+                    # https://github.com/NVIDIA/tacotron2/blob/master/model.py#L29
+                    # hardcode temporarily
+                    attention_dim = 128
+                    self.query_layer = Linear([self.hidden_size],
+                                               attention_dim,
+                                               random_state=random_state,
+                                               init=init,
+                                               scale=scale,
+                                               name=name + "_attn_query_term",
+                                               biases=False,
+                                               device=device)
+                    # unused?
+                    self.memory_layer = Linear([self.hidden_size],
+                                               attention_dim,
+                                               random_state=random_state,
+                                               init=init,
+                                               scale=scale,
+                                               name=name + "_attn_memory_term",
+                                               biases=False,
+                                               device=device)
+                    self.v_layer = Linear([attention_dim],
+                                           1,
+                                           random_state=random_state,
+                                           init=init,
+                                           scale=scale,
+                                           name=name + "_attn_v_term",
+                                           biases=False,
+                                           device=device)
+                    attention_n_filters = 32
+                    attention_kernel_size = 31
+                    padding = int((attention_kernel_size - 1) / 2)
+                    self.location_conv = Conv1d([2], attention_n_filters, kernel_size=(attention_kernel_size, attention_kernel_size),
+                                                random_state=random_state,
+                                                name=name + "_attn_location_conv", biases=False, device=device)
+                    self.location_dense = Linear([attention_n_filters],
+                                                  attention_dim,
+                                                  random_state=random_state,
+                                                  init=init,
+                                                  scale=scale,
+                                                  name=name + "_attn_location_dense",
+                                                  biases=False,
+                                                  device=device)
+                else:
+                    raise ValueError("Unknown value in initialization for attention_type in AttnMelNetTier, got {}".format(attention_type))
+
+
+        for _i in range(self.n_layers):
+            memory_len=10
+            context_len=0
+            lcl_layers=2
+            # n_layers=16, n_heads=10, head_dim=38, model_dim=380, inner_dim=900,
+            # hardcode temporarily, maybe add automatic routine to select heads + head_dim
+            time_fw_layer = AWDTransformerXLDecoderBlock([self.hidden_size,],
+                                                          name=name + "_tds_seq_time_fw_{}".format(_i),
+                                                          n_layers=self.transformer_inner_layers,
+                                                          n_heads=self.transformer_n_heads,
+                                                          head_dim=self.transformer_head_dim,
+                                                          model_dim=self.hidden_size,
+                                                          inner_dim=self.transformer_inner_dim,
+                                                          random_state=random_state,
+                                                          memory_len=memory_len,
+                                                          context_len=context_len,
+                                                          init=init,
+                                                          scale=scale,
+                                                          device=device)
+            self.tds_seq_time_fw.append(time_fw_layer)
+            freq_fw_layer = AWDTransformerXLDecoderBlock([self.hidden_size,],
+                                                          name=name + "_tds_seq_freq_fw_{}".format(_i),
+                                                          n_layers=lcl_layers,
+                                                          n_heads=6,
+                                                          head_dim=8,
+                                                          model_dim=self.hidden_size,
+                                                          inner_dim=256,
+                                                          random_state=random_state,
+                                                          memory_len=memory_len,
+                                                          context_len=context_len,
+                                                          init=init,
+                                                          scale=scale,
+                                                          device=device)
+
+            freq_bw_layer = AWDTransformerXLDecoderBlock([self.hidden_size,],
+                                                          name=name + "_tds_seq_freq_bw_{}".format(_i),
+                                                          n_layers=lcl_layers,
+                                                          n_heads=6,
+                                                          head_dim=8,
+                                                          model_dim=self.hidden_size,
+                                                          inner_dim=256,
+                                                          random_state=random_state,
+                                                          memory_len=memory_len,
+                                                          context_len=context_len,
+                                                          init=init,
+                                                          scale=scale,
+                                                          device=device)
+
+            self.tds_seq_freq_fw.append(freq_fw_layer)
+            self.tds_seq_freq_bw.append(freq_bw_layer)
+
+            self.tds_projs.append(Linear([3 * self.hidden_size,],
+                                          self.hidden_size,
+                                          random_state=random_state,
+                                          init=init,
+                                          scale=scale,
+                                          name=name + "_tds_projs_{}".format(_i),
+                                          device=device))
+
+            self.fds_projs.append(Linear([self.hidden_size,],
+                                          self.hidden_size,
+                                          random_state=random_state,
+                                          init=init,
+                                          scale=scale,
+                                          name=name + "_fds_projs_{}".format(_i),
+                                          device=device))
+
+            fd_freq_fw_layer = AWDTransformerXLDecoderBlock([self.hidden_size,],
+                                                            name=name + "_fds_seq_freq_fw_{}".format(_i),
+                                                            n_layers=lcl_layers,
+                                                            n_heads=6,
+                                                            head_dim=8,
+                                                            model_dim=self.hidden_size,
+                                                            inner_dim=256,
+                                                            random_state=random_state,
+                                                            memory_len=memory_len,
+                                                            context_len=context_len,
+                                                            init=init,
+                                                            scale=scale,
+                                                            device=device)
+
+            self.fds_seq_freq_fw.append(fd_freq_fw_layer)
+
+
+            if self.has_centralized_stack:
+                self.cds_centralized_lstms.append(rnn_fn([self.hidden_size,],
+                                                             self.hidden_size,
+                                                             random_state=random_state,
+                                                             init=init,
+                                                             scale=scale,
+                                                             name=name + "_cds_centralized_rnn_{}".format(_i),
+                                                             device=device))
+                self.cds_projs.append(Linear([self.hidden_size,],
+                                              self.hidden_size,
+                                              random_state=random_state,
+                                              init=init,
+                                              scale=scale,
+                                              name=name + "_cds_projs_{}".format(_i),
+                                              device=device))
+        self.out_proj = Linear([self.hidden_size,], self.output_size,
+                               random_state=random_state,
+                               init=init,
+                               scale=scale,
+                               name=name + "_output_proj",
+                               device=device)
+        # used for hook registering alternative softplus for numerical stability
+        self._softplus = None
+
+    def _time2freq(self, inp):
+        inp = inp.reshape((self.n_vert, self.batch_size, self.n_horiz, -1))
+        inp = inp.permute(2, 1, 0, 3)
+        return inp.reshape((self.n_horiz, self.batch_size * self.n_vert, -1))
+
+    def _freq2time(self, inp):
+        # batch size set in forward!
+        inp = inp.reshape((self.n_horiz, self.batch_size, self.n_vert, -1))
+        inp = inp.permute(2, 1, 0, 3)
+        return inp.reshape((self.n_vert, self.batch_size * self.n_horiz, -1))
+
+    def _td_stack(self, tds, layer):
+
+        """
+        self.transformer = AWDTransformerXLDecoderBlock([hp.transformer_input_dim],
+                                                        name="transformer_block",
+                                                        random_state=random_state,
+                                                        memory_len=hp.memory_len,
+                                                        context_len=hp.context_len,
+                                                        init="normal",
+                                                        scale=0.02,
+                                                        device=hp.use_device)
+        """
+        freq_lstm_fw_h, _, = self.tds_seq_freq_fw[layer](tds)
+        freq_lstm_bw_h, _, = self.tds_seq_freq_bw[layer](torch.flip(tds, [0]))
+        freq_lstm_h = torch.cat((freq_lstm_fw_h, torch.flip(freq_lstm_bw_h, [0])), dim=-1)
+        freq_lstm_h = self._freq2time(freq_lstm_h)
+
+        tds_time = self._freq2time(tds)
+        time_h, _ = self.tds_seq_time_fw[layer](tds_time)
+
+        combined_h = torch.cat((freq_lstm_h, time_h), dim=-1)
+        res = self.tds_projs[layer]([combined_h])
+
+        res = self._time2freq(res)
+        #return (0.5 ** 0.5) * (tds + res)
+        return res
+
+    def _cd_centralized_stack(self, cds, layer):
+        cent_lstm_h, _, __ = self.cds_centralized_lstms[layer]([cds])
+        res = self.cds_projs[layer]([cent_lstm_h])
+        #return (0.5 ** 0.5) * (cds + cent_lstm_h)
+        return res
+
+    def _fd_stack(self, tds, fds, layer, tds_cent=None):
+        # broadcast tds_cent across frequency axis
+        if tds_cent is not None:
+            # need to permute + reshape to match what was done for td_x, fd_x
+            # so that batch combined stuff stays contiguous in the right way!
+            # time2freq is freq, batch * time, -1
+            # time is also self.n_vert
+
+            # nvert batch feat to batch nvert feat
+            tds_cent = tds_cent.permute(1, 0, 2)
+            ext_tds_cent = tds_cent.reshape((self.batch_size * self.n_vert, -1))
+            # now 1, batch * time, hidden
+            # broadcasts over frequency, since the cent rnn has puts out a whole freq frame per step dim...
+            ext_tds_cent = ext_tds_cent[None]
+            # (fds dim 0)
+            # broacasts over features, since the cent rnn has effectively seen the whole frequency
+            #ext_tds_cent = ext_tds_cent + 0. * fds
+            freq_lstm_stack = tds + fds + ext_tds_cent#  torch.cat((tds, fds, ext_tds_cent), axis=-1)
+        else:
+            #freq_lstm_stack = torch.cat((tds, fds), axis=-1)
+            freq_lstm_stack = tds + fds
+
+        freq_lstm_h, _ = self.fds_seq_freq_fw[layer](freq_lstm_stack)
+        res = self.fds_projs[layer]([freq_lstm_h])
+        #return (0.5 ** 0.5) * (fds + freq_lstm_h)
+        return res
+
+    def _attention_step(self, h_i, memory, memory_mask, previous_attn):
+        # TODO: location sensitive attention
+        print("end td")
+        # https://gist.github.com/acetylSv/9dcff15bc0e895c0190c5942b573c28b
+        if self.attention_type == "logistic":
+            #_attention_step(self, h_i, memory, memory_mask, ksi):
+            # condition on input sequence length
+            phi_hat = self.attn_proj([h_i])
+
+            #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
+            # clamp beta so it doesn't collapse?
+            #beta = torch.exp(torch.clamp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components], min=-4))
+            # changes based on GMMv2 of https://arxiv.org/pdf/1910.10288.pdf
+            # as well as https://arxiv.org/pdf/1811.07240.pdf
+            ksi = previous_attn
+            kappa = ksi + (3. * sigmoid(phi_hat[:, :self.attention_mixture_components]) + .05)
+
+            beta = (5. * sigmoid(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + .1)
+            # min beta .1
+            # max beta 10
+            alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+
+            u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
+            u_L = u + 0.5
+            u_R = u - 0.5
+            #termL = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_L) * beta[..., None])))), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_R) * beta[..., None])))), keepdim=True, dim=1)
+            #termL = 1. / (1. + (torch.exp((kappa[..., None] - u_L) * beta[..., None])))
+            #termR = 1. / (1. + (torch.exp((kappa[..., None] - u_R) * beta[..., None])))
+            pL = (u_L - kappa[..., None]) * beta[..., None]
+            pR = (u_R - kappa[..., None]) * beta[..., None]
+            termL = torch.sigmoid(pL)
+            termR = torch.sigmoid(pR)
+            alpha_termL = alpha[..., None] * termL
+            alpha_termR = alpha[..., None] * termR
+            weights = torch.sum(alpha_termL, dim=1) - torch.sum(alpha_termR, dim=1)
+
+            termination = 1. - torch.sum(alpha_termL, keepdim=True, dim=1)[:, 0]
+            weights = memory_mask.transpose(0, 1) * weights
+            context = torch.bmm(weights[:, None], memory.permute(1, 0, 2))
+            # context is B, 1, D
+            # weights B, mem_T 
+            extras = {}
+            extras["termination"] = termination
+            extras["kappa"] = kappa
+            extras["beta"] = beta
+        elif self.attention_type == "logistic_hack":
+            #_attention_step(self, h_i, memory, memory_mask, ksi):
+            # condition on input sequence length
+            phi_hat = self.attn_proj([h_i])
+
+            #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
+            # clamp beta so it doesn't collapse?
+            #beta = torch.exp(torch.clamp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components], min=-4))
+            # changes based on GMMv2 of https://arxiv.org/pdf/1910.10288.pdf
+            # as well as https://arxiv.org/pdf/1811.07240.pdf
+            ksi = previous_attn
+            kappa = ksi + F.softplus(phi_hat[:, :self.attention_mixture_components])
+            #beta = (F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-4)
+            # cap beta
+            beta = torch.exp(phi_hat[:, self.attention_mixture_components:(2 * self.attention_mixture_components)]) + 1E-2
+
+            logit_alpha = phi_hat[:, (2 * self.attention_mixture_components):(3 * self.attention_mixture_components)]
+
+            #alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+
+            u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
+            u_L = u + 0.5
+            u_R = u - 0.5
+            #u_L = u + 1.5
+            #u_R = u + 0.5
+            #termL = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_L) * beta[..., None])))), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_R) * beta[..., None])))), keepdim=True, dim=1)
+            # could rewrite further by taking softmax out of context
+            # softmax(alpha) * exp(-softplus(a)) -> exp(alpha) * exp(-softplus(a)) / sum(exp(alpha)) -> exp(alpha - softplus(a)) / sum(exp(alpha))
+            # but would probably be less stable than "stable" softmax due to sum(exp) in denominator
+            # softplus(a) = log(1 + exp(a))
+            # with a = ((ksi - u) / beta)
+            # this overall becomes
+            # 1. / exp(softplus(a)) -> exp(-softplus(a)) -> exp(-log(1 + exp(a))) -> 1./(1 + exp(a))
+            #termL = torch.sum(alpha[..., None] * (torch.exp(-F.softplus(((kappa[..., None] - u_L)) * beta[..., None]))), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * (torch.exp(-F.softplus(((kappa[..., None] - u_R)) * beta[..., None]))), keepdim=True, dim=1)
+
+            # possible best derivation (inspired by https://github.com/Deepest-Project/MelNet/blob/master/model/tts.py#L138 although I don't get the 1.5 and .5 instead of -.5 and +.5, perhaps this is setting the default step size to 1. for all ksi?)
+            # 1. / (1. + exp((k-u) / b)) -> 1. / (1. + exp(-(u - k) / b)) -> 1. / (1. + exp(-t)), where t is (u - k) / b
+            # knowing that sigmoid(t) = 1. / (1. + exp(-t))
+            # this results in sigmoid((u - k) / b) for each term
+            # this means both terms L and R are bounded btwn 0 and 1, and potentially more stable than exp(-softplus) shenanigans would allow
+            #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            # finally since beta is bounded > 0 due to exp() activation, we note that dividing by beta and multiplying by beta are effectively the same
+            # in terms of optimization paths
+            # simply swapping "what regime" wrt values exp(x) < 1, and values exp(x) > 1
+            # with the *key* difference being a vanishing to 0 of beta (perhaps due to very negative weights for beta or other issues during training), will not explode the whole equation
+            # reweight in log space before summation?
+
+            #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+
+            # combined term
+            #termL_R = torch.sum(alpha[..., None] * (torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])) - torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None]))), keepdim=True, dim=1)
+            #weights = termL_R
+
+            # introduce sum(exp(log(alpha * sigmoid))) -> sum(exp(log(alpha) + log(sigmoid)))
+            # log(alpha) -> log_softmax
+            # logsoftmax = logits - log(reduce_sum(exp(logits), dim))
+            # log(sigmoid(q)) -> q - log(exp(q) + 1) aka q - softplus(q)
+            # term = log_alpha + q - softplus(q)
+            # https://math.stackexchange.com/questions/2320905/obtaining-derivative-of-log-of-sigmoid-function
+            #go further beyond, do multiplication in log space (so additive)
+            # then sum exps afterward
+            #log_alpha = logit_alpha - torch.log(torch.sum(torch.exp(logit_alpha), keepdim=True, dim=1))
+            #log_alpha = log_alpha[..., None]
+            #q_L = (u_L - kappa[..., None]) * beta[..., None]
+            #termL = torch.sum(torch.exp(log_alpha + q_L - F.softplus(q_L)), keepdim=True, dim=1)
+            #q_R = (u_R - kappa[..., None]) * beta[..., None]
+            #termR = torch.sum(torch.exp(log_alpha + q_R - F.softplus(q_R)), keepdim=True, dim=1)
+            #weights = termL - termR
+
+            # even more further beyond...
+            log_alpha = log_prob_from_logits(logit_alpha, axis=1)
+            log_alpha = log_alpha[..., None]
+            q_L = (u_L - kappa[..., None]) * beta[..., None]
+            # keep dims
+            termL = torch.exp(log_sum_exp(log_alpha + q_L - F.softplus(q_L), axis=1))[:, None]
+            q_R = (u_R - kappa[..., None]) * beta[..., None]
+            # keep dims
+            termR = torch.exp(log_sum_exp(log_alpha + q_R - F.softplus(q_R), axis=1))[:, None]
+            weights = termL - termR
+
+            termination = 1. - termL[:, 0]
+            weights = memory_mask.transpose(0, 1)[:, None, :] * weights
+            context = torch.bmm(weights, memory.permute(1, 0, 2))
+            # context is B, 1, D
+            # weights B, mem_T 
+            extras = {}
+            extras["termination"] = termination
+            extras["kappa"] = kappa
+            extras["beta"] = beta
+        elif self.attention_type == "sigmoid_logistic":
+            #_attention_step(self, h_i, memory, memory_mask, ksi):
+            # condition on input sequence length
+            phi_hat = self.attn_proj([h_i])
+            # cast to 32 bit
+            orig_dtype = phi_hat.dtype
+            phi_hat = phi_hat.float()
+
+            #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
+            # clamp beta so it doesn't collapse?
+            #beta = torch.exp(torch.clamp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components], min=-4))
+            # changes based on GMMv2 of https://arxiv.org/pdf/1910.10288.pdf
+            # as well as https://arxiv.org/pdf/1811.07240.pdf
+            ksi = previous_attn
+            ksi = ksi.float()
+
+            """
+            if self._softplus is None:
+                # hook it into the main module to keep a reference around
+                self._softplus = torch.nn.Softplus()
+                '''
+                     output z  (grad_output)
+                     ___________
+                     |         |
+                     |  layer  |
+                     |_________|
+
+                     input x  (grad_input)
+                '''
+                def hook(module, grad_input, grad_output):
+                    return (sigmoid(grad_output[0]),)
+
+                self._softplus.register_backward_hook(hook)
+
+            alt_softplus = self._softplus
+            """
+
+            def alt_log1p(x):
+                # https://www.johndcook.com/blog/2012/07/25/trick-for-computing-log1x/
+                # we dirty hack this to avoid div by 0 since torch.where has issues with NaN grad
+                # if *either* branch has inf
+                # https://github.com/pytorch/pytorch/issues/4132
+                y = 1. + x
+                z = y - 1.
+                res = 0. * x
+                z_mask = (z == 0)
+                res[z_mask] = x[z_mask]
+                z_nonmask = (z != 0)
+                res[z_nonmask] = x[z_nonmask] * torch.log(y[z_nonmask]) / (z[z_nonmask])
+                #return torch.where(z == 0, x, x * torch.log(y) / z)
+                return res
+
+            def alt_softplus(x):
+                # https://stackoverflow.com/questions/44230635/avoid-overflow-with-softplus-function-in-python
+                return alt_log1p(torch.exp(-torch.abs(x))) + torch.where(x > 0, x, 0. * x)
+
+            kappa = ksi + alt_softplus(phi_hat[:, :self.attention_mixture_components]) #+ 1E-2
+            #kappa = ksi + swish(phi_hat[:, :self.attention_mixture_components])
+
+            #beta = (F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-4)
+            #beta = torch.clamp(torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.5)
+            # fix beta to 1 - hack city but works!
+            #beta = 0. * phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components] + 1.
+
+            # aggressive clamping here, use softplus to help stability as well
+            #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.25, max=2.0)
+            #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.01, max=10.0)
+            #beta = F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+
+            beta = alt_softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components] + 3.)
+            # add constant 3 to beta, so the default for beta is "large" at init
+            # model can learn biases to overcome this if it wants small beta
+
+            #beta = swish(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+            #beta = swish(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+
+            alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+            #alpha = F.softplus(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components]) + 1E-2
+            #alpha = F.log_softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+
+            u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
+            #u_L = u + 0.5
+            #u_R = u - 0.5
+
+            # try like this for the following reason...
+            # eqn 22 of paper
+            # F(u + .5; g) - F(u - 0.5; g)
+            # means F(u; g) = 1./(1 + exp((k - u) / B))
+            # we can interpret this as either SUBTITUTING u + 0.5 for u, or simply adding/subtracting on 0.5. This would swap the 2 terms
+            # interpreting as simply adding 0.5 to the end means
+            # sigm(x) = 1./(1+exp(-x))
+            # x = ((-k + u) / B) = ((u - k) / B)
+            # sigm((u - .5 - k) / B) as the left hand
+            # sigm((u + .5 - k) / B) as the right hand
+            # alternately, interpreting as substituting u - .5 for u
+            # sigm((u + .5 - k) / B) as the left hand
+            # sigm((u - .5 - k) / B) as the right hand
+            # noting that we can multiply or divide by beta, if beta is constrained from 0 to inf
+            # since / by a number from 0->1 is the same as multiplying by 1->inf
+            # aka beta can parameterize the division term, or 1 / division
+            # parameterizing the 1 / division means that we don't face edge cases for beta near 0, as 1/inf -> 0 and 1/0. -> inf
+            u_L = u + 0.5
+            u_R = u - 0.5
+
+            """
+            alternative?
+            TANH(t) = [1 - exp(-2t)]/[1 + exp(-2t)]  for  t>=0
+            and
+            TANH(t) = [exp(2t) - 1]/[exp(2t) + 1] for t<0
+            """
+
+            # we approximate tanh with x/(1+abs(x))
+            def alt_tanh(x):
+                return x / (1. + torch.abs(x))
+            # logistic can be expressed as 1/2 + 1/2 * tanh((x - u)/(2 * s)) instead of sigmoid
+            # if beta is 1/s, this is .5 * beta
+            def term(u, k, b):
+                return .5 + .5 * alt_tanh((u - k) * .5 * b)
+
+            #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+
+            termL = torch.sum(alpha[..., None] * term(u_L, kappa[..., None], beta[..., None]), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * term(u_R, kappa[..., None], beta[..., None]), keepdim=True, dim=1)
+
+            diff = (term(u_L, kappa[..., None], beta[..., None]) - term(u_R, kappa[..., None], beta[..., None]))
+            weights = torch.sum(alpha[..., None] * diff, keepdim=True, dim=1)
+
+            #termL = torch.logsumexp(alpha[..., None] + torch.nn.functional.logsigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR = torch.logsumexp(alpha[..., None] + torch.nn.functional.logsigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR_mask = torch.abs(termR < 1).type(termR.dtype)
+            #termR = termR * termR_mask + 1 * (1. - termR_mask)
+
+            #weights = termL - termR
+
+            #weights = torch.exp(termL) - torch.exp(termR)
+            #weights = torch.exp(termL / termR)
+
+            #termL = alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None]))
+            #termR = alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None]))
+            #termL = torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None]))
+            #termR = torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None]))
+
+            #weights = torch.sum(alpha[..., None] * (termL - termR), keepdim=True, dim=1)
+
+            termination = 1. - torch.exp(termL[:, 0])
+            weights = memory_mask.transpose(0, 1)[:, None, :] * weights
+
+            weights = weights.to(orig_dtype)
+            kappa = kappa.to(orig_dtype)
+            beta = beta.to(orig_dtype)
+            alpha = alpha.to(orig_dtype)
+            termination = termination.to(orig_dtype)
+
+            context = torch.bmm(weights, memory.permute(1, 0, 2))
+            # context is B, 1, D
+            # weights B, 1, mem_T 
+            extras = {}
+            extras["termination"] = termination
+            extras["kappa"] = kappa
+            extras["beta"] = beta
+            extras["alpha"] = alpha
+        elif self.attention_type == "sigmoid_logistic_alt":
+            #_attention_step(self, h_i, memory, memory_mask, ksi):
+            # condition on input sequence length
+            phi_hat = self.attn_proj([h_i])
+            # cast to 32 bit
+            orig_dtype = phi_hat.dtype
+            phi_hat = phi_hat.float()
+
+            #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
+            # clamp beta so it doesn't collapse?
+            #beta = torch.exp(torch.clamp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components], min=-4))
+            # changes based on GMMv2 of https://arxiv.org/pdf/1910.10288.pdf
+            # as well as https://arxiv.org/pdf/1811.07240.pdf
+            ksi = previous_attn
+            ksi = ksi.float()
+
+            """
+            if self._softplus is None:
+                # hook it into the main module to keep a reference around
+                self._softplus = torch.nn.Softplus()
+                '''
+                     output z  (grad_output)
+                     ___________
+                     |         |
+                     |  layer  |
+                     |_________|
+
+                     input x  (grad_input)
+                '''
+                def hook(module, grad_input, grad_output):
+                    return (sigmoid(grad_output[0]),)
+
+                self._softplus.register_backward_hook(hook)
+
+            alt_softplus = self._softplus
+            """
+
+            def alt_log1p(x):
+                # https://www.johndcook.com/blog/2012/07/25/trick-for-computing-log1x/
+                # we dirty hack this to avoid div by 0 since torch.where has issues with NaN grad
+                # if *either* branch has inf
+                # https://github.com/pytorch/pytorch/issues/4132
+                y = 1. + x
+                z = y - 1.
+                res = 0. * x
+                z_mask = (z == 0)
+                res[z_mask] = x[z_mask]
+                z_nonmask = (z != 0)
+                res[z_nonmask] = x[z_nonmask] * torch.log(y[z_nonmask]) / (z[z_nonmask])
+                #return torch.where(z == 0, x, x * torch.log(y) / z)
+                return res
+
+            def alt_softplus(x):
+                # https://stackoverflow.com/questions/44230635/avoid-overflow-with-softplus-function-in-python
+                return alt_log1p(torch.exp(-torch.abs(x))) + torch.where(x > 0, x, 0. * x)
+
+            kappa = ksi + alt_softplus(phi_hat[:, :self.attention_mixture_components]) + 1E-3
+            #kappa = ksi + swish(phi_hat[:, :self.attention_mixture_components])
+
+            #beta = (F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-4)
+            #beta = torch.clamp(torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.5)
+            # fix beta to 1 - hack city but works!
+            #beta = 0. * phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components] + 1.
+
+            # aggressive clamping here, use softplus to help stability as well
+            #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.25, max=2.0)
+            #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.01, max=10.0)
+            #beta = F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+
+            beta = alt_softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+
+            #beta = swish(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+            #beta = swish(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+
+            alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+            #alpha = F.softplus(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components]) + 1E-2
+            #alpha = F.log_softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+
+            u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
+            #u_L = u + 0.5
+            #u_R = u - 0.5
+
+            # try like this for the following reason...
+            # eqn 22 of paper
+            # F(u + .5; g) - F(u - 0.5; g)
+            # means F(u; g) = 1./(1 + exp((k - u) / B))
+            # we can interpret this as either SUBTITUTING u + 0.5 for u, or simply adding/subtracting on 0.5. This would swap the 2 terms
+            # interpreting as simply adding 0.5 to the end means
+            # sigm(x) = 1./(1+exp(-x))
+            # x = ((-k + u) / B) = ((u - k) / B)
+            # sigm((u - .5 - k) / B) as the left hand
+            # sigm((u + .5 - k) / B) as the right hand
+            # alternately, interpreting as substituting u - .5 for u
+            # sigm((u + .5 - k) / B) as the left hand
+            # sigm((u - .5 - k) / B) as the right hand
+            # noting that we can multiply or divide by beta, if beta is constrained from 0 to inf
+            # since / by a number from 0->1 is the same as multiplying by 1->inf
+            # aka beta can parameterize the division term, or 1 / division
+            # parameterizing the 1 / division means that we don't face edge cases for beta near 0, as 1/inf -> 0 and 1/0. -> inf
+            # however, it means that making small beta we have less precision due to floating point
+            u_L = u + 0.5
+            u_R = u - 0.5
+
+            """
+            alternative?
+            TANH(t) = [1 - exp(-2t)]/[1 + exp(-2t)]  for  t>=0
+            and
+            TANH(t) = [exp(2t) - 1]/[exp(2t) + 1] for t<0
+            """
+
+            # we approximate tanh with x/(1+abs(x))
+            def alt_tanh(x):
+                return x / (1. + torch.abs(x))
+            # logistic can be expressed as 1/2 + 1/2 * tanh((x - u)/(2 * s)) instead of sigmoid
+            # if beta is 1/s, this is .5 * beta
+            def term(u, k, b):
+                #return .5 + .5 * alt_tanh(.5 * (u - k) / b)
+                # limit min beta to .01
+                return .5 + .5 * alt_tanh(.5 * (u - k) * (b + .01))
+
+            #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+
+            termL = torch.sum(alpha[..., None] * term(u_L, kappa[..., None], beta[..., None]), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * term(u_R, kappa[..., None], beta[..., None]), keepdim=True, dim=1)
+
+            diff = (term(u_L, kappa[..., None], beta[..., None]) - term(u_R, kappa[..., None], beta[..., None]))
+            weights = torch.sum(alpha[..., None] * diff, keepdim=True, dim=1)
+
+            #termL = torch.logsumexp(alpha[..., None] + torch.nn.functional.logsigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR = torch.logsumexp(alpha[..., None] + torch.nn.functional.logsigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR_mask = torch.abs(termR < 1).type(termR.dtype)
+            #termR = termR * termR_mask + 1 * (1. - termR_mask)
+
+            #weights = termL - termR
+
+            #weights = torch.exp(termL) - torch.exp(termR)
+            #weights = torch.exp(termL / termR)
+
+            #termL = alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None]))
+            #termR = alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None]))
+            #termL = torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None]))
+            #termR = torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None]))
+
+            #weights = torch.sum(alpha[..., None] * (termL - termR), keepdim=True, dim=1)
+
+            termination = 1. - torch.exp(termL[:, 0])
+            weights = memory_mask.transpose(0, 1)[:, None, :] * weights
+
+            # grad scaling here
+            grad_rescale = 1. / np.sqrt(self.attention_mixture_components)
+            weights = (1. - grad_rescale) * weights.detach() + grad_rescale * weights
+
+            weights = weights.to(orig_dtype)
+            kappa = kappa.to(orig_dtype)
+            beta = beta.to(orig_dtype)
+            alpha = alpha.to(orig_dtype)
+            termination = termination.to(orig_dtype)
+
+            context = torch.bmm(weights, memory.permute(1, 0, 2))
+            # context is B, 1, D
+            # weights B, 1, mem_T 
+            extras = {}
+            extras["termination"] = termination
+            extras["kappa"] = kappa
+            extras["beta"] = beta
+            extras["alpha"] = alpha
+        elif self.attention_type == "dca":
+            # code ref:
+            # https://github.com/bshall/Tacotron
+            p = F.conv1d(F.pad(previous_attn[:, None], (self.attn_prior_length - 1, 0)), self.P[None, None])
+            p = torch.log(p.clamp_min_(1E-6)[:, 0])
+
+            G = self.V_g([self.W_g([h_i])])
+
+            g = F.conv1d(previous_attn[None], G.view(-1, 1, self.attn_dynamic_kernel_size),
+                         padding=(self.attn_dynamic_kernel_size - 1) // 2,
+                         groups=h_i.shape[0])
+            g = g.view(h_i.size(0), self.attn_dynamic_channels, -1).transpose(1, 2)
+
+            f = self.F([previous_attn.transpose(1, 0)[..., None]])
+            e = self.v([torch.tanh(self.U([f]) + self.T([g]).transpose(0, 1))])[..., 0]
+
+            e = e.transpose(1, 0) + p
+            # now B, mem_T
+            weights = F.softmax(e, dim=1)
+
+            # mask weights here
+            # technically don't sum to 1 anymore but don't want to add weight to zero info places...
+            # for now, don't mask
+            #weights = memory_mask.transpose(0, 1) * weights
+
+            context = torch.bmm(weights[:, None], memory.permute(1, 0, 2))
+            # context is B, 1, D
+            # TODO: fix the dims to match, should be weights B, 1, mem_T 
+            # weights B, mem_T 
+            extras = {}
+        elif self.attention_type == "lsa":
+            processed_query = self.query_layer([h_i])
+            processed_memory = self.memory_layer([memory.permute(1, 0, 2)])
+            processed_attention = self.location_conv([previous_attn.transpose(1, 0)])
+            processed_attention_dense = self.location_dense([processed_attention]).transpose(1, 0)
+            # processed_attention_dense is batch, mem_T, attn_dim
+            weight_logits = self.v_layer([torch.tanh(processed_attention_dense + processed_memory + processed_query[:, None])])[..., 0]
+            weights = F.softmax(weight_logits, dim=1)
+            context = torch.bmm(weights[:, None], memory.permute(1, 0, 2))
+            weights = weights[:, None]
+            # context is B, 1, D
+            # weights B, 1, mem_T 
+            extras = {}
+        elif self.attention_type == "gaussian":
+            #_attention_step(self, h_i, memory, memory_mask, ksi):
+            # condition on input sequence length
+            phi_hat = self.attn_proj([h_i])
+
+            #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
+            # clamp beta so it doesn't collapse?
+            #beta = torch.exp(torch.clamp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components], min=-4))
+            # changes based on GMMv2 of https://arxiv.org/pdf/1910.10288.pdf
+            # as well as https://arxiv.org/pdf/1811.07240.pdf
+            ksi = previous_attn
+            kappa = ksi + F.softplus(phi_hat[:, :self.attention_mixture_components])
+
+            # don't need capped beta becase we parameterize the inverse
+            beta = torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+            alpha = torch.exp(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components])
+
+            u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
+            #u_L = u + 0.5
+            #u_R = u - 0.5
+            #u_L = u + 1.5
+            #u_R = u + 0.5
+            #termL = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_L) * beta[..., None])))), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * (1. / (1. + (torch.exp((kappa[..., None] - u_R) * beta[..., None])))), keepdim=True, dim=1)
+            # could rewrite further by taking softmax out of context
+            # softmax(alpha) * exp(-softplus(a)) -> exp(alpha) * exp(-softplus(a)) / sum(exp(alpha)) -> exp(alpha - softplus(a)) / sum(exp(alpha))
+            # but would probably be less stable than "stable" softmax due to sum(exp) in denominator
+            # softplus(a) = log(1 + exp(a))
+            # with a = ((ksi - u) / beta)
+            # this overall becomes
+            # 1. / exp(softplus(a)) -> exp(-softplus(a)) -> exp(-log(1 + exp(a))) -> 1./(1 + exp(a))
+            #termL = torch.sum(alpha[..., None] * (torch.exp(-F.softplus(((kappa[..., None] - u_L)) * beta[..., None]))), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * (torch.exp(-F.softplus(((kappa[..., None] - u_R)) * beta[..., None]))), keepdim=True, dim=1)
+
+            # possible best derivation (inspired by https://github.com/Deepest-Project/MelNet/blob/master/model/tts.py#L138 although I don't get the 1.5 and .5 instead of -.5 and +.5, perhaps this is setting the default step size to 1. for all ksi?)
+            # 1. / (1. + exp((k-u) / b)) -> 1. / (1. + exp(-(u - k) / b)) -> 1. / (1. + exp(-t)), where t is (u - k) / b
+            # knowing that sigmoid(t) = 1. / (1. + exp(-t))
+            # this results in sigmoid((u - k) / b) for each term
+            # this means both terms L and R are bounded btwn 0 and 1, and potentially more stable than exp(-softplus) shenanigans would allow
+            #termL = torch.sum(alpha[..., None] * torch.sigmoid((((u_L - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * torch.sigmoid((((u_R - kappa[..., None])) * beta[..., None])), keepdim=True, dim=1)
+            # finally since beta is bounded > 0 due to exp() activation, we note that dividing by beta and multiplying by beta are effectively the same
+            # in terms of optimization paths
+            # simply swapping "what regime" wrt values exp(x) < 1, and values exp(x) > 1
+            # with the *key* difference being a vanishing to 0 of beta (perhaps due to very negative weights for beta or other issues during training), will not explode the whole equation
+            # reweight in log space before summation?
+            weights = torch.sum(alpha[..., None] * torch.exp(-1. * ((kappa[..., None] - u) ** 2) * beta[..., None]), keepdim=True, dim=1)
+            weights = memory_mask.transpose(0, 1)[:, None, :] * weights
+            context = torch.bmm(weights, memory.permute(1, 0, 2))
+            # context is B, 1, D
+            # weights B, mem_T 
+            extras = {}
+            extras["kappa"] = kappa
+            extras["beta"] = beta
+            extras["alpha"] = alpha
+        return context, weights, extras
+
+    def _attention(self, cds, layer, memory, memory_mask):
+        T, B, D = cds.size()
+        # make init a function of the mean of the 
+        h_i = cds.new_zeros(B, self.hidden_size)
+        c_i = cds.new_zeros(B, self.hidden_size)
+        context = cds.new_zeros(B, self.hidden_size)
+        if self.attention_type == "logistic":
+            prev_attn = cds.new_zeros(B, self.attention_mixture_components)
+        elif self.attention_type == "sigmoid_logistic":
+            prev_attn = cds.new_zeros(B, self.attention_mixture_components)
+        elif self.attention_type == "sigmoid_logistic_alt":
+            prev_attn = cds.new_zeros(B, self.attention_mixture_components)
+        elif self.attention_type == "dca":
+            prev_attn = F.one_hot(torch.zeros(B, dtype=torch.long, device=cds.device), memory.size(0)).float()
+        elif self.attention_type == "gaussian":
+            prev_attn = cds.new_zeros(B, self.attention_mixture_components)
+        elif self.attention_type == "lsa":
+            # one dim for attention, one for accumulative weights
+            prev_attn_base = cds.new_zeros(B, memory.size(0), 1)
+            prev_attn_accum = cds.new_zeros(B, memory.size(0), 1)
+        else:
+            raise ValueError("Unknown self.attention_type {} found".format(self.attention_type))
+        contexts = []
+        weights = []
+        terminations = []
+        all_extras = []
+        out_hiddens = []
+        for _i in range(T):
+            x = torch.cat([cds[_i], context.squeeze(1)], dim=-1)
+            out, s = self.attn_lstm_cell([x],
+                                         h_i, c_i,
+                                         input_mask=None)
+            h_t, c_t = s[0], s[1]
+            out_hiddens.append(h_t[None])
+
+            if self.attention_type == "lsa":
+                prev_attn = torch.cat((prev_attn_base, prev_attn_accum), dim=2)
+
+            h_comb = torch.cat([cds[_i], context.squeeze(1), h_t], dim=-1)
+            #context, attn_weight, extras = self._attention_step(h_t, memory, memory_mask, prev_attn)
+            context, attn_weight, extras = self._attention_step(h_comb, memory, memory_mask, prev_attn)
+
+            if self.attention_type == "logistic":
+                prev_attn = extras["kappa"]
+            elif self.attention_type == "sigmoid_logistic":
+                prev_attn = extras["kappa"]
+            elif self.attention_type == "sigmoid_logistic_alt":
+                prev_attn = extras["kappa"]
+            elif self.attention_type == "dca":
+                prev_attn = attn_weight
+            elif self.attention_type == "lsa":
+                prev_attn_base = attn_weight[:, 0][..., None]
+                prev_attn_accum += attn_weight[:, 0][..., None]
+            elif self.attention_type == "gaussian":
+                prev_attn = extras["kappa"]
+            else:
+                raise ValueError("Unknown argument to self.attention_type {}".format(self.attention_type))
+            contexts.append(context)
+            weights.append(attn_weight[None])
+            all_extras.append(extras)
+            h_i, c_i = h_t, c_t
+        # skip hidden? for better attn control?
+        if self.attention_type == "sigmoid_logistic":
+            out_contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+        if self.attention_type == "sigmoid_logistic_alt":
+            out_contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+        elif self.attention_type == "gaussian":
+            out_contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+        else:
+            out_contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+        #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+        #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + tds
+        # decoder_T, B, D
+        # absolutely no bypassing this?
+        # decoder_T, B, encoder_T
+        alignments = torch.cat(weights, axis=0)
+        return out_contexts, alignments, all_extras
+
+    # conditional first tier
+    def forward(self, list_of_inputs, list_of_spatial_conditions=None, bypass_td=None, bypass_fd=None, skip_input_embed=False,
+                      memory=None, memory_mask=None):
+        # by default embed the inputs, otherwise bypass
+        # condidering axis 2 time 3 frequency
+
+        # shift and project the input
+        if len(list_of_inputs) > 1:
+            raise ValueError("Only support list_of_inputs length 1 for now")
+
+        x = list_of_inputs[0]
+        td_x = torch.cat((0 * x[:, 0][:, None], x[:, :-1]), dim=1)
+        fd_x = torch.cat((0 * x[:, :, 0][:, :, None], x[:, :, :-1]), dim=2)
+        batch_size = x.shape[0]
+        self.batch_size = batch_size
+
+        if self.has_centralized_stack:
+            # x should has dim of size 1 on the last for input
+            cd_x = torch.cat((0 * x[:, 0][:, None], x[:, :-1]), dim=1)[..., 0]
+            # cd is now t b f
+            cd_x = cd_x.permute(1, 0, 2)
+
+            if not skip_input_embed:
+                cd_x = self.centralized_input_proj([cd_x])
+
+        if not skip_input_embed:
+            #td_x, td_e = self.embed_td(td_x)
+            #fd_x, fd_e = self.embed_fd(fd_x)
+            # reshape so the dot works
+            td_x = td_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+            fd_x = fd_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+            td_x = self.td_input_proj([td_x])
+            fd_x = self.fd_input_proj([fd_x])
+            td_x = td_x.reshape((batch_size, self.n_vert, self.n_horiz, -1))
+            fd_x = fd_x.reshape((batch_size, self.n_vert, self.n_horiz, -1))
+            # un reshape it?
+
+        if bypass_td is not None:
+            td_x = bypass_td
+        if bypass_fd is not None:
+            fd_x = bypass_fd
+
+        if self.has_attention:
+            assert memory is not None
+            assert memory_mask is not None
+
+        if self.has_spatial_condition:
+            cond_info = self.cond_net([list_of_spatial_conditions[0]])
+            td_x = td_x + cond_info
+            fd_x = fd_x + cond_info
+
+        if self.has_attention:
+            # t b f to b t f to stretch
+            #mem_shp = memory.shape
+            #memory_stretch = memory.permute(1, 0, 2)[:, :, None, :] + 0. * td_x[:, :1, :, :1]
+            #memory_stretch = memory_stretch.permute(0, 2, 1, 3).reshape((batch_size * self.n_vert, mem_shp[0], mem_shp[2]))
+            # back to t b f
+            #memory_stretch = memory_stretch.permute(1, 0, 2)
+            memory_stretch = memory
+        # batch, mel_time, mel_freq, feats -> batch * mel_time, mel_freq, feats
+        td_x = td_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+        fd_x = fd_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+        # horiz (freq), batch * vert, feat
+        td_x = td_x.permute(1, 0, 2)
+        fd_x = fd_x.permute(1, 0, 2)
+        # cd_x is n_vert, batch, freq
+        has_cd_att = False
+        td_x_i = td_x
+        fd_x_i = fd_x
+        if self.has_centralized_stack:
+            cd_x_i = cd_x
+
+        def res(l):
+            #return l
+            return (0.5 ** 0.5) * l
+            #return layer_norm(l, eps=1E-3)
+            #return (0.5 ** 0.5) * layer_norm(l, eps=1E-4)
+
+        def layer_norm(x, dim=-1, eps=1E-3):
+            # need a low eps for fp16
             mean = torch.mean(x, dim=dim, keepdim=True)
             var = torch.square(x - mean).mean(dim=dim, keepdim=True)
             return (x - mean) / torch.sqrt(var + eps)

@@ -492,7 +492,7 @@ for _i in range(hp.real_batch_size):
         teacher_forced_attn = model.attention_alignment
         text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
         # matshow vs imshow?
-        this_att = teacher_forced_attn[:, _i].cpu().data.numpy()[:reduced_mel_cut, :text_cut]
+        this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:reduced_mel_cut, :text_cut]
         this_att = this_att.astype("float32")
         plt.imshow(this_att)
         plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
@@ -599,7 +599,7 @@ for _i in range(hp.real_batch_size):
     # matshow vs imshow?
     if input_tier_condition_tag is None:
         teacher_forced_attn = model.attention_alignment
-        this_att = teacher_forced_attn[:, _i].cpu().data.numpy()[:, :]
+        this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:, :]
         this_att = this_att.astype("float32")
         plt.imshow(this_att)
         plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
