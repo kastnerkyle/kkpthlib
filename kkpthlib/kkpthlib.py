@@ -6609,9 +6609,8 @@ class YAMTransformerBlock(torch.nn.Module):
 
 
         for _i in range(self.n_layers):
-            memory_len=10
+            memory_len=0
             context_len=0
-            lcl_layers=2
             # n_layers=16, n_heads=10, head_dim=38, model_dim=380, inner_dim=900,
             # hardcode temporarily, maybe add automatic routine to select heads + head_dim
             time_fw_layer = AWDTransformerXLDecoderBlock([self.hidden_size,],
@@ -6630,11 +6629,11 @@ class YAMTransformerBlock(torch.nn.Module):
             self.tds_seq_time_fw.append(time_fw_layer)
             freq_fw_layer = AWDTransformerXLDecoderBlock([self.hidden_size,],
                                                           name=name + "_tds_seq_freq_fw_{}".format(_i),
-                                                          n_layers=lcl_layers,
-                                                          n_heads=6,
-                                                          head_dim=8,
+                                                          n_layers=self.transformer_inner_layers,
+                                                          n_heads=self.transformer_n_heads,
+                                                          head_dim=self.transformer_head_dim,
                                                           model_dim=self.hidden_size,
-                                                          inner_dim=256,
+                                                          inner_dim=self.transformer_inner_dim,
                                                           random_state=random_state,
                                                           memory_len=memory_len,
                                                           context_len=context_len,
@@ -6644,11 +6643,11 @@ class YAMTransformerBlock(torch.nn.Module):
 
             freq_bw_layer = AWDTransformerXLDecoderBlock([self.hidden_size,],
                                                           name=name + "_tds_seq_freq_bw_{}".format(_i),
-                                                          n_layers=lcl_layers,
-                                                          n_heads=6,
-                                                          head_dim=8,
+                                                          n_layers=self.transformer_inner_layers,
+                                                          n_heads=self.transformer_n_heads,
+                                                          head_dim=self.transformer_head_dim,
                                                           model_dim=self.hidden_size,
-                                                          inner_dim=256,
+                                                          inner_dim=self.transformer_inner_dim,
                                                           random_state=random_state,
                                                           memory_len=memory_len,
                                                           context_len=context_len,
@@ -6677,11 +6676,11 @@ class YAMTransformerBlock(torch.nn.Module):
 
             fd_freq_fw_layer = AWDTransformerXLDecoderBlock([self.hidden_size,],
                                                             name=name + "_fds_seq_freq_fw_{}".format(_i),
-                                                            n_layers=lcl_layers,
-                                                            n_heads=6,
-                                                            head_dim=8,
+                                                            n_layers=self.transformer_inner_layers,
+                                                            n_heads=self.transformer_n_heads,
+                                                            head_dim=self.transformer_head_dim,
                                                             model_dim=self.hidden_size,
-                                                            inner_dim=256,
+                                                            inner_dim=self.transformer_inner_dim,
                                                             random_state=random_state,
                                                             memory_len=memory_len,
                                                             context_len=context_len,
@@ -6694,12 +6693,12 @@ class YAMTransformerBlock(torch.nn.Module):
 
             if self.has_centralized_stack:
                 self.cds_centralized_lstms.append(rnn_fn([self.hidden_size,],
-                                                             self.hidden_size,
-                                                             random_state=random_state,
-                                                             init=init,
-                                                             scale=scale,
-                                                             name=name + "_cds_centralized_rnn_{}".format(_i),
-                                                             device=device))
+                                                          self.hidden_size,
+                                                          random_state=random_state,
+                                                          init=init,
+                                                          scale=scale,
+                                                          name=name + "_cds_centralized_rnn_{}".format(_i),
+                                                          device=device))
                 self.cds_projs.append(Linear([self.hidden_size,],
                                               self.hidden_size,
                                               random_state=random_state,
@@ -7492,6 +7491,7 @@ class YAMTransformerBlock(torch.nn.Module):
             # back to t b f
             #memory_stretch = memory_stretch.permute(1, 0, 2)
             memory_stretch = memory
+        # b, n_vert, n_horiz, feat
         # batch, mel_time, mel_freq, feats -> batch * mel_time, mel_freq, feats
         td_x = td_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
         fd_x = fd_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))

@@ -24,7 +24,7 @@ hp = HParams(memory_len=20,
              context_len=70,
              embedding_dropout_keep_prob=.8,
              #transformer_input_dim=380,
-             transformer_input_dim=48,
+             transformer_input_dim=240,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
              learning_rate=3E-4,
              min_learning_rate=1E-4,
@@ -51,21 +51,21 @@ def build_model(hp):
                                               device=hp.use_device,
                                               name="embed")
             self.block = YAMTransformerBlock([hp.transformer_input_dim],
-                                              10,
-                                              9,
+                                              10, # vert 
+                                              9, # horiz
                                               hp.transformer_input_dim,
                                               hp.transformer_input_dim,
-                                              3,
+                                              3, # layers
                                               transformer_inner_layers=2,
-                                              transformer_n_heads=6,
-                                              transformer_head_dim=8,
-                                              transformer_inner_dim=128,
+                                              transformer_n_heads=10,
+                                              transformer_head_dim=24,
+                                              transformer_inner_dim=900,
                                               has_spatial_condition=False,
                                               spatial_condition_input_size=1,
                                               spatial_condition_n_layers=2,
-                                              spatial_condition_n_heads=6,
-                                              spatial_condition_head_dim=8,
-                                              spatial_condition_inner_dim=128,
+                                              spatial_condition_n_heads=10,
+                                              spatial_condition_head_dim=24,
+                                              spatial_condition_inner_dim=900,
                                               device=hp.use_device,
                                               random_state=random_state,
                                               name="yam_block")
@@ -144,6 +144,7 @@ if __name__ == "__main__":
 
         # convert to batch, vert, horiz, 1
         # 3, 10, 9, 1
+        # want to be contiguous on horiz direction
         input_data = input_data.permute((2, 0, 1, 3))
 
         cond_data = 0. * input_data + 0.5
