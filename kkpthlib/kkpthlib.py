@@ -6321,6 +6321,7 @@ class YAMTransformerBlock(torch.nn.Module):
                  hidden_dim,
                  output_dim,
                  n_layers,
+                 input_dim=None,
                  has_centralized_stack=False,
                  has_spatial_condition=False,
                  spatial_condition_input_size=None,
@@ -6329,7 +6330,7 @@ class YAMTransformerBlock(torch.nn.Module):
                  spatial_condition_head_dim=38,
                  spatial_condition_inner_dim=900,
                  has_attention=False,
-                 transformer_inner_layers=2,
+                 transformer_inner_layers=1,
                  # defaults for hidden_dim=380...
                  transformer_n_heads=10,
                  transformer_head_dim=38,
@@ -6380,6 +6381,7 @@ class YAMTransformerBlock(torch.nn.Module):
         self.n_vert = n_vert
         self.n_horiz = n_horiz
         self.output_dim = output_dim
+        self.input_dim = input_dim
 
         if self.cell_type == "lstm":
             bidir_rnn_fn = BiLSTMLayer
@@ -6394,20 +6396,21 @@ class YAMTransformerBlock(torch.nn.Module):
 
         #self.embed_td = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_td")
         #self.embed_fd = Embedding(self.input_symbols, self.hidden_size, random_state=random_state, name=name + "_embed_fd")
-        self.td_input_proj = Linear([1],
-                                             self.hidden_size,
-                                             random_state=random_state,
-                                             init=init,
-                                             scale=scale,
-                                             name=name + "_td_input_proj",
-                                             device=device)
-        self.fd_input_proj = Linear([1],
-                                             self.hidden_size,
-                                             random_state=random_state,
-                                             init=init,
-                                             scale=scale,
-                                             name=name + "_fd_input_proj",
-                                             device=device)
+        proj_dim = self.input_dim if self.input_dim is not None else self.hidden_size
+        self.td_input_proj = Linear([proj_dim],
+                                    self.hidden_size,
+                                    random_state=random_state,
+                                    init=init,
+                                    scale=scale,
+                                    name=name + "_td_input_proj",
+                                    device=device)
+        self.fd_input_proj = Linear([proj_dim],
+                                    self.hidden_size,
+                                    random_state=random_state,
+                                    init=init,
+                                    scale=scale,
+                                    name=name + "_fd_input_proj",
+                                    device=device)
 
         self.tds_seq_time_fw = nn.ModuleList()
         self.tds_seq_freq_fw = nn.ModuleList()
@@ -6423,7 +6426,7 @@ class YAMTransformerBlock(torch.nn.Module):
                                                  scale=scale,
                                                  name=name + "_centralized_input_proj",
                                                  device=device)
-            self.cds_centralized_lstms = nn.ModuleList()
+            self.cds_centralized_seq = nn.ModuleList()
             self.cds_projs = nn.ModuleList()
 
         if self.has_spatial_condition:
@@ -6692,13 +6695,21 @@ class YAMTransformerBlock(torch.nn.Module):
 
 
             if self.has_centralized_stack:
-                self.cds_centralized_lstms.append(rnn_fn([self.hidden_size,],
-                                                          self.hidden_size,
-                                                          random_state=random_state,
-                                                          init=init,
-                                                          scale=scale,
-                                                          name=name + "_cds_centralized_rnn_{}".format(_i),
-                                                          device=device))
+                cd_layer = AWDTransformerXLDecoderBlock([self.hidden_size,],
+                                                         name=name + "_cds_centralized_rnn_{}".format(_i),
+                                                         n_layers=self.transformer_inner_layers,
+                                                         n_heads=self.transformer_n_heads,
+                                                         head_dim=self.transformer_head_dim,
+                                                         model_dim=self.hidden_size,
+                                                         inner_dim=self.transformer_inner_dim,
+                                                         random_state=random_state,
+                                                         memory_len=memory_len,
+                                                         context_len=context_len,
+                                                         init=init,
+                                                         scale=scale,
+                                                         device=device)
+                self.cds_centralized_seq.append(cd_layer)
+
                 self.cds_projs.append(Linear([self.hidden_size,],
                                               self.hidden_size,
                                               random_state=random_state,
@@ -6728,16 +6739,6 @@ class YAMTransformerBlock(torch.nn.Module):
 
     def _td_stack(self, tds, layer):
 
-        """
-        self.transformer = AWDTransformerXLDecoderBlock([hp.transformer_input_dim],
-                                                        name="transformer_block",
-                                                        random_state=random_state,
-                                                        memory_len=hp.memory_len,
-                                                        context_len=hp.context_len,
-                                                        init="normal",
-                                                        scale=0.02,
-                                                        device=hp.use_device)
-        """
         freq_lstm_fw_h, _, = self.tds_seq_freq_fw[layer](tds)
         freq_lstm_bw_h, _, = self.tds_seq_freq_bw[layer](torch.flip(tds, [0]))
         freq_lstm_h = torch.cat((freq_lstm_fw_h, torch.flip(freq_lstm_bw_h, [0])), dim=-1)
@@ -6754,7 +6755,7 @@ class YAMTransformerBlock(torch.nn.Module):
         return res
 
     def _cd_centralized_stack(self, cds, layer):
-        cent_lstm_h, _, __ = self.cds_centralized_lstms[layer]([cds])
+        cent_lstm_h, _ = self.cds_centralized_seq[layer](cds)
         res = self.cds_projs[layer]([cent_lstm_h])
         #return (0.5 ** 0.5) * (cds + cent_lstm_h)
         return res
@@ -7433,7 +7434,7 @@ class YAMTransformerBlock(torch.nn.Module):
         return out_contexts, alignments, all_extras
 
     # conditional first tier
-    def forward(self, list_of_inputs, list_of_spatial_conditions=None, bypass_td=None, bypass_fd=None, skip_input_embed=False,
+    def forward(self, list_of_inputs, list_of_spatial_conditions=None, bypass_td=None, bypass_fd=None,
                       memory=None, memory_mask=None):
         # by default embed the inputs, otherwise bypass
         # condidering axis 2 time 3 frequency
@@ -7453,21 +7454,18 @@ class YAMTransformerBlock(torch.nn.Module):
             cd_x = torch.cat((0 * x[:, 0][:, None], x[:, :-1]), dim=1)[..., 0]
             # cd is now t b f
             cd_x = cd_x.permute(1, 0, 2)
+            cd_x = self.centralized_input_proj([cd_x])
 
-            if not skip_input_embed:
-                cd_x = self.centralized_input_proj([cd_x])
-
-        if not skip_input_embed:
-            #td_x, td_e = self.embed_td(td_x)
-            #fd_x, fd_e = self.embed_fd(fd_x)
-            # reshape so the dot works
-            td_x = td_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
-            fd_x = fd_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
-            td_x = self.td_input_proj([td_x])
-            fd_x = self.fd_input_proj([fd_x])
-            td_x = td_x.reshape((batch_size, self.n_vert, self.n_horiz, -1))
-            fd_x = fd_x.reshape((batch_size, self.n_vert, self.n_horiz, -1))
-            # un reshape it?
+        #td_x, td_e = self.embed_td(td_x)
+        #fd_x, fd_e = self.embed_fd(fd_x)
+        # reshape so the dot works
+        td_x = td_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+        fd_x = fd_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+        td_x = self.td_input_proj([td_x])
+        fd_x = self.fd_input_proj([fd_x])
+        td_x = td_x.reshape((batch_size, self.n_vert, self.n_horiz, -1))
+        fd_x = fd_x.reshape((batch_size, self.n_vert, self.n_horiz, -1))
+        # un reshape it?
 
         if bypass_td is not None:
             td_x = bypass_td

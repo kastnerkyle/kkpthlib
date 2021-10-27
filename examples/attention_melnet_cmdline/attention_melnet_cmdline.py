@@ -641,6 +641,7 @@ if __name__ == "__main__":
     s = {"model": model,
          "optimizer": optimizer,
          "hparams": hp}
+
     """
     r = loop(speech, {"train": True}, None)
     r2 = loop(speech, {"train": True}, None)

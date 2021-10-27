@@ -64,16 +64,53 @@ class SamplingArguments(object):
         return base_str
 
 """
+new
+CUDA_VISIBLE_DEVICES=0 python sample_attention_melnet_cmdline.py --axis_split=21212 --tier_input_tag=0,0 --size_at_depth=88,32 --n_layers=5 --hidden_size=256 --cell_type=gru --learning_rate=1E-4 --optimizer=adam --real_batch_size=1 --virtual_batch_size=1 --use_longest --experiment_name=attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34 --output_dir=chain_sampled_tier0_0/ /home/kkastner/_kkpthlib_models/attention_melnet_cmdline_23-46-12_2021-05-10_02bd5d_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_0_0_sz_88_32/saved_models/valid_model-65364.pth
+"""
+"""
+old
 CUDA_VISIBLE_DEVICES=0 python sample_attention_melnet_cmdline.py  --axis_split=21212 --tier_input_tag=0,0 --size_at_depth=88,32 --n_layers=5 --hidden_size=256 --cell_type=gru --learning_rate=2E-5 --optimizer=adam --real_batch_size=1 --virtual_batch_size=1 --use_longest --experiment_name=attn_tts_robovoice_paper_mae_fp16_adam_gru_256_ramplr_round27 /home/kkastner/_kkpthlib_models/attention_melnet_cmdline_22-41-38_2021-24-07_07797f_attn_tts_robovoice_paper_mae_fp16_adam_gru_256_ramplr_round27_tier_0_0_sz_88_32/saved_models/valid_model-85332.pth
 """
+
 """
+new
+CUDA_VISIBLE_DEVICES=0 python sample_attention_melnet_cmdline.py  --axis_split=21212 --tier_input_tag=0,1 --tier_condition_tag=0,0 --size_at_depth=88,32 --n_layers=5 --hidden_size=256 --cell_type=gru --learning_rate=1E-4 --optimizer=adam --real_batch_size=1 --virtual_batch_size=1 --use_longest --experiment_name=attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34 --output_dir=chain_sampled_tier0_1/ /home/kkastner/_kkpthlib_models/attention_melnet_cmdline_08-58-06_2021-06-10_ea62e3_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_0_1_cond_0_0_sz_88_32/saved_models/valid_model-56368.pth --stored_sampled_tier_data=chain_sampled_tier0_0/sampled_forced_images/unnormalized_samples.npy
+"""
+"""
+old
 CUDA_VISIBLE_DEVICES=0 python sample_attention_melnet_cmdline.py  --axis_split=21212 --tier_input_tag=0,1 --tier_condition_tag=0,0 --size_at_depth=88,32 --n_layers=5 --hidden_size=256 --cell_type=gru --learning_rate=2E-5 --optimizer=adam --real_batch_size=1 --virtual_batch_size=1 --use_longest --experiment_name=attn_tts_robovoice_paper_mae_fp16_adam_gru_256_ramplr_round27 /home/kkastner/_kkpthlib_models/attention_melnet_cmdline_23-38-21_2021-27-07_ff2fad_attn_tts_robovoice_paper_mae_fp16_adam_gru_256_ramplr_round27_tier_0_1_cond_0_0_sz_88_32/saved_models/valid_model-71760.pth --stored_sampled_tier_data=splice_sampled_images/tier0_0/unnormalized_samples.npy
 """
+
 """
+new
+CUDA_VISIBLE_DEVICES=0 python sample_attention_melnet_cmdline.py  --axis_split=21212 --tier_input_tag=1,1 --tier_condition_tag=1,0 --size_at_depth=88,64 --n_layers=4 --hidden_size=256 --cell_type=gru --learning_rate=1E-4 --optimizer=adam --real_batch_size=1 --virtual_batch_size=1 --use_longest --experiment_name=attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34 --output_dir=chain_sampled_tier1_1/ /home/kkastner/_kkpthlib_models/attention_melnet_cmdline_04-13-10_2021-13-10_d28005_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_1_1_cond_1_0_sz_88_64/saved_models/valid_model-45696.pth --stored_sampled_tier_data="chain_sampled_tier0_0/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier0_1/sampled_forced_images/unnormalized_samples.npy"
+"""
+"""
+old
 CUDA_VISIBLE_DEVICES=0 python sample_attention_melnet_cmdline.py --axis_split=21212 --tier_input_tag=1,1 --tier_condition_tag=1,0 --size_at_depth=88,64 --n_layers=4 --hidden_size=256 --cell_type=gru --learning_rate=2E-5 --optimizer=adam --real_batch_size=1 --virtual_batch_size=1 --use_longest --experiment_name=attn_tts_robovoice_paper_mae_fp16_adam_gru_256_ramplr_round27 /home/kkastner/_kkpthlib_models/attention_melnet_cmdline_07-35-42_2021-26-08_bd1db4_attn_tts_robovoice_paper_mae_fp16_adam_gru_256_ramplr_round27_tier_1_1_cond_1_0_sz_88_64/saved_models/valid_model-60333.pth
 """
+
 """
+new
+CUDA_VISIBLE_DEVICES=0 python sample_attention_melnet_cmdline.py  --axis_split=21212 --tier_input_tag=2,1 --tier_condition_tag=2,0 --size_at_depth=176,64 --n_layers=3 --hidden_size=256 --cell_type=gru --learning_rate=1E-4 --optimizer=adam --real_batch_size=1 --virtual_batch_size=1 --use_longest --experiment_name=attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34 --output_dir=chain_sampled_tier2_1/ /home/kkastner/_kkpthlib_models/attention_melnet_cmdline_05-36-09_2021-14-10_907c17_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_2_1_cond_2_0_sz_176_64/saved_models/valid_model-45625.pth --stored_sampled_tier_data="chain_sampled_tier0_0/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier0_1/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier1_1/sampled_forced_images/unnormalized_samples.npy"
+"""
+"""
+old
 CUDA_VISIBLE_DEVICES=0 python sample_attention_melnet_cmdline.py --axis_split=21212 --tier_input_tag=2,1 --tier_condition_tag=2,0 --size_at_depth=176,64 --n_layers=3 --hidden_size=256 --cell_type=gru --learning_rate=2E-5 --optimizer=adam --real_batch_size=1 --virtual_batch_size=1 --use_longest --experiment_name=attn_tts_robovoice_paper_mae_fp16_adam_gru_256_ramplr_round27 /home/kkastner/_kkpthlib_models/attention_melnet_cmdline_07-59-29_2021-26-08_ccda8c_attn_tts_robovoice_paper_mae_fp16_adam_gru_256_ramplr_round27_tier_2_1_cond_2_0_sz_176_64/saved_models/valid_model-52500.pth
+"""
+
+"""
+new
+CUDA_VISIBLE_DEVICES=0 python sample_attention_melnet_cmdline.py  --axis_split=21212 --tier_input_tag=3,1 --tier_condition_tag=3,0 --size_at_depth=176,128 --n_layers=2 --hidden_size=256 --cell_type=gru --learning_rate=1E-4 --optimizer=adam --real_batch_size=1 --virtual_batch_size=1 --use_longest --experiment_name=attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34 --output_dir=chain_sampled_tier3_1/ /home/kkastner/_kkpthlib_models/attention_melnet_cmdline_04-36-32_2021-18-10_2365e2_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_3_1_cond_3_0_sz_176_128/saved_models/valid_model-20000.pth --stored_sampled_tier_data="chain_sampled_tier0_0/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier0_1/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier1_1/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier2_1/sampled_forced_images/unnormalized_samples.npy"
+"""
+
+"""
+new
+CUDA_VISIBLE_DEVICES=0 python sample_attention_melnet_cmdline.py  --axis_split=21212 --tier_input_tag=4,1 --tier_condition_tag=4,0 --size_at_depth=352,128 --n_layers=2 --hidden_size=256 --cell_type=gru --learning_rate=1E-4 --optimizer=adam --real_batch_size=1 --virtual_batch_size=1 --use_longest --experiment_name=attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34 --output_dir=chain_sampled_tier4_1/ /home/kkastner/_kkpthlib_models/attention_melnet_cmdline_21-54-32_2021-19-10_3e9e97_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_4_1_cond_4_0_sz_352_128/saved_models/valid_model-11250.pth --stored_sampled_tier_data="chain_sampled_tier0_0/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier0_1/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier1_1/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier2_1/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier3_1/sampled_forced_images/unnormalized_samples.npy"
+"""
+
+"""
+combine_all_outputs.py --axis_split=21212
 """
 
 storage_dir="tier0_0"

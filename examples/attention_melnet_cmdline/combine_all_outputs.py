@@ -39,7 +39,7 @@ if was_none:
 was_none = False
 if args.stored_sampled_tier_data is None:
     was_none = True
-    args.stored_sampled_tier_data = "tier0_0/sampled_forced_images/unnormalized_samples.npy,tier0_1_cond0_0/sampled_forced_images/unnormalized_samples.npy,tier1_1_cond1_0/sampled_forced_images/unnormalized_samples.npy,tier2_1_cond2_0/sampled_forced_images/unnormalized_samples.npy,tier3_1_cond3_0/sampled_forced_images/unnormalized_samples.npy,tier4_1_cond4_0/sampled_forced_images/unnormalized_samples.npy"
+    args.stored_sampled_tier_data = "chain_sampled_tier0_0/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier0_1/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier1_1/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier2_1/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier3_1/sampled_forced_images/unnormalized_samples.npy,chain_sampled_tier4_1/sampled_forced_images/unnormalized_samples.npy"
 
 if was_none:
     print("stored_sampled_tier_data not passed, using default arguments")

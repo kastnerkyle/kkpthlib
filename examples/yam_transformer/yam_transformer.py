@@ -26,8 +26,8 @@ hp = HParams(memory_len=20,
              #transformer_input_dim=380,
              transformer_input_dim=240,
              use_device='cuda' if torch.cuda.is_available() else 'cpu',
-             learning_rate=3E-4,
-             min_learning_rate=1E-4,
+             learning_rate=1E-5,
+             min_learning_rate=1E-5,
              clip=.25,
              batch_size=3,
              n_layers=5,
@@ -56,13 +56,13 @@ def build_model(hp):
                                               hp.transformer_input_dim,
                                               hp.transformer_input_dim,
                                               3, # layers
-                                              transformer_inner_layers=2,
+                                              transformer_inner_layers=1,
                                               transformer_n_heads=10,
                                               transformer_head_dim=24,
                                               transformer_inner_dim=900,
                                               has_spatial_condition=False,
                                               spatial_condition_input_size=1,
-                                              spatial_condition_n_layers=2,
+                                              spatial_condition_n_layers=1,
                                               spatial_condition_n_heads=10,
                                               spatial_condition_head_dim=24,
                                               spatial_condition_inner_dim=900,
@@ -92,9 +92,9 @@ def build_model(hp):
             xe, de = self.embedding(x)
             #out, l_o_m = self.block([xe], skip_input_embed=True)
             if cond_x is None:
-                out = self.block([xe], skip_input_embed=True)
+                out = self.block([xe])
             else:
-                out = self.block([xe], list_of_spatial_conditions=[cond_x], skip_input_embed=True)
+                out = self.block([xe], list_of_spatial_conditions=[cond_x])
             out_shp = out.shape
             out_reshp = out.reshape((-1, out_shp[-1]))
             p = self.out_proj([out_reshp])
@@ -152,18 +152,18 @@ if __name__ == "__main__":
 
         in_mems = stateful_args
         out = model(input_data, cond_data, list_of_mems=in_mems)
-        print("endo")
-        from IPython import embed; embed(); raise ValueError()
-        loss = loss_fun(out, target)
-        #loss = loss.sum(axis=0).mean()
-        loss = loss.mean()
+        # use input_data because the yamtransformer handles padding etc internally
+        loss = loss_fun(out, input_data)
+        loss = loss.sum(axis=2).sum(axis=1).mean()
+        #loss = loss.mean()
         l = loss.cpu().data.numpy()
         optimizer.zero_grad()
         if extras["train"]:
             loss.backward()
             clipping_grad_norm_(model.parameters(), hp.clip)
+            #clipping_grad_norm_(model.named_parameters(), hp.clip, named_check=True)
             optimizer.step()
-        return l, None, out_mems
+        return l, None, None
 
     # the out-of-loop-check
     r = loop(train_itr, {"train": True}, None)
