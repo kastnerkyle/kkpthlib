@@ -1,6 +1,7 @@
 from __future__ import print_function # Only Python 2.x
 import subprocess
 import sys
+import os
 
 if len(sys.argv) > 1:
     input_conditioning_json = sys.argv[1]
