@@ -26,6 +26,7 @@ class EnglishSpeechCorpus(object):
                        extract_subsequences=True,
                        fixed_minibatch_time_secs=6,
                        build_skiplist=True,
+                       sample_rate=22050,
                        random_state=None):
         self.metadata_csv = metadata_csv
         self.wav_folder = wav_folder
@@ -46,6 +47,8 @@ class EnglishSpeechCorpus(object):
         self.cached_mean_vec_ = None
         self.cached_std_vec_ = None
         self.cached_count_ = None
+
+        self.sample_rate = sample_rate
 
         self.n_mels = 256
 
@@ -92,6 +95,9 @@ class EnglishSpeechCorpus(object):
         splt = int(self.train_split * len(shuf_keys))
         self.train_keys = shuf_keys[:splt]
         self.valid_keys = shuf_keys[splt:]
+
+        self._batch_utts_queue = []
+        self._batch_used_keys_queue = []
 
         """
         # code used to pre-calculate information about pauses and gaps
@@ -262,15 +268,16 @@ class EnglishSpeechCorpus(object):
                 loaded_valid_keep_keys = [el.strip() for el in f.readlines()]
             self.train_keep_keys = [k for k in self.train_keys if k in loaded_train_keep_keys]
             self.valid_keep_keys = [k for k in self.valid_keys if k in loaded_valid_keep_keys]
+        else:
+            self.train_keep_keys = [k for k in self.train_keys]
+            self.valid_keep_keys = [l for k in self.valid_keys]
 
-            self._batch_utts_queue = []
-            self._batch_used_keys_queue = []
-            # sanity check we didnt delete the whole dataset
-            assert len(self.train_keep_keys) > (len(self.train_keys) // 10)
-            assert len(self.valid_keep_keys) > (len(self.valid_keys) // 10)
-            # sanity check train keys wasnt so short we got 0
-            assert len(self.train_keep_keys) > 0
-            assert len(self.valid_keep_keys) > 0
+        # sanity check we didnt delete the whole dataset
+        assert len(self.train_keep_keys) > (len(self.train_keys) // 10)
+        assert len(self.valid_keep_keys) > (len(self.valid_keys) // 10)
+        # sanity check train keys wasnt so short we got 0
+        assert len(self.train_keep_keys) > 0
+        assert len(self.valid_keep_keys) > 0
 
     def get_utterances(self, size, all_keys, skip_mel=False,
                        min_length_words=None, max_length_words=None,

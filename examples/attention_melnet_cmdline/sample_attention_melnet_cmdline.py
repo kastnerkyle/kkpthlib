@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.functional as F
+import re
 import copy
 import sys
 
@@ -67,6 +68,8 @@ parser.add_argument('--use_longest', action="store_true",
 parser.add_argument('--use_sample_index', type=str, default="0,0",
                     help='flag to use for deterministic sampling of same entry')
 
+parser.add_argument('--custom_conditioning_json', type=str, default=None,
+                    help="Path to Gentle formatted json for custom conditioning")
 
 parser.add_argument('--output_dir', type=str, default=None,
                     help='base directory to output sampled data')
@@ -141,6 +144,10 @@ input_batch_skips =int(args.batch_skips)
 input_virtual_batch_size = int(args.virtual_batch_size)
 input_tier_input_tag = [int(el) for el in args.tier_input_tag.split(",")]
 input_use_sample_index = [int(el) for el in args.use_sample_index.split(",")]
+if args.custom_conditioning_json is not None:
+    input_custom_conditioning_json = str(args.custom_conditioning_json)
+else:
+    input_custom_conditioning_json = None
 if args.output_dir is None:
     raise ValueError("No output_dir passed! Required for sampling")
 input_output_dir = args.output_dir if args.output_dir[-1] == "/" else args.output_dir + "/"
@@ -504,13 +511,108 @@ for _i in range(hp.real_batch_size):
         plt.close()
 
 time_len = x_in_np.shape[1]
-bias_til = time_len // 2
+if len(valid_el) > 1:
+    print("Multiple output samples detected, using default sampling bias of 50% of input length")
+    bias_til = time_len // 2
+else:
+    # try to do a smart split
+    timing_info = valid_el[0][3][list(valid_el[0][3].keys())[0]]
+    words = [w for w in timing_info["full_alignment"]["words"]]
+    # this logic should find the biggest gap with at least 1/2 a second priming
+    # in the first half of the overall word sequence
+    diffs = np.array([w["start"] for w in words[1:]]) - np.array([w["end"] for w in words[:-1]])
+    ends = np.array([w["end"] for w in words])
+    midpoint = ends[-1] / 2.
+    first_half = ends <= midpoint
+    gt_sec = ends >= .5
+    valid = first_half & gt_sec
+    gap_sort = np.argsort(diffs)[::-1]
+    chosen_index = None
+    for g in gap_sort:
+        if valid[g]:
+            chosen_index = g
+        else:
+            continue
+    if chosen_index is None:
+        bias_til = time_len // 2
+    else:
+        # now we need to figure out a time in frames which matches where the gap is
+        fs = float(speech.sample_rate)
+        stft_sz = speech.stft_size
+        stft_step = speech.stft_step
+        time_step_per_frame = 1./fs * stft_step
+        # due to overlap the neighbors might be valid too
+        full_size_frame_index = ends[2] / time_step_per_frame
+        full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
+        time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
+        downsampled_frame_index = full_size_frame_index / float(time_downsample_ratio)
+        bias_til = int(downsampled_frame_index)
+
 remaining_steps = time_len - bias_til
 sample_buffer = 0. * x_in_np
 # 1. means value is used, 0. means it is masked. Can be different with transformers...
 sample_mask = 0. * x_mask_in_np + 1.
 sample_buffer[:, :bias_til] = x_in_np[:, :bias_til]
 original_buffer = copy.deepcopy(x_in_np)
+
+if input_custom_conditioning_json is not None:
+    # now we need to construct the combined input conditioning with the bias 
+    with open(input_custom_conditioning_json, "r") as f:
+        custom_conditioning_alignment = json.load(f)
+
+    frank_el = copy.deepcopy(valid_el)
+    if chosen_index == None:
+        raise ValueError("automatic bias selection failed and chose arbitrary midpoint. Need word-boundary cuts to use custom_conditioning, try another index with (e.g.) --use_sample_index=0,0")
+    # now we replace the old one with the merged and regenerate the minibatch
+    frank_info = []
+    # sample rate
+    frank_info.append(frank_el[0][0])
+    # blank wav to be sure no info leaks
+    frank_info.append(0. * frank_el[0][1])
+    # blank mel spec for the same reason
+    frank_info.append(0. * frank_el[0][2])
+    # now we need to blend the words of the 2 sequences and make a new el
+    tmp = frank_el[0][3]
+    new = custom_conditioning_alignment
+    k = list(tmp.keys())[0]
+    # first lets find the word where we need to split the bias and the followup
+    pre_words = tmp[k]["full_alignment"]["words"][:chosen_index]
+    next_pre_word = tmp[k]["full_alignment"]["words"][chosen_index]
+
+    # handle offset correction
+    pre_offset = next_pre_word["startOffset"]
+    pre_t = next_pre_word["start"]
+    post_words = new["words"]
+    for _i in range(len(post_words)):
+        post_words[_i]["start"] = post_words[_i]["start"] + pre_t
+        post_words[_i]["end"] = post_words[_i]["end"] + pre_t
+        post_words[_i]["startOffset"] = post_words[_i]["startOffset"] + pre_offset
+        post_words[_i]["endOffset"] = post_words[_i]["endOffset"] + pre_offset
+    # now put the words together
+    comb_words = pre_words + post_words
+
+    # now to splice the transcripts, find the first occurence of the word that would have followed, split on that
+    search_key = next_pre_word["word"]
+    matches = [(m.start(0), m.end(0)) for m in re.finditer(search_key, tmp[k]["transcript"])]
+    matches_in_pre = np.where([1 if w["word"] == search_key else 0 for w in pre_words])[0]
+    if len(matches_in_pre) > 0:
+        this_match = matches[len(matches_in_pre)]
+    else:
+        this_match = matches[0]
+    sl = this_match[0]
+    r = tmp[k]["transcript"][:sl] + new["transcript"]
+    tmp[k]["transcript"] = r
+    tmp[k]["full_alignment"]["transcript"] = r
+    tmp[k]["full_alignment"]["words"] = comb_words
+    frank_info.append(tmp)
+    old_valid_el = valid_el
+    valid_el = [tuple(frank_info)]
+
+    cond_seq_data_batch, cond_seq_mask, _, __ = speech.format_minibatch(valid_el)
+
+    torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
+    torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
+
 import time
 begin_time = time.time()
 for time_step in range(remaining_steps):
@@ -589,6 +691,13 @@ if valid_el is not None:
         cleaned_valid_el = valid_el[0][3]
         json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
         f.write(json_string)
+
+with open(folder + "bias_information.txt", "w") as f:
+    full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
+    time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
+    bias_in_seconds = bias_til * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
+    out_string = "Biased using groundtruth data until frame {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)".format(bias_til, time_downsample_ratio, bias_til * time_downsample_ratio, bias_in_seconds)
+    f.write(out_string)
 
 for _i in range(hp.real_batch_size):
     unnormalized = sample_buffer * saved_std + saved_mean
