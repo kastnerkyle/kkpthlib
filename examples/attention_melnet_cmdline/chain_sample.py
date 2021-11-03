@@ -109,7 +109,8 @@ combine_all_outputs.py --axis_split=21212
 
 storage_dir="tier0_0"
 sample_index="10,0"
-tier0_0_model_path = "/home/kkastner/_kkpthlib_models/attention_melnet_cmdline_23-46-12_2021-05-10_02bd5d_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_0_0_sz_88_32/saved_models/valid_model-65364.pth"
+tier0_0_model_path = os.path.expanduser("~") + "/_kkpthlib_models/attention_melnet_cmdline_23-46-12_2021-05-10_02bd5d_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_0_0_sz_88_32/saved_models/valid_model-65364.pth"
+
 tier0_0_args = SamplingArguments(
                                  custom_conditioning_json=input_conditioning_json,
                                  model_path=tier0_0_model_path,
@@ -122,7 +123,7 @@ tier0_0_args = SamplingArguments(
 
 sampled_string="{}unnormalized_samples.npy".format(storage_dir + "/sampled_forced_images/")
 storage_dir="tier0_1_cond0_0"
-tier0_1_cond0_0_model_path = "/home/kkastner/_kkpthlib_models/attention_melnet_cmdline_08-58-06_2021-06-10_ea62e3_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_0_1_cond_0_0_sz_88_32/saved_models/valid_model-56368.pth"
+tier0_1_cond0_0_model_path = os.path.expanduser("~") + "/_kkpthlib_models/attention_melnet_cmdline_08-58-06_2021-06-10_ea62e3_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_0_1_cond_0_0_sz_88_32/saved_models/valid_model-56368.pth"
 tier0_1_cond0_0_args = SamplingArguments(
                                          custom_conditioning_json=input_conditioning_json,
                                          model_path=tier0_1_cond0_0_model_path,
@@ -137,7 +138,7 @@ tier0_1_cond0_0_args = SamplingArguments(
 
 sampled_string+=",{}unnormalized_samples.npy".format(storage_dir + "/sampled_forced_images/")
 storage_dir="tier1_1_cond1_0"
-tier1_1_cond1_0_model_path = "/home/kkastner/_kkpthlib_models/attention_melnet_cmdline_04-13-10_2021-13-10_d28005_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_1_1_cond_1_0_sz_88_64/saved_models/valid_model-45696.pth"
+tier1_1_cond1_0_model_path = os.path.expanduser("~") + "/_kkpthlib_models/attention_melnet_cmdline_04-13-10_2021-13-10_d28005_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_1_1_cond_1_0_sz_88_64/saved_models/valid_model-45696.pth"
 tier1_1_cond1_0_args = SamplingArguments(
                                          custom_conditioning_json=input_conditioning_json,
                                          model_path=tier1_1_cond1_0_model_path,
@@ -152,7 +153,7 @@ tier1_1_cond1_0_args = SamplingArguments(
 
 sampled_string+=",{}unnormalized_samples.npy".format(storage_dir + "/sampled_forced_images/")
 storage_dir="tier2_1_cond2_0"
-tier2_1_cond2_0_model_path = "/home/kkastner/_kkpthlib_models/attention_melnet_cmdline_05-36-09_2021-14-10_907c17_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_2_1_cond_2_0_sz_176_64/saved_models/valid_model-45625.pth"
+tier2_1_cond2_0_model_path = os.path.expanduser("~") + "/_kkpthlib_models/attention_melnet_cmdline_05-36-09_2021-14-10_907c17_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_2_1_cond_2_0_sz_176_64/saved_models/valid_model-45625.pth"
 tier2_1_cond2_0_args = SamplingArguments(
                                          custom_conditioning_json=input_conditioning_json,
                                          model_path=tier2_1_cond2_0_model_path,
@@ -167,7 +168,7 @@ tier2_1_cond2_0_args = SamplingArguments(
 
 sampled_string+=",{}unnormalized_samples.npy".format(storage_dir + "/sampled_forced_images/")
 storage_dir="tier3_1_cond3_0"
-tier3_1_cond3_0_model_path = "/home/kkastner/_kkpthlib_models/attention_melnet_cmdline_04-36-32_2021-18-10_2365e2_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_3_1_cond_3_0_sz_176_128/saved_models/valid_model-20000.pth"
+tier3_1_cond3_0_model_path = os.path.expanduser("~") + "/_kkpthlib_models/attention_melnet_cmdline_04-36-32_2021-18-10_2365e2_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_3_1_cond_3_0_sz_176_128/saved_models/valid_model-20000.pth"
 tier3_1_cond3_0_args = SamplingArguments(
                                          custom_conditioning_json=input_conditioning_json,
                                          model_path=tier3_1_cond3_0_model_path,
@@ -182,7 +183,7 @@ tier3_1_cond3_0_args = SamplingArguments(
 
 sampled_string+=",{}unnormalized_samples.npy".format(storage_dir + "/sampled_forced_images/")
 storage_dir="tier4_1_cond4_0"
-tier4_1_cond4_0_model_path = "/home/kkastner/_kkpthlib_models/attention_melnet_cmdline_21-54-32_2021-19-10_3e9e97_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_4_1_cond_4_0_sz_352_128/saved_models/valid_model-11250.pth"
+tier4_1_cond4_0_model_path = os.path.expanduser("~") + "/_kkpthlib_models/attention_melnet_cmdline_21-54-32_2021-19-10_3e9e97_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_4_1_cond_4_0_sz_352_128/saved_models/valid_model-11250.pth"
 tier4_1_cond4_0_args = SamplingArguments(
                                          custom_conditioning_json=input_conditioning_json,
                                          model_path=tier4_1_cond4_0_model_path,
