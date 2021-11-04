@@ -307,11 +307,21 @@ if args.use_longest:
                         kept_indices[1][kept] = candidate
                         break
 elif input_use_sample_index[0] != 0 or input_use_sample_index[1] != 0:
+    store_valid_els = []
     for _ in range(input_use_sample_index[0]):
         this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
+        store_valid_els.append(this_valid_el)
+    names = []
+    for _ii in range(len(store_valid_els)):
+        for _jj in range(len(store_valid_els[_ii])):
+            n = list(store_valid_els[_ii][_jj][3].keys())[0]
+            names.append(n)
+    print("helo")
+    from IPython import embed; embed(); raise ValueError()
     valid_el = [this_valid_el[input_use_sample_index[1]]] * hp.real_batch_size
 else:
     valid_el = speech.get_valid_utterances(hp.real_batch_size)
+
 
 cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
 batch_norm_flag = 1.
