@@ -10,6 +10,12 @@ from .frontends import EnglishPhonemeLookup
 from .audio_processing.audio_tools import herz_to_mel, mel_to_herz
 from .audio_processing.audio_tools import stft, istft
 
+import os
+import pwd
+
+def get_username():
+    return pwd.getpwuid(os.getuid())[0]
+
 class EnglishSpeechCorpus(object):
     """
     Frontend processing inspired by r9y9 (Ryuichi Yamamoto) DeepVoice3 implementation
@@ -46,6 +52,17 @@ class EnglishSpeechCorpus(object):
         self.max_length_time_secs = max_length_time_secs
         self.extract_subsequences = extract_subsequences
 
+        self.bypass_checks = bypass_checks
+        self.build_skiplist = build_skiplist
+        self.combine_all_into_valid = combine_all_into_valid
+
+        if get_username() == "root":
+            print("WARNING: detected colab environment (due to username 'root'), using mini_robovoice settings to sample!\nThese settings will use all data in {} for both train and valid sets!".format(metadata_csv))
+            self.bypass_checks = True
+            self.combine_all_info_valid = True
+            self.build_skiplist = False
+
+
         self.cached_mean_vec_ = None
         self.cached_std_vec_ = None
         self.cached_count_ = None
@@ -81,7 +98,7 @@ class EnglishSpeechCorpus(object):
         if alignment_folder is not None:
             for k in sorted(info.keys()):
                 alignment_info_json = alignment_folder + k + ".json"
-                if bypass_checks:
+                if self.bypass_checks:
                     try:
                         with open(alignment_info_json, "r") as read_file:
                             alignment = json.load(read_file)
@@ -108,7 +125,7 @@ class EnglishSpeechCorpus(object):
                         self.misaligned_keys.append(k)
                     else:
                         self.aligned_keys.append(k)
-        if combine_all_into_valid:
+        if self.combine_all_into_valid:
             shuf_keys = self.aligned_keys
             self.train_keys = self.aligned_keys
             self.valid_keys = self.aligned_keys
@@ -197,7 +214,6 @@ class EnglishSpeechCorpus(object):
         self.phone_lookup["_"] = sil_val
         assert len(self.phone_lookup.keys()) == len(np.unique(list(self.phone_lookup.keys())))
 
-        self.build_skiplist = build_skiplist
         if self.build_skiplist:
             # should be deterministic if we run the same script 2x
             random_state_val = random_state.randint(10000)

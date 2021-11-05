@@ -257,33 +257,13 @@ data_random_state = np.random.RandomState(hp.random_seed)
 folder_base = "/usr/local/data/kkastner/robovoice/robovoice_d_25k"
 fixed_minibatch_time_secs = 4
 fraction_train_split = .9
-
-import os
-import pwd
-
-def get_username():
-    return pwd.getpwuid(os.getuid())[0]
-
-if get_username() == "root":
-    print("WARNING: detected colab environment (due to username 'root'), using mini_robovoice settings to sample!\nThese settings will use all data in {} for both train and valid sets!".format(folder_base))
-    speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
-                                 wav_folder=folder_base + "/wavs/",
-                                 alignment_folder=folder_base + "/alignment_json/",
-                                 fixed_minibatch_time_secs=fixed_minibatch_time_secs,
-                                 extract_subsequences=False,
-                                 train_split=fraction_train_split,
-                                 bypass_checks=True,
-                                 combine_all_into_valid=True,
-                                 build_skiplist=False,
-                                 random_state=data_random_state)
-else:
-    speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
-                                 wav_folder=folder_base + "/wavs/",
-                                 alignment_folder=folder_base + "/alignment_json/",
-                                 fixed_minibatch_time_secs=fixed_minibatch_time_secs,
-                                 extract_subsequences=False,
-                                 train_split=fraction_train_split,
-                                 random_state=data_random_state)
+speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
+                             wav_folder=folder_base + "/wavs/",
+                             alignment_folder=folder_base + "/alignment_json/",
+                             fixed_minibatch_time_secs=fixed_minibatch_time_secs,
+                             extract_subsequences=False,
+                             train_split=fraction_train_split,
+                             random_state=data_random_state)
 
 dataset_name = folder_base.split("/")[-1]
 dataset_max_limit = fixed_minibatch_time_secs
