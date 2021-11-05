@@ -309,7 +309,7 @@ class EnglishSpeechCorpus(object):
             self.valid_keep_keys = [k for k in self.valid_keys if k in loaded_valid_keep_keys]
         else:
             self.train_keep_keys = [k for k in self.train_keys]
-            self.valid_keep_keys = [l for k in self.valid_keys]
+            self.valid_keep_keys = [k for k in self.valid_keys]
 
         # sanity check we didnt delete the whole dataset
         assert len(self.train_keep_keys) > (len(self.train_keys) // 10)
