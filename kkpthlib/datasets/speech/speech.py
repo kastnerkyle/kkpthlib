@@ -26,6 +26,8 @@ class EnglishSpeechCorpus(object):
                        extract_subsequences=True,
                        fixed_minibatch_time_secs=6,
                        build_skiplist=True,
+                       bypass_checks=False,
+                       combine_all_into_valid=False,
                        sample_rate=22050,
                        random_state=None):
         self.metadata_csv = metadata_csv
@@ -79,22 +81,43 @@ class EnglishSpeechCorpus(object):
         if alignment_folder is not None:
             for k in sorted(info.keys()):
                 alignment_info_json = alignment_folder + k + ".json"
-                with open(alignment_info_json, "r") as read_file:
-                    alignment = json.load(read_file)
-                skip_example = False
-                for el in alignment["words"]:
-                    if el["case"] != "success":
-                        #print("skipping {} due to unaligned word".format(k))
-                        skip_example = True
-                if skip_example == True:
-                    self.misaligned_keys.append(k)
+                if bypass_checks:
+                    try:
+                        with open(alignment_info_json, "r") as read_file:
+                            alignment = json.load(read_file)
+                        skip_example = False
+                        for el in alignment["words"]:
+                            if el["case"] != "success":
+                                #print("skipping {} due to unaligned word".format(k))
+                                skip_example = True
+                        if skip_example == True:
+                            self.misaligned_keys.append(k)
+                        else:
+                            self.aligned_keys.append(k)
+                    except:
+                        continue
                 else:
-                    self.aligned_keys.append(k)
-        shuf_keys = copy.deepcopy(self.aligned_keys)
-        random_state.shuffle(shuf_keys)
-        splt = int(self.train_split * len(shuf_keys))
-        self.train_keys = shuf_keys[:splt]
-        self.valid_keys = shuf_keys[splt:]
+                    with open(alignment_info_json, "r") as read_file:
+                        alignment = json.load(read_file)
+                    skip_example = False
+                    for el in alignment["words"]:
+                        if el["case"] != "success":
+                            #print("skipping {} due to unaligned word".format(k))
+                            skip_example = True
+                    if skip_example == True:
+                        self.misaligned_keys.append(k)
+                    else:
+                        self.aligned_keys.append(k)
+        if combine_all_into_valid:
+            shuf_keys = self.aligned_keys
+            self.train_keys = self.aligned_keys
+            self.valid_keys = self.aligned_keys
+        else:
+            shuf_keys = copy.deepcopy(self.aligned_keys)
+            random_state.shuffle(shuf_keys)
+            splt = int(self.train_split * len(shuf_keys))
+            self.train_keys = shuf_keys[:splt]
+            self.valid_keys = shuf_keys[splt:]
 
         self._batch_utts_queue = []
         self._batch_used_keys_queue = []

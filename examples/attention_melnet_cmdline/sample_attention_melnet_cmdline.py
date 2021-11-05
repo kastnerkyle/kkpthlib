@@ -257,13 +257,33 @@ data_random_state = np.random.RandomState(hp.random_seed)
 folder_base = "/usr/local/data/kkastner/robovoice/robovoice_d_25k"
 fixed_minibatch_time_secs = 4
 fraction_train_split = .9
-speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
-                             wav_folder=folder_base + "/wavs/",
-                             alignment_folder=folder_base + "/alignment_json/",
-                             fixed_minibatch_time_secs=fixed_minibatch_time_secs,
-                             extract_subsequences=False,
-                             train_split=fraction_train_split,
-                             random_state=data_random_state)
+
+import os
+import pwd
+
+def get_username():
+    return pwd.getpwuid(os.getuid())[0]
+
+if get_username() == "root":
+    print("WARNING: detected colab environment (due to username 'root'), using mini_robovoice settings to sample!\nThese settings will use all data in {} for both train and valid sets!".format(folder_base))
+    speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
+                                 wav_folder=folder_base + "/wavs/",
+                                 alignment_folder=folder_base + "/alignment_json/",
+                                 fixed_minibatch_time_secs=fixed_minibatch_time_secs,
+                                 extract_subsequences=False,
+                                 train_split=fraction_train_split,
+                                 bypass_checks=True,
+                                 combine_all_into_valid=True,
+                                 build_skiplist=False,
+                                 random_state=data_random_state)
+else:
+    speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
+                                 wav_folder=folder_base + "/wavs/",
+                                 alignment_folder=folder_base + "/alignment_json/",
+                                 fixed_minibatch_time_secs=fixed_minibatch_time_secs,
+                                 extract_subsequences=False,
+                                 train_split=fraction_train_split,
+                                 random_state=data_random_state)
 
 dataset_name = folder_base.split("/")[-1]
 dataset_max_limit = fixed_minibatch_time_secs
@@ -307,6 +327,8 @@ if args.use_longest:
                         kept_indices[1][kept] = candidate
                         break
 elif input_use_sample_index[0] != 0 or input_use_sample_index[1] != 0:
+    # used this to get names of minibatch examples to form mini dataset
+    # not used right now but may be logged in the future
     store_valid_els = []
     for _ in range(input_use_sample_index[0]):
         this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
@@ -316,8 +338,6 @@ elif input_use_sample_index[0] != 0 or input_use_sample_index[1] != 0:
         for _jj in range(len(store_valid_els[_ii])):
             n = list(store_valid_els[_ii][_jj][3].keys())[0]
             names.append(n)
-    print("helo")
-    from IPython import embed; embed(); raise ValueError()
     valid_el = [this_valid_el[input_use_sample_index[1]]] * hp.real_batch_size
 else:
     valid_el = speech.get_valid_utterances(hp.real_batch_size)
