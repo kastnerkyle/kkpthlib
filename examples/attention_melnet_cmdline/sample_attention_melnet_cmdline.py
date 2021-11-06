@@ -618,6 +618,12 @@ if input_custom_conditioning_json is not None:
     old_valid_el = valid_el
     valid_el = [tuple(frank_info)]
 
+    sample_info_path = folder + "bias_merged_text_info.json"
+    cleaned_valid_el = valid_el[0][3]
+    with open(sample_info_path, 'w') as f:
+        json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
+        f.write(json_string)
+
     cond_seq_data_batch, cond_seq_mask, _, __ = speech.format_minibatch(valid_el)
 
     torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
