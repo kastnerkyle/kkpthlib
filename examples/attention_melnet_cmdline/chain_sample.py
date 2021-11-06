@@ -109,7 +109,9 @@ combine_all_outputs.py --axis_split=21212
 """
 
 storage_dir="tier0_0"
-sample_index="10,0"
+
+sample_index="7,0"
+
 tier0_0_model_path = os.path.expanduser("~") + "/_kkpthlib_models/attention_melnet_cmdline_23-46-12_2021-05-10_02bd5d_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_0_0_sz_88_32/saved_models/valid_model-65364.pth"
 
 tier0_0_args = SamplingArguments(

@@ -585,6 +585,10 @@ if input_custom_conditioning_json is not None:
     tmp = frank_el[0][3]
     new = custom_conditioning_alignment
     k = list(tmp.keys())[0]
+    # if we choose the 0th, include it
+    if chosen_index == 0:
+        # need to force it to always be at least 1 word....
+        chosen_index = 1
     # first lets find the word where we need to split the bias and the followup
     pre_words = tmp[k]["full_alignment"]["words"][:chosen_index]
     next_pre_word = tmp[k]["full_alignment"]["words"][chosen_index]
