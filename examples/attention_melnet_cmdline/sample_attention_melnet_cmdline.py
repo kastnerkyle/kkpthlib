@@ -551,8 +551,8 @@ else:
         stft_sz = speech.stft_size
         stft_step = speech.stft_step
         time_step_per_frame = 1./fs * stft_step
-        # due to overlap the neighbors might be valid too
-        full_size_frame_index = ends[2] / time_step_per_frame
+        # due to overlap the neighbors might be valid too but for now just use the chosen index
+        full_size_frame_index = ends[chosen_index] / time_step_per_frame
         full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
         time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
         downsampled_frame_index = full_size_frame_index / float(time_downsample_ratio)
@@ -585,13 +585,9 @@ if input_custom_conditioning_json is not None:
     tmp = frank_el[0][3]
     new = custom_conditioning_alignment
     k = list(tmp.keys())[0]
-    # if we choose the 0th, include it
-    if chosen_index == 0:
-        # need to force it to always be at least 1 word....
-        chosen_index = 1
     # first lets find the word where we need to split the bias and the followup
-    pre_words = tmp[k]["full_alignment"]["words"][:chosen_index]
-    next_pre_word = tmp[k]["full_alignment"]["words"][chosen_index]
+    pre_words = tmp[k]["full_alignment"]["words"][:chosen_index + 1]
+    next_pre_word = tmp[k]["full_alignment"]["words"][chosen_index + 1]
 
     # handle offset correction
     pre_offset = next_pre_word["startOffset"]
