@@ -712,7 +712,7 @@ with open(folder + "bias_information.txt", "w") as f:
     full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
     time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
     bias_in_seconds = bias_til * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
-    out_string = "Biased using groundtruth data until frame {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)".format(bias_til, time_downsample_ratio, bias_til * time_downsample_ratio, bias_in_seconds)
+    out_string = "Biased using groundtruth data until frame {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds\nstart_frame:{}\n)".format(bias_til, time_downsample_ratio, bias_til * time_downsample_ratio, bias_in_seconds, bias_til)
     f.write(out_string)
 
 for _i in range(hp.real_batch_size):
