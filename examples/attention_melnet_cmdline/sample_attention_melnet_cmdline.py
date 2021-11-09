@@ -772,21 +772,22 @@ for _i in range(hp.real_batch_size):
 
     # output length is first dim
     # conditioning dim is last dim
-    attention_positions = np.array([model.attention_extras[_el]["kappa"].cpu().data.numpy() for _el in range(len(model.attention_extras))])[:, _i]
-    attention_terminations = np.array([model.attention_extras[_el]["termination"].cpu().data.numpy() for _el in range(len(model.attention_extras))])[:, _i]
+    if hasattr(model, "attention_extras"):
+        attention_positions = np.array([model.attention_extras[_el]["kappa"].cpu().data.numpy() for _el in range(len(model.attention_extras))])[:, _i]
+        attention_terminations = np.array([model.attention_extras[_el]["termination"].cpu().data.numpy() for _el in range(len(model.attention_extras))])[:, _i]
 
-    aa = np.where(unnormalized[_i, :, :, 0].mean(axis=1) < 1E-3)[0]
-    # get the start of the last contiguous subsequence with mean amplitude < 1E-3
-    # should represent the end silence with a well trained model
+        aa = np.where(unnormalized[_i, :, :, 0].mean(axis=1) < 1E-3)[0]
+        # get the start of the last contiguous subsequence with mean amplitude < 1E-3
+        # should represent the end silence with a well trained model
 
-    silent_subs = ranges(aa)
-    last_sil_start = silent_subs[-1][0]
-    with open(folder + "attention_termination_x{}.txt".format(_i), "w") as f:
-        full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
-        time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
-        sil_in_seconds = last_sil_start * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
-        out_string = "Sil frames begin at {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)\nend_frame:{}\nend_scale:{}".format(last_sil_start, time_downsample_ratio, last_sil_start * time_downsample_ratio, sil_in_seconds, last_sil_start, time_downsample_ratio)
-        f.write(out_string)
+        silent_subs = ranges(aa)
+        last_sil_start = silent_subs[-1][0]
+        with open(folder + "attention_termination_x{}.txt".format(_i), "w") as f:
+            full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
+            time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
+            sil_in_seconds = last_sil_start * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
+            out_string = "Sil frames begin at {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)\nend_frame:{}\nend_scale:{}".format(last_sil_start, time_downsample_ratio, last_sil_start * time_downsample_ratio, sil_in_seconds, last_sil_start, time_downsample_ratio)
+            f.write(out_string)
 
 np.save(folder + "/" + "raw_samples.npy", sample_buffer)
 np.save(folder + "/" + "unnormalized_samples.npy", sample_buffer * saved_std + saved_mean)
