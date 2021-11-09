@@ -663,7 +663,8 @@ for time_step in range(remaining_steps):
             cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
             if input_stored_conditioning is not None:
                 cond_np = input_stored_conditioning
-            sample_buffer[:, this_step, mel_step] = cond_np[:, this_step, mel_step]
+            # cond is unnormalized, predictions are normalized
+            sample_buffer[:, this_step, mel_step] = ((cond_np - saved_mean) / saved_std)[:, this_step, mel_step]
             continue
         print("step {},{} of {},{}".format(this_step, mel_step, time_len, x_in_np.shape[2]))
 
