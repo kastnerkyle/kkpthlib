@@ -70,6 +70,8 @@ parser.add_argument('--use_sample_index', type=str, default="0,0",
 
 parser.add_argument('--custom_conditioning_json', type=str, default=None,
                     help="Path to Gentle formatted json for custom conditioning")
+parser.add_argument('--attention_early_termination_file', type=str, default=None,
+                    help="Path to attention termination file for reducing sample time")
 
 parser.add_argument('--output_dir', type=str, default=None,
                     help='base directory to output sampled data')
@@ -148,6 +150,12 @@ if args.custom_conditioning_json is not None:
     input_custom_conditioning_json = str(args.custom_conditioning_json)
 else:
     input_custom_conditioning_json = None
+
+if args.attention_early_termination_file is not None:
+    input_attention_early_termination_file = str(args.attention_early_termination_file)
+else:
+    input_attention_early_termination_file = None
+
 if args.output_dir is None:
     raise ValueError("No output_dir passed! Required for sampling")
 input_output_dir = args.output_dir if args.output_dir[-1] == "/" else args.output_dir + "/"
@@ -629,15 +637,35 @@ if input_custom_conditioning_json is not None:
     torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
     torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
 
+if input_attention_early_termination_file == None:
+    last_sil_frame_scaled = np.inf
+else:
+    with open(input_attention_early_termination_file, "r") as f:
+        lines = f.readlines()
+        last_sil_frame = int(f[1].strip().split(":")[1])
+        last_sil_resolution = int(f[2].strip().split(":")[1])
+        full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
+        this_resolution = full_n_frames / input_size_at_depth[0] # should always be integer value
+        # add in extra frame(s) based on the upsampling resolution due to ambiguity
+        last_sil_frame_scaled = last_sil_frame * int(last_sil_resolution / this_resolution) + (int(last_sil_resolution / this_resolution) - 1)
+
 import time
 begin_time = time.time()
+torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
+torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
 for time_step in range(remaining_steps):
     for mel_step in range(x_in_np.shape[2]):
         cur_time = time.time()
         this_step = bias_til + time_step
+        if this_step > last_sil_frame_scaled:
+            print("step {},{} of {},{} -> bypassed due to attention last frame of {}".format(this_step, mel_step, time_len, x_in_np.shape[2], last_sil_frame_scaled))
+            # if we have passed the attention termination, just copy the conditioning
+            cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+            if input_stored_conditioning is not None:
+                cond_np = input_stored_conditioning
+            sample_buffer[:, this_step, mel_step] = cond_np[:, this_step, mel_step]
+            continue
         print("step {},{} of {},{}".format(this_step, mel_step, time_len, x_in_np.shape[2]))
-        torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
-        torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
 
         """
         all_x_splits = []
@@ -712,8 +740,15 @@ with open(folder + "bias_information.txt", "w") as f:
     full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
     time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
     bias_in_seconds = bias_til * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
-    out_string = "Biased using groundtruth data until frame {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds\nstart_frame:{}\n)".format(bias_til, time_downsample_ratio, bias_til * time_downsample_ratio, bias_in_seconds, bias_til)
+    out_string = "Biased using groundtruth data until frame {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)\nstart_frame:{}\n".format(bias_til, time_downsample_ratio, bias_til * time_downsample_ratio, bias_in_seconds, bias_til)
     f.write(out_string)
+
+# function to find contiguous subsequences in a list
+def ranges(nums):
+    nums = sorted(set(nums))
+    gaps = [[s, e] for s, e in zip(nums, nums[1:]) if s+1 < e]
+    edges = iter(nums[:1] + sum(gaps, []) + nums[-1:])
+    return list(zip(edges, edges))
 
 for _i in range(hp.real_batch_size):
     unnormalized = sample_buffer * saved_std + saved_mean
@@ -734,6 +769,24 @@ for _i in range(hp.real_batch_size):
         plt.imshow(cond_np[_i, :, :, 0])
         plt.savefig(folder + os.sep + "cond_small_x{}.png".format(_i))
         plt.close()
+
+    # output length is first dim
+    # conditioning dim is last dim
+    attention_positions = np.array([model.attention_extras[_el]["kappa"].cpu().data.numpy() for _el in range(len(model.attention_extras))])[:, _i]
+    attention_terminations = np.array([model.attention_extras[_el]["termination"].cpu().data.numpy() for _el in range(len(model.attention_extras))])[:, _i]
+
+    aa = np.where(unnormalized[_i, :, :, 0].mean(axis=1) < 1E-3)[0]
+    # get the start of the last contiguous subsequence with mean amplitude < 1E-3
+    # should represent the end silence with a well trained model
+
+    silent_subs = ranges(aa)
+    last_sil_start = silent_subs[-1][0]
+    with open(folder + "attention_termination_x{}.txt".format(_i), "w") as f:
+        full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
+        time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
+        sil_in_seconds = last_sil_start * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
+        out_string = "Sil frames begin at {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)\nend_frame:{}\nend_scale:{}".format(last_sil_start, time_downsample_ratio, last_sil_start * time_downsample_ratio, sil_in_seconds, last_sil_start, time_downsample_ratio)
+        f.write(out_string)
 
 np.save(folder + "/" + "raw_samples.npy", sample_buffer)
 np.save(folder + "/" + "unnormalized_samples.npy", sample_buffer * saved_std + saved_mean)

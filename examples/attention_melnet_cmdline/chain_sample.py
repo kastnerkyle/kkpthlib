@@ -19,6 +19,7 @@ class SamplingArguments(object):
                  stored_sampled_tier_data=None,
                  cuda_device=0,
                  custom_conditioning_json=None,
+                 attention_early_termination_file=None,
                  script_name="sample_attention_melnet_cmdline.py",
                  axis_split="21212",
                  experiment_name="sampled_model",
@@ -49,6 +50,7 @@ class SamplingArguments(object):
         self.cell_type = cell_type
         self.stored_sampled_tier_data = stored_sampled_tier_data
         self.custom_conditioning_json = custom_conditioning_json
+        self.attention_early_termination_file = attention_early_termination_file
 
     def format_args_as_string(self):
         base_str = "CUDA_VISIBLE_DEVICES={} python sample_attention_melnet_cmdline.py".format(self.cuda_device)
@@ -69,6 +71,8 @@ class SamplingArguments(object):
         base_str += " --experiment_name=" + str(self.experiment_name)
         if self.custom_conditioning_json is not None:
             base_str += " --custom_conditioning_json=" + str(self.custom_conditioning_json)
+        if self.attention_early_termination_file is not None:
+            base_str += " --attention_early_termination_file=" + str(self.attention_early_termination_file)
         base_str += " {}".format(self.model_path)
         if self.stored_sampled_tier_data is not None:
             base_str += " --stored_sampled_tier_data=" + str(self.stored_sampled_tier_data)
@@ -109,6 +113,7 @@ combine_all_outputs.py --axis_split=21212
 """
 
 storage_dir="tier0_0"
+attention_storage_dir=storage_dir
 
 sample_index="7,0"
 
@@ -124,11 +129,14 @@ tier0_0_args = SamplingArguments(
                                  n_layers=5,
                                  hidden_size=256)
 
+attention_early_termination_file = attention_storage_dir + "/sampled_forced_images/attention_termination_x0.txt"
+
 sampled_string="{}unnormalized_samples.npy".format(storage_dir + "/sampled_forced_images/")
 storage_dir="tier0_1_cond0_0"
 tier0_1_cond0_0_model_path = os.path.expanduser("~") + "/_kkpthlib_models/attention_melnet_cmdline_08-58-06_2021-06-10_ea62e3_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_0_1_cond_0_0_sz_88_32/saved_models/valid_model-56368.pth"
 tier0_1_cond0_0_args = SamplingArguments(
                                          custom_conditioning_json=input_conditioning_json,
+                                         attention_early_termination_file=attention_early_termination_file,
                                          model_path=tier0_1_cond0_0_model_path,
                                          output_dir=storage_dir,
                                          tier_input_tag="0,1",
@@ -144,6 +152,7 @@ storage_dir="tier1_1_cond1_0"
 tier1_1_cond1_0_model_path = os.path.expanduser("~") + "/_kkpthlib_models/attention_melnet_cmdline_04-13-10_2021-13-10_d28005_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_1_1_cond_1_0_sz_88_64/saved_models/valid_model-45696.pth"
 tier1_1_cond1_0_args = SamplingArguments(
                                          custom_conditioning_json=input_conditioning_json,
+                                         attention_early_termination_file=attention_early_termination_file,
                                          model_path=tier1_1_cond1_0_model_path,
                                          output_dir=storage_dir,
                                          tier_input_tag="1,1",
@@ -159,6 +168,7 @@ storage_dir="tier2_1_cond2_0"
 tier2_1_cond2_0_model_path = os.path.expanduser("~") + "/_kkpthlib_models/attention_melnet_cmdline_05-36-09_2021-14-10_907c17_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_2_1_cond_2_0_sz_176_64/saved_models/valid_model-45625.pth"
 tier2_1_cond2_0_args = SamplingArguments(
                                          custom_conditioning_json=input_conditioning_json,
+                                         attention_early_termination_file=attention_early_termination_file,
                                          model_path=tier2_1_cond2_0_model_path,
                                          output_dir=storage_dir,
                                          tier_input_tag="2,1",
@@ -174,6 +184,7 @@ storage_dir="tier3_1_cond3_0"
 tier3_1_cond3_0_model_path = os.path.expanduser("~") + "/_kkpthlib_models/attention_melnet_cmdline_04-36-32_2021-18-10_2365e2_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_3_1_cond_3_0_sz_176_128/saved_models/valid_model-20000.pth"
 tier3_1_cond3_0_args = SamplingArguments(
                                          custom_conditioning_json=input_conditioning_json,
+                                         attention_early_termination_file=attention_early_termination_file,
                                          model_path=tier3_1_cond3_0_model_path,
                                          output_dir=storage_dir,
                                          tier_input_tag="3,1",
@@ -189,6 +200,7 @@ storage_dir="tier4_1_cond4_0"
 tier4_1_cond4_0_model_path = os.path.expanduser("~") + "/_kkpthlib_models/attention_melnet_cmdline_21-54-32_2021-19-10_3e9e97_attn_tts_robovoice_mae_preproc_fp16_adam_gru_256_ramplr_round34_tier_4_1_cond_4_0_sz_352_128/saved_models/valid_model-11250.pth"
 tier4_1_cond4_0_args = SamplingArguments(
                                          custom_conditioning_json=input_conditioning_json,
+                                         attention_early_termination_file=attention_early_termination_file,
                                          model_path=tier4_1_cond4_0_model_path,
                                          output_dir=storage_dir,
                                          tier_input_tag="4,1",
