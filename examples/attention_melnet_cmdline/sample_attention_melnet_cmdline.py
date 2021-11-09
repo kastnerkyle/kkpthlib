@@ -642,8 +642,8 @@ if input_attention_early_termination_file == None:
 else:
     with open(input_attention_early_termination_file, "r") as f:
         lines = f.readlines()
-        last_sil_frame = int(f[1].strip().split(":")[1])
-        last_sil_resolution = int(f[2].strip().split(":")[1])
+        last_sil_frame = int(float(lines[1].strip().split(":")[1]))
+        last_sil_resolution = int(float(lines[2].strip().split(":")[1]))
         full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
         this_resolution = full_n_frames / input_size_at_depth[0] # should always be integer value
         # add in extra frame(s) based on the upsampling resolution due to ambiguity
