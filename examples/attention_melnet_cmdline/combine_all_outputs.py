@@ -97,8 +97,8 @@ if args.stored_sampled_tier_data is not None:
                     buffer_np[:, 1::2, :, :] = next_conditioning
                 else:
                     raise ValueError("Unknown split value {} for split index {} from (reversed) split list {}".format(this_split, _n, input_axis_split_list[::-1]))
+                built_conditioning = buffer_np.astype("float32")
                 if _n < (len(stored_sampled_tier_data_paths) - 1):
-                    built_conditioning = buffer_np.astype("float32")
                     fpath = "tier{}_0_unnormalized_samples.npy".format(_n)
                     print("Saving combined files to {}".format(fpath))
                     np.save(fpath, built_conditioning)
@@ -122,6 +122,7 @@ if args.stored_sampled_tier_data is not None:
         """
 else:
     raise ValueError("Need to pass stored input data to combine into final npy")
+
 fpath = "output_unnormalized_samples.npy"
 print("Saving combined file to {}".format(fpath))
 np.save(fpath, input_stored_conditioning)
