@@ -22,7 +22,8 @@ parser.add_argument('--axis_splits', type=str, default=None,
                     help='string denoting the axis splits for the model, eg 2121 starting from first split to last\n')
 parser.add_argument('--stored_sampled_tier_data', type=str, default=None,
                     help='all previously sampled tier data, in order from beginning tier to previous from left to right. Last array assumed to be the conditioning input. comma separated string, should be path to unnormalized data')
-
+parser.add_argument('--stored_base_path', type=str, default=None,
+                    help='base path for previously sampled tier data, assumes a specific folder/name scheme')
 args = parser.parse_args()
 """
 python combine_all_outputs.py --axis_splits=2121 --stored_sampled_tier_data=tier0_0/sampled_forced_images/unnormalized_samples.npy,tier0_1_cond0_0/sampled_forced_images/unnormalized_samples.npy,tier1_1_cond1_0/sampled_forced_images/unnormalized_samples.npy,tier2_1_cond2_0/sampled_forced_images/unnormalized_samples.npy,tier3_1_cond3_0/sampled_forced_images/unnormalized_samples.npy,tier4_1_cond4_0/sampled_forced_images/unnormalized_samples.npy
@@ -39,7 +40,12 @@ if was_none:
 was_none = False
 if args.stored_sampled_tier_data is None:
     was_none = True
-    args.stored_sampled_tier_data = "tier0_0/sampled_forced_images/unnormalized_samples.npy,tier0_1_cond0_0/sampled_forced_images/unnormalized_samples.npy,tier1_1_cond1_0/sampled_forced_images/unnormalized_samples.npy,tier2_1_cond2_0/sampled_forced_images/unnormalized_samples.npy,tier3_1_cond3_0/sampled_forced_images/unnormalized_samples.npy,tier4_1_cond4_0/sampled_forced_images/unnormalized_samples.npy"
+    sbp = args.stored_base_path
+    if sbp is not None:
+        print("stored_base_path set to {} based on input arguments".format(sbp))
+        args.stored_sampled_tier_data = "{}/tier0_0/sampled_forced_images/unnormalized_samples.npy,{}/tier0_1_cond0_0/sampled_forced_images/unnormalized_samples.npy,{}/tier1_1_cond1_0/sampled_forced_images/unnormalized_samples.npy,{}/tier2_1_cond2_0/sampled_forced_images/unnormalized_samples.npy,{}/tier3_1_cond3_0/sampled_forced_images/unnormalized_samples.npy,{}/tier4_1_cond4_0/sampled_forced_images/unnormalized_samples.npy".format(sbp, sbp, sbp, sbp, sbp, sbp)
+    else:
+        args.stored_sampled_tier_data = "tier0_0/sampled_forced_images/unnormalized_samples.npy,tier0_1_cond0_0/sampled_forced_images/unnormalized_samples.npy,tier1_1_cond1_0/sampled_forced_images/unnormalized_samples.npy,tier2_1_cond2_0/sampled_forced_images/unnormalized_samples.npy,tier3_1_cond3_0/sampled_forced_images/unnormalized_samples.npy,tier4_1_cond4_0/sampled_forced_images/unnormalized_samples.npy"
 
 if was_none:
     print("stored_sampled_tier_data not passed, using default arguments")
@@ -59,6 +65,9 @@ if args.stored_sampled_tier_data is not None:
         for _n, el in enumerate(stored_sampled_tier_data_paths):
             if built_conditioning is None:
                 built_conditioning = np.load(el)
+                fpath = "tier0_0_unnormalized_samples.npy"
+                print("Saving combined files to {}".format(fpath))
+                np.save(fpath, built_conditioning)
             else:
                 next_conditioning = np.load(el)
                 input_real_batch_size = next_conditioning.shape[0]
@@ -88,7 +97,12 @@ if args.stored_sampled_tier_data is not None:
                     buffer_np[:, 1::2, :, :] = next_conditioning
                 else:
                     raise ValueError("Unknown split value {} for split index {} from (reversed) split list {}".format(this_split, _n, input_axis_split_list[::-1]))
-                built_conditioning = buffer_np.astype("float32")
+                if _n < (len(stored_sampled_tier_data_paths) - 1):
+                    built_conditioning = buffer_np.astype("float32")
+                    fpath = "tier{}_0_unnormalized_samples.npy".format(_n)
+                    print("Saving combined files to {}".format(fpath))
+                    np.save(fpath, built_conditioning)
+
         input_stored_conditioning = copy.deepcopy(built_conditioning)
         """
         if input_axis_split_list[input_tier_input_tag[0]] == 2:
@@ -108,6 +122,6 @@ if args.stored_sampled_tier_data is not None:
         """
 else:
     raise ValueError("Need to pass stored input data to combine into final npy")
-fpath = "combined_unnormalized_samples.npy"
-print("Saving combined files to {}".format(fpath))
-np.save("combined_unnormalized_samples.npy", input_stored_conditioning)
+fpath = "output_unnormalized_samples.npy"
+print("Saving combined file to {}".format(fpath))
+np.save(fpath, input_stored_conditioning)
