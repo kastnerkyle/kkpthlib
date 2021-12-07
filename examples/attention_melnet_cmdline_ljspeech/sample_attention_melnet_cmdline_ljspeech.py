@@ -12,6 +12,7 @@ import torch.functional as F
 import re
 import copy
 import sys
+import time
 
 import json
 import os
@@ -424,11 +425,13 @@ if args.terminate_early_attention_plot:
     print("Terminating early after only plotting attention due to commandline flag --terminate_early_attention_plot")
     sys.exit()
 
-def tst(x, x_mask=None,
-           spatial_condition=None,
-           memory_condition=None, memory_condition_mask=None, batch_norm_flag=0.):
+def fast_sample(x, x_mask=None,
+                   spatial_condition=None,
+                   memory_condition=None, memory_condition_mask=None,
+                   bias_boundary="default",
+                   batch_norm_flag=0.,
+                   verbose=True):
     # for now we don't use the x_mask in the model itself, only in the loss calculations
-    import time
     frst = time.time()
     new_x = copy.deepcopy(x)
     x = new_x
@@ -454,25 +457,35 @@ def tst(x, x_mask=None,
         # b t f feat
         mem_lstm = mem_lstm
         memory_condition_mask = memory_condition_mask
-        x_a = x[:, :x.shape[1] // 2]
+        if bias_boundary == "default":
+            start_time_index = x.shape[1] // 2
+            start_freq_index = 0
+        else:
+            start_time_index = int(bias_boundary)
+            start_freq_index = 0
+
+        x_a = x[:, :start_time_index]
         mn_out, alignment, attn_extras = model.mn_t.sample([x_a], time_index=time_index, freq_index=freq_index,
                                                                   is_initial_step=is_initial_step,
                                                                   memory=mem_lstm, memory_mask=memory_condition_mask)
         is_initial_step = False
 
-        start_time_index = x.shape[1] // 2
-        start_freq_index = 0
         mem_lstm = mem_lstm
         memory_condition_mask = memory_condition_mask
-        x[:, start_time_index + 1:, :] *= 0
-        print("start sample step")
-        for _ii in range(start_time_index, x.shape[1]):
-            for _jj in range(start_freq_index, x.shape[2]):
+        x[:, start_time_index:, :] *= 0
+        if verbose:
+            print("start sample step")
+        max_time_step = x.shape[1]
+        max_freq_step = x.shape[2]
+
+        for _ii in range(start_time_index, max_time_step):
+            for _jj in range(start_freq_index, max_freq_step):
                 mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
                                                                         is_initial_step=is_initial_step,
                                                                         memory=mem_lstm, memory_mask=memory_condition_mask)
                 x[:, _ii, _jj, 0] = mn_out.squeeze()
-                print("sample step {},{}".format(_ii, _jj))
+                if verbose:
+                    print("sampled index {},{} out of total size ({},{})".format(_ii, _jj, max_time_step, max_freq_step))
         model.attention_alignment = alignment
         model.attention_extras = attn_extras
     else:
@@ -480,18 +493,16 @@ def tst(x, x_mask=None,
         spatial_condition = spatial_condition[0:1]
         mn_out = model.mn_t.sample([x], list_of_spatial_conditions=[spatial_condition])
     fin = time.time()
-    print(fin-frst)
-    print("end tst")
+    print("fast sampling complete, time {} sec".format(fin - frst))
     return x
 
-print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 if input_tier_condition_tag is None:
     # no noise here in pred
     with torch.no_grad():
-        pred_out = tst(x_in, x_mask=x_mask_in,
-                             memory_condition=torch_cond_seq_data_batch,
-                             memory_condition_mask=torch_cond_seq_data_mask,
-                             batch_norm_flag=batch_norm_flag)
+        pred_out = fast_sample(x_in, x_mask=x_mask_in,
+                                     memory_condition=torch_cond_seq_data_batch,
+                                     memory_condition_mask=torch_cond_seq_data_mask,
+                                     batch_norm_flag=batch_norm_flag)
 else:
     cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
     # conditioning input currently unnormalized

@@ -6189,7 +6189,6 @@ class AttentionMelNetTier(torch.nn.Module):
             return res
         else:
             assert self._sample_step
-            print("td step sample")
             if self._sample_last_time_index["layer{}".format(layer)]["td_stack"] != time_index:
                 freq_lstm_fw_h, _, freq_lstm_fw_c = self.tds_lstms_freq_fw[layer]([tds])
                 freq_lstm_bw_h, _, freq_lstm_bw_c = self.tds_lstms_freq_bw[layer]([torch.flip(tds, [0])])
@@ -6302,7 +6301,6 @@ class AttentionMelNetTier(torch.nn.Module):
             return res
         else:
             assert self._sample_step
-            print("cd step sample")
             if self._sample_last_time_index["layer{}".format(layer)]["cd_stack"] != time_index:
                 prev_cent_lstm_h = self._sample_cache["layer{}".format(layer)]["cd_stack"]["cent_lstm_h"]
                 cds_proj = self.cds_centralized_lstms[layer].in_proj_obj([cds])
@@ -6368,7 +6366,6 @@ class AttentionMelNetTier(torch.nn.Module):
             return res
         else:
             assert self._sample_step
-            print("fd step sample")
             if tds_cent is not None:
                 tds_cent = tds_cent.permute(1, 0, 2)
                 ext_tds_cent = tds_cent.reshape((self.batch_size * 1, -1))
@@ -6621,7 +6618,6 @@ class AttentionMelNetTier(torch.nn.Module):
             return out_contexts, alignments, all_extras
         else:
             assert self._sample_step
-            print("attn sample step")
             if self._sample_last_time_index["layer{}".format(layer)]["attention"] != time_index:
                 T, B, D = cds.size()
                 # make init a function of the mean of the 
