@@ -6134,6 +6134,844 @@ class AttentionMelNetTier(torch.nn.Module):
         else:
             return out
 
+    def _td_stack_sample(self, tds, layer, time_index, freq_index):
+        if self._sample_initial:
+            self._sample_cache["layer{}".format(layer)]["td_stack"] = {}
+            """
+            td_x = td_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+            fd_x = fd_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+            # horiz (freq), batch * vert, feat
+            td_x = td_x.permute(1, 0, 2)
+            """
+            #tds_unfold = tds.reshape((self.n_horiz, self.batch_size, self.n_vert, -1))
+            #tds = tds_unfold[:, :, -1:, :].reshape((self.n_horiz, self.batch_size, -1))
+            # reduced dimension thing works!
+            # this is what we want for combined 1 step sampling...
+
+            freq_lstm_fw_h, _, freq_lstm_fw_c = self.tds_lstms_freq_fw[layer]([tds])
+            freq_lstm_bw_h, _, freq_lstm_bw_c = self.tds_lstms_freq_bw[layer]([torch.flip(tds, [0])])
+            freq_lstm_h = torch.cat((freq_lstm_fw_h, torch.flip(freq_lstm_bw_h, [0])), dim=-1)
+            self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_fw_h"] = freq_lstm_fw_h
+
+            # assume GRU!
+            if self.cell_type != "gru":
+                raise ValueError("Non GRU step sampling NYI")
+            #self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_fw_c"] = freq_lstm_fw_c
+
+            self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_bw_h"] = freq_lstm_bw_h
+
+            #self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_bw_c"] = freq_lstm_bw_c
+
+            self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_h"] = freq_lstm_h
+
+            freq_lstm_h = self._freq2time(freq_lstm_h)
+            tds_time = self._freq2time(tds)
+            # first output is just the hidden
+            time_lstm_h, _, time_lstm_c = self.tds_lstms_time_fw[layer]([tds_time])
+            self._sample_cache["layer{}".format(layer)]["td_stack"]["time_lstm_h"] = time_lstm_h
+
+            #self._sample_cache["layer{}".format(layer)]["td_stack"]["time_lstm_c"] = time_lstm_c
+            combined_h = torch.cat((freq_lstm_h, time_lstm_h), dim=-1)
+            self._sample_cache["layer{}".format(layer)]["td_stack"]["combined_h"] = combined_h
+
+            res = self.tds_projs[layer]([combined_h])
+            res = self._time2freq(res)
+
+            if layer == 0:
+                self._sample_last_time_index = {}
+                self._sample_last_freq_index = {}
+
+            self._sample_last_time_index["layer{}".format(layer)] = {}
+            self._sample_last_freq_index["layer{}".format(layer)] = {}
+
+            self._sample_last_time_index["layer{}".format(layer)]["td_stack"] = time_index
+            self._sample_last_freq_index["layer{}".format(layer)]["td_stack"] = freq_index
+            return res
+        else:
+            assert self._sample_step
+            print("td step sample")
+            if self._sample_last_time_index["layer{}".format(layer)]["td_stack"] != time_index:
+                freq_lstm_fw_h, _, freq_lstm_fw_c = self.tds_lstms_freq_fw[layer]([tds])
+                freq_lstm_bw_h, _, freq_lstm_bw_c = self.tds_lstms_freq_bw[layer]([torch.flip(tds, [0])])
+                freq_lstm_h = torch.cat((freq_lstm_fw_h, torch.flip(freq_lstm_bw_h, [0])), dim=-1)
+                if self.cell_type != "gru":
+                    raise ValueError("Non GRU step sampling NYI")
+                prev_freq_lstm_fw_h = self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_fw_h"]
+                #prev_freq_lstm_fw_c = self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_fw_c"]
+                prev_freq_lstm_bw_h = self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_bw_h"]
+                #prev_freq_lstm_bw_c = self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_bw_c"]
+                prev_freq_lstm_h = self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_h"]
+
+                self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_fw_h"] = torch.cat((prev_freq_lstm_fw_h, freq_lstm_fw_h), axis=1)
+                #self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_fw_c"] = torch.cat((prev_freq_lstm_fw_c, freq_lstm_fw_c), axis=1)
+
+                self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_bw_h"] = torch.cat((prev_freq_lstm_bw_h, freq_lstm_bw_h), axis=1)
+                #self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_bw_c"] = torch.cat((prev_freq_lstm_bw_c, freq_lstm_bw_c), axis=1)
+
+                self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_h"] = torch.cat((prev_freq_lstm_h, freq_lstm_h), axis=1)
+
+                # _freq2time
+                #freq_lstm_h = self._freq2time(freq_lstm_h)
+                #tds_time = self._freq2time(tds)
+                '''
+                ref code
+                def _time2freq(self, inp):
+                    inp = inp.reshape((self.n_vert, self.batch_size, self.n_horiz, -1))
+                    inp = inp.permute(2, 1, 0, 3)
+                    return inp.reshape((self.n_horiz, self.batch_size * self.n_vert, -1))
+
+                def _freq2time(self, inp):
+                    # batch size set in forward!
+                    inp = inp.reshape((self.n_horiz, self.batch_size, self.n_vert, -1))
+                    inp = inp.permute(2, 1, 0, 3)
+                    return inp.reshape((self.n_vert, self.batch_size * self.n_horiz, -1))
+                '''
+                freq_lstm_h = freq_lstm_h.reshape((self.n_horiz, self.batch_size, 1, -1))
+                freq_lstm_h = freq_lstm_h.permute(2, 1, 0, 3)
+                freq_lstm_h = freq_lstm_h.reshape((1, self.batch_size * self.n_horiz, -1))
+
+                tds_time = tds.reshape((self.n_horiz, self.batch_size, 1, -1))
+                tds_time = tds_time.permute(2, 1, 0, 3)
+                tds_time = tds_time.reshape((1, self.batch_size * self.n_horiz, -1))
+                # need to manually walk the rnn cell now
+                '''
+                in_proj = self.in_proj_obj(list_of_inputs)
+                if input_mask is None:
+                    input_mask = 0. * in_proj[..., 0] + 1.
+
+                if previous_forward_hidden == None:
+                    h1_f_init = 0. * in_proj[0, :, :num_units].detach()
+                else:
+                    h1_f_init = previous_forward_hidden
+                if previous_forward_cell == None:
+                    c1_f_init = 0. * in_proj[0, :, :num_units].detach()
+                else:
+                    c1_f_init = previous_forward_cell
+                cell_dropout = None
+
+                # GRU doesn't use cell!
+                def step(inp_t, inp_mask_t,
+                         h1_f_tm1):
+                    output, s = self.fwd_cell_obj([inp_t],
+                                                  h1_f_tm1, None,
+                                                  input_mask=inp_mask_t,
+                                                  cell_dropout=cell_dropout)
+                '''
+                prev_time_lstm_h = self._sample_cache["layer{}".format(layer)]["td_stack"]["time_lstm_h"]
+                tds_time_proj = self.tds_lstms_time_fw[layer].in_proj_obj([tds_time])
+                _m = 0. * tds_time_proj[..., 0] + 1.
+                _m = _m[..., None]
+                # 1 step
+                out, s = self.tds_lstms_time_fw[layer].fwd_cell_obj([tds_time_proj],
+                                                                    prev_time_lstm_h[-1][None], None,
+                                                                    input_mask=_m,
+                                                                    cell_dropout=None)
+                # 1, 1, batch, feat -> batch, feat
+                assert out.shape[0] == 1
+                assert out.shape[1] == 1
+                out = out[0, 0]
+                time_lstm_h = s[0][0, 0]
+                # time_lstm_c = s[1][0, 0] but s[1] is None for GRU
+
+                # how often should we redo this computation / cache the time proj??????????????????
+                combined_h = torch.cat((freq_lstm_h, time_lstm_h[None]), dim=-1)
+                res = self.tds_projs[layer]([combined_h])
+                res = res.reshape((1, self.batch_size, self.n_horiz, -1))
+                res = res.permute(2, 1, 0, 3)
+                res = res.reshape((self.n_horiz, self.batch_size * 1, -1))
+
+                self._sample_cache["layer{}".format(layer)]["td_stack"]["time_lstm_h"] = torch.cat((prev_time_lstm_h, time_lstm_h[None]), dim=0)
+                self._sample_cache["layer{}".format(layer)]["td_stack"]["res"] = res
+
+                self._sample_last_time_index["layer{}".format(layer)]["td_stack"] = time_index
+                self._sample_last_freq_index["layer{}".format(layer)]["td_stack"] = freq_index
+            else:
+                res = self._sample_cache["layer{}".format(layer)]["td_stack"]["res"]
+            return res
+
+    def _cd_centralized_stack_sample(self, cds, layer, time_index, freq_index):
+        if self._sample_initial:
+            self._sample_cache["layer{}".format(layer)]["cd_stack"] = {}
+            cent_lstm_h, _, cent_lstm_c = self.cds_centralized_lstms[layer]([cds])
+            self._sample_cache["layer{}".format(layer)]["cd_stack"]["cent_lstm_h"] = cent_lstm_h
+            self._sample_cache["layer{}".format(layer)]["cd_stack"]["cent_lstm_c"] = cent_lstm_c
+            res = self.cds_projs[layer]([cent_lstm_h])
+
+            self._sample_last_time_index["layer{}".format(layer)]["cd_stack"] = time_index
+            self._sample_last_freq_index["layer{}".format(layer)]["cd_stack"] = freq_index
+            return res
+        else:
+            assert self._sample_step
+            print("cd step sample")
+            if self._sample_last_time_index["layer{}".format(layer)]["cd_stack"] != time_index:
+                prev_cent_lstm_h = self._sample_cache["layer{}".format(layer)]["cd_stack"]["cent_lstm_h"]
+                cds_proj = self.cds_centralized_lstms[layer].in_proj_obj([cds])
+                _m = 0. * cds_proj[..., 0] + 1.
+                _m = _m[..., None]
+                # 1 step
+                out, s = self.cds_centralized_lstms[layer].fwd_cell_obj([cds_proj],
+                                                                        prev_cent_lstm_h[-1][None], None,
+                                                                        input_mask=_m,
+                                                                        cell_dropout=None)
+                # 1, 1, batch, feat -> batch, feat
+                assert out.shape[0] == 1
+                assert out.shape[1] == 1
+                out = out[0, 0]
+                cent_lstm_h = s[0][0, 0]
+                res = self.cds_projs[layer]([cent_lstm_h[None]])
+
+                new_cent_lstm_h = torch.cat((prev_cent_lstm_h, cent_lstm_h[None]), dim=0)
+                self._sample_cache["layer{}".format(layer)]["cd_stack"]["cent_lstm_h"] = new_cent_lstm_h
+                self._sample_cache["layer{}".format(layer)]["cd_stack"]["res"] = res
+
+                # this is tied to td_sample as well - updating this value should mean they BOTH cached successfully
+                self._sample_last_time_index["layer{}".format(layer)]["cd_stack"] = time_index
+            else:
+                # we already cached the activation for this time index
+                res = self._sample_cache["layer{}".format(layer)]["cd_stack"]["res"]
+            return res
+
+    def _fd_stack_sample(self, tds, fds, layer, time_index, freq_index, tds_cent=None):
+        if self._sample_initial:
+            self._sample_cache["layer{}".format(layer)]["fd_stack"] = {}
+            # broadcast tds_cent across frequency axis
+            if tds_cent is not None:
+                # need to permute + reshape to match what was done for td_x, fd_x
+                # so that batch combined stuff stays contiguous in the right way!
+                # time2freq is freq, batch * time, -1
+                # time is also self.n_vert
+
+                # nvert batch feat to batch nvert feat
+                tds_cent = tds_cent.permute(1, 0, 2)
+                ext_tds_cent = tds_cent.reshape((self.batch_size * self.n_vert, -1))
+                # now 1, batch * time, hidden
+                # broadcasts over frequency, since the cent rnn has put out a whole freq frame per step dim...
+                ext_tds_cent = ext_tds_cent[None]
+                # (fds dim 0)
+                # broacasts over features, since the cent rnn has effectively seen the whole frequency
+                #ext_tds_cent = ext_tds_cent + 0. * fds
+                freq_lstm_stack = tds + fds + ext_tds_cent#  torch.cat((tds, fds, ext_tds_cent), axis=-1)
+            else:
+                #freq_lstm_stack = torch.cat((tds, fds), axis=-1)
+                freq_lstm_stack = tds + fds
+
+            freq_lstm_h, _, freq_lstm_c = self.fds_lstms_freq_fw[layer]([freq_lstm_stack])
+            # we cache the minimal version for step sampling here
+            self._sample_cache["layer{}".format(layer)]["fd_stack"]["freq_lstm_h"] = freq_lstm_h[-1, -1][None, None]
+            # GRU so cell is None...
+            #self._sample_cache["layer{}".format(layer)]["fd_stack"]["freq_lstm_c"] = freq_lstm_c
+            res = self.fds_projs[layer]([freq_lstm_h])
+
+            self._sample_last_time_index["layer{}".format(layer)]["fd_stack"] = time_index
+            self._sample_last_freq_index["layer{}".format(layer)]["fd_stack"] = freq_index
+
+            return res
+        else:
+            assert self._sample_step
+            print("fd step sample")
+            if tds_cent is not None:
+                tds_cent = tds_cent.permute(1, 0, 2)
+                ext_tds_cent = tds_cent.reshape((self.batch_size * 1, -1))
+                ext_tds_cent = ext_tds_cent[None]
+                freq_lstm_stack = tds + fds + ext_tds_cent
+            else:
+                # broadcast....
+                freq_lstm_stack = tds + fds
+            prev_freq_lstm_h = self._sample_cache["layer{}".format(layer)]["fd_stack"]["freq_lstm_h"]
+            freq_lstm_stack = freq_lstm_stack[freq_index][None]
+            if freq_index == 0:
+                prev_freq_lstm_h = 0. * prev_freq_lstm_h
+            stack_proj = self.fds_lstms_freq_fw[layer].in_proj_obj([freq_lstm_stack])
+            _m = 0. * stack_proj[..., 0] + 1.
+            _m = _m[..., None]
+            # 1 step
+            out, s = self.fds_lstms_freq_fw[layer].fwd_cell_obj([stack_proj],
+                                                                 prev_freq_lstm_h, None,
+                                                                 input_mask=_m,
+                                                                 cell_dropout=None)
+            # 1, 1, batch, feat -> batch, feat
+            assert out.shape[0] == 1
+            assert out.shape[1] == 1
+            out = out[0, 0]
+            freq_lstm_h = s[0][0, 0]
+            freq_lstm_h = freq_lstm_h[None]
+
+            self._sample_last_time_index["layer{}".format(layer)]["fd_stack"] = time_index
+            self._sample_last_freq_index["layer{}".format(layer)]["fd_stack"] = freq_index
+            self._sample_cache["layer{}".format(layer)]["fd_stack"]["freq_lstm_h"] = freq_lstm_h
+
+            res = self.fds_projs[layer]([freq_lstm_h])
+
+            return res
+
+    def _attention_step_sample(self, h_i, memory, memory_mask, previous_attn):
+        if self.attention_type == "sigmoid_logistic_alt":
+            # condition on input sequence length?
+            phi_hat = self.attn_proj([h_i])
+            # cast to 32 bit
+            orig_dtype = phi_hat.dtype
+            phi_hat = phi_hat.float()
+
+            #ksi = ksi + torch.exp(phi_hat[:, :self.attention_mixture_components])
+            # clamp beta so it doesn't collapse?
+            #beta = torch.exp(torch.clamp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components], min=-4))
+            # changes based on GMMv2 of https://arxiv.org/pdf/1910.10288.pdf
+            # as well as https://arxiv.org/pdf/1811.07240.pdf
+            ksi = previous_attn
+            ksi = ksi.float()
+
+            """
+            if self._softplus is None:
+                # hook it into the main module to keep a reference around
+                self._softplus = torch.nn.Softplus()
+                '''
+                     output z  (grad_output)
+                     ___________
+                     |         |
+                     |  layer  |
+                     |_________|
+
+                     input x  (grad_input)
+                '''
+                def hook(module, grad_input, grad_output):
+                    return (sigmoid(grad_output[0]),)
+
+                self._softplus.register_backward_hook(hook)
+
+            alt_softplus = self._softplus
+            """
+
+            def alt_log1p(x):
+                # https://www.johndcook.com/blog/2012/07/25/trick-for-computing-log1x/
+                # we dirty hack this to avoid div by 0 since torch.where has issues with NaN grad
+                # if *either* branch has inf
+                # https://github.com/pytorch/pytorch/issues/4132
+                y = 1. + x
+                z = y - 1.
+                res = 0. * x
+                z_mask = (z == 0)
+                res[z_mask] = x[z_mask]
+                z_nonmask = (z != 0)
+                res[z_nonmask] = x[z_nonmask] * torch.log(y[z_nonmask]) / (z[z_nonmask])
+                #return torch.where(z == 0, x, x * torch.log(y) / z)
+                return res
+
+            def alt_softplus(x):
+                # https://stackoverflow.com/questions/44230635/avoid-overflow-with-softplus-function-in-python
+                return alt_log1p(torch.exp(-torch.abs(x))) + torch.where(x > 0, x, 0. * x)
+
+            kappa = ksi + alt_softplus(phi_hat[:, :self.attention_mixture_components]) + 1E-3
+            #kappa = ksi + swish(phi_hat[:, :self.attention_mixture_components])
+
+            #beta = (F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-4)
+            #beta = torch.clamp(torch.exp(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.5)
+            # fix beta to 1 - hack city but works!
+            #beta = 0. * phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components] + 1.
+
+            # aggressive clamping here, use softplus to help stability as well
+            #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.25, max=2.0)
+            #beta = torch.clamp(F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]), min=.01, max=10.0)
+            #beta = F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+
+            beta = alt_softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+
+            #beta = swish(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+            #beta = swish(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components])
+
+            alpha = F.softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+            #alpha = F.softplus(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components]) + 1E-2
+            #alpha = F.log_softmax(phi_hat[:, 2 * self.attention_mixture_components:3 * self.attention_mixture_components], dim=1)
+
+            u = memory.new_tensor(np.arange(memory.size(0)), dtype=memory.dtype)
+            #u_L = u + 0.5
+            #u_R = u - 0.5
+
+            # try like this for the following reason...
+            # eqn 22 of paper
+            # F(u + .5; g) - F(u - 0.5; g)
+            # means F(u; g) = 1./(1 + exp((k - u) / B))
+            # we can interpret this as either SUBTITUTING u + 0.5 for u, or simply adding/subtracting on 0.5. This would swap the 2 terms
+            # interpreting as simply adding 0.5 to the end means
+            # sigm(x) = 1./(1+exp(-x))
+            # x = ((-k + u) / B) = ((u - k) / B)
+            # sigm((u - .5 - k) / B) as the left hand
+            # sigm((u + .5 - k) / B) as the right hand
+            # alternately, interpreting as substituting u - .5 for u
+            # sigm((u + .5 - k) / B) as the left hand
+            # sigm((u - .5 - k) / B) as the right hand
+            # noting that we can multiply or divide by beta, if beta is constrained from 0 to inf
+            # since / by a number from 0->1 is the same as multiplying by 1->inf
+            # aka beta can parameterize the division term, or 1 / division
+            # parameterizing the 1 / division means that we don't face edge cases for beta near 0, as 1/inf -> 0 and 1/0. -> inf
+            # however, it means that making small beta we have less precision due to floating point
+            u_L = u + 0.5
+            u_R = u - 0.5
+
+            """
+            alternative?
+            TANH(t) = [1 - exp(-2t)]/[1 + exp(-2t)]  for  t>=0
+            and
+            TANH(t) = [exp(2t) - 1]/[exp(2t) + 1] for t<0
+            """
+
+            # we approximate tanh with x/(1+abs(x))
+            def alt_tanh(x):
+                return x / (1. + torch.abs(x))
+            # logistic can be expressed as 1/2 + 1/2 * tanh((x - u)/(2 * s)) instead of sigmoid
+            # if beta is 1/s, this is .5 * beta
+            def term(u, k, b):
+                #return .5 + .5 * alt_tanh(.5 * (u - k) / b)
+                # limit min beta to .01
+                return .5 + .5 * alt_tanh(.5 * (u - k) * (b + .01))
+
+            termL = torch.sum(alpha[..., None] * term(u_L, kappa[..., None], beta[..., None]), keepdim=True, dim=1)
+            #termR = torch.sum(alpha[..., None] * term(u_R, kappa[..., None], beta[..., None]), keepdim=True, dim=1)
+
+            diff = (term(u_L, kappa[..., None], beta[..., None]) - term(u_R, kappa[..., None], beta[..., None]))
+            weights = torch.sum(alpha[..., None] * diff, keepdim=True, dim=1)
+
+            termination = 1. - torch.exp(termL[:, 0])
+            weights = memory_mask.transpose(0, 1)[:, None, :] * weights
+
+            # grad scaling here
+            grad_rescale = 1. / np.sqrt(self.attention_mixture_components)
+            weights = (1. - grad_rescale) * weights.detach() + grad_rescale * weights
+
+            weights = weights.to(orig_dtype)
+            kappa = kappa.to(orig_dtype)
+            beta = beta.to(orig_dtype)
+            alpha = alpha.to(orig_dtype)
+            termination = termination.to(orig_dtype)
+
+            context = torch.bmm(weights, memory.permute(1, 0, 2))
+            # context is B, 1, D
+            # weights B, 1, mem_T 
+            extras = {}
+            extras["termination"] = termination
+            extras["kappa"] = kappa
+            extras["beta"] = beta
+            extras["alpha"] = alpha
+        else:
+            raise ValueError("Unknown attention type specified {}".format(self.attention_type))
+        return context, weights, extras
+
+    def _attention_sample(self, cds, layer, memory, memory_mask, time_index, freq_index):
+        if self._sample_initial:
+            self._sample_cache["layer{}".format(layer)]["attention"] = {}
+            T, B, D = cds.size()
+            # make init a function of the mean of the 
+            h_i = cds.new_zeros(B, self.hidden_size)
+            c_i = cds.new_zeros(B, self.hidden_size)
+            context = cds.new_zeros(B, self.hidden_size)
+            if self.attention_type == "sigmoid_logistic_alt":
+                prev_attn = cds.new_zeros(B, self.attention_mixture_components)
+            else:
+                raise ValueError("Unknown self.attention_type {} found".format(self.attention_type))
+            contexts = []
+            weights = []
+            terminations = []
+            all_extras = []
+            out_hiddens = []
+            all_hiddens = [h_i]
+            all_cells = [c_i]
+            all_attn_pos = [prev_attn]
+            for _i in range(T):
+                x = torch.cat([cds[_i], context.squeeze(1)], dim=-1)
+                out, s = self.attn_lstm_cell([x],
+                                             h_i, c_i,
+                                             input_mask=None)
+                h_t, c_t = s[0], s[1]
+                out_hiddens.append(h_t[None])
+
+                h_comb = torch.cat([cds[_i], context.squeeze(1), h_t], dim=-1)
+                #context, attn_weight, extras = self._attention_step(h_t, memory, memory_mask, prev_attn)
+                context, attn_weight, extras = self._attention_step_sample(h_comb, memory, memory_mask, prev_attn)
+
+                if self.attention_type == "sigmoid_logistic_alt":
+                    prev_attn = extras["kappa"]
+                else:
+                    raise ValueError("Unknown argument to self.attention_type {}".format(self.attention_type))
+                contexts.append(context)
+                weights.append(attn_weight[None])
+                all_extras.append(extras)
+                h_i, c_i = h_t, c_t
+                all_hiddens.append(h_i)
+                all_cells.append(c_i)
+                all_attn_pos.append(prev_attn)
+            # skip hidden? for better attn control?
+            if self.attention_type == "sigmoid_logistic_alt":
+                out_contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+            else:
+                raise ValueError("Unknown argument to self.attention_type {}".format(self.attention_type))
+            #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + torch.cat(out_hiddens, axis=0)
+            #contexts = torch.cat(contexts, axis=1).permute(1, 0, 2) + tds
+            # decoder_T, B, D
+            # absolutely no bypassing this?
+            # decoder_T, B, encoder_T
+            alignments = torch.cat(weights, axis=0)
+            self._sample_cache["layer{}".format(layer)]["attention"]["attn_h"] = all_hiddens
+            # GRU so c is invisible
+            #self._sample_cache["layer{}".format(layer)]["attention"]["attn_c"] = all_cells
+            self._sample_cache["layer{}".format(layer)]["attention"]["attn_kappa"] = all_attn_pos
+            self._sample_cache["layer{}".format(layer)]["attention"]["attn_context"] = contexts
+
+            self._sample_last_time_index["layer{}".format(layer)]["attention"] = time_index
+            self._sample_last_freq_index["layer{}".format(layer)]["attention"] = freq_index
+
+            return out_contexts, alignments, all_extras
+        else:
+            assert self._sample_step
+            print("attn sample step")
+            if self._sample_last_time_index["layer{}".format(layer)]["attention"] != time_index:
+                T, B, D = cds.size()
+                # make init a function of the mean of the 
+                # use h_t
+                context = self._sample_cache["layer{}".format(layer)]["attention"]["attn_context"][-1]
+                h_i = self._sample_cache["layer{}".format(layer)]["attention"]["attn_h"][-1]
+
+                #h_i = cds.new_zeros(B, self.hidden_size)
+                # GRU so cell is nothing
+                #c_i = cds.new_zeros(B, self.hidden_size)
+
+                #context = cds.new_zeros(B, self.hidden_size)
+                if self.attention_type == "sigmoid_logistic_alt":
+                    #prev_attn = cds.new_zeros(B, self.attention_mixture_components)
+                    prev_attn = self._sample_cache["layer{}".format(layer)]["attention"]["attn_kappa"][-1]
+                else:
+                    raise ValueError("Unknown self.attention_type {} found".format(self.attention_type))
+
+                comb = torch.cat([cds[0], context.squeeze(1)], dim=-1)
+                out, s = self.attn_lstm_cell([comb],
+                                             h_i, None,
+                                             input_mask=None)
+                h_t, c_t = s[0], s[1]
+                h_comb = torch.cat([cds[0], context.squeeze(1), h_t], dim=-1)
+
+                new_context, attn_weight, extras = self._attention_step_sample(h_comb, memory, memory_mask, prev_attn)
+
+                out = new_context + h_t[None]
+
+                self._sample_cache["layer{}".format(layer)]["attention"]["attn_context"].append(new_context)
+                self._sample_cache["layer{}".format(layer)]["attention"]["attn_h"].append(h_t)
+                self._sample_cache["layer{}".format(layer)]["attention"]["attn_kappa"].append(extras["kappa"])
+
+                self._sample_cache["layer{}".format(layer)]["attention"]["out"] = out
+                self._sample_cache["layer{}".format(layer)]["attention"]["attn_weight"] = attn_weight
+                self._sample_cache["layer{}".format(layer)]["attention"]["extras"] = extras
+
+                self._sample_last_time_index["layer{}".format(layer)]["attention"] = time_index
+                self._sample_last_freq_index["layer{}".format(layer)]["attention"] = freq_index
+            else:
+                out = self._sample_cache["layer{}".format(layer)]["attention"]["out"]
+                attn_weight = self._sample_cache["layer{}".format(layer)]["attention"]["attn_weight"]
+                extras = self._sample_cache["layer{}".format(layer)]["attention"]["extras"]
+            return out, attn_weight, extras
+
+
+    def sample(self, list_of_inputs,
+                     time_index, freq_index, is_initial_step=True,
+                     list_of_spatial_conditions=None,
+                     bypass_td=None, bypass_fd=None, skip_input_embed=False,
+                     memory=None, memory_mask=None):
+        if is_initial_step:
+            return self._sample_initial(list_of_inputs, time_index, freq_index,
+                                        list_of_spatial_conditions=list_of_spatial_conditions,
+                                        bypass_td=bypass_td, bypass_fd=bypass_fd,
+                                        skip_input_embed=skip_input_embed,
+                                        memory=memory, memory_mask=memory_mask)
+        else:
+            return self._sample_inc(list_of_inputs, time_index, freq_index,
+                                    list_of_spatial_conditions=list_of_spatial_conditions,
+                                    bypass_td=bypass_td, bypass_fd=bypass_fd,
+                                    skip_input_embed=skip_input_embed,
+                                    memory=memory, memory_mask=memory_mask)
+
+    def _sample_inc(self, list_of_inputs,
+                     time_index, freq_index,
+                     list_of_spatial_conditions=None,
+                     bypass_td=None, bypass_fd=None, skip_input_embed=False,
+                     memory=None, memory_mask=None):
+        # by default embed the inputs, otherwise bypass
+        # batch, mel_time, mel_freq, feats
+
+        # shift and project the input
+        if len(list_of_inputs) > 1:
+            raise ValueError("Only support list_of_inputs length 1 for now")
+
+        # we only use the time_index (and potentially, freq_index) step of x
+        x = list_of_inputs[0]
+
+        # x[:, time_index-1].sum() == self._sample_cache["input"]["tmp_td_x"][:, time_index].sum() 
+        # we need to process only the frame at time_index to extend the sampling
+        td_x = torch.cat((0 * x[:, 0][:, None], x), dim=1)
+        td_x = x[:, time_index][:, None]
+
+        fd_x = torch.cat((0 * x[:, :, 0][:, :, None], x[:, :, :-1]), dim=2)
+        fd_x = fd_x[:, time_index][:, None]
+        #if freq_index > 0:
+        #    freq_index = freq_index - 1
+        #    fd_x = x[:, :, freq_index]
+        #else:
+            # set it to 0s...
+        #    freq_index = 0
+        #    fd_x = 0. * x[:, :, freq_index]
+        #fd_x = fd_x[:, :, None]
+
+        self._sample_initial = False
+        self._sample_step = True
+
+        batch_size = td_x.shape[0]
+        self.batch_size = batch_size
+        self.n_vert = x.shape[1]
+        self.n_horiz = x.shape[2]
+
+        if self.has_centralized_stack:
+            # x should has dim of size 1 on the last for input
+            cd_x = x[:, time_index][:, None][..., 0]
+            # cd is now t b f
+            cd_x = cd_x.permute(1, 0, 2)
+
+            if not skip_input_embed:
+                cd_x = self.centralized_input_proj([cd_x])
+
+        if not skip_input_embed:
+            #td_x, td_e = self.embed_td(td_x)
+            #fd_x, fd_e = self.embed_fd(fd_x)
+            # reshape so the dot works
+            td_x = td_x.reshape((batch_size * 1, self.n_horiz, -1))
+            td_x = self.td_input_proj([td_x])
+            td_x = td_x.reshape((batch_size, 1, self.n_horiz, -1))
+
+            fd_x = fd_x.reshape((batch_size * 1, self.n_horiz, -1))
+            fd_x = self.fd_input_proj([fd_x])
+            fd_x = fd_x.reshape((batch_size, 1, self.n_horiz, -1))
+
+        if bypass_td is not None:
+            td_x = bypass_td
+        if bypass_fd is not None:
+            fd_x = bypass_fd
+
+        if self.has_attention:
+            assert memory is not None
+            assert memory_mask is not None
+
+        if self.has_spatial_condition:
+            cond_info = self.cond_mn([list_of_spatial_conditions[0]])
+            td_x = td_x + cond_info
+            fd_x = fd_x + cond_info
+
+        # cached here in initial
+
+        # batch, mel_time, mel_freq, feats -> batch * mel_time, mel_freq, feats
+        td_x = td_x.reshape((batch_size * 1, self.n_horiz, -1))
+        fd_x = fd_x.reshape((batch_size * 1, self.n_horiz, -1))
+        # horiz (freq), batch * vert, feat
+        td_x = td_x.permute(1, 0, 2)
+        fd_x = fd_x.permute(1, 0, 2)
+        # cd_x is n_vert, batch, freq
+
+        if self.has_attention:
+            # t b f to b t f to stretch
+            #mem_shp = memory.shape
+            #memory_stretch = memory.permute(1, 0, 2)[:, :, None, :] + 0. * td_x[:, :1, :, :1]
+            #memory_stretch = memory_stretch.permute(0, 2, 1, 3).reshape((batch_size * self.n_vert, mem_shp[0], mem_shp[2]))
+            # back to t b f
+            #memory_stretch = memory_stretch.permute(1, 0, 2)
+            memory_stretch = memory
+
+
+        has_cd_att = False
+        td_x_i = td_x
+        fd_x_i = fd_x
+        if self.has_centralized_stack:
+            cd_x_i = cd_x
+
+        def res(l):
+            return (0.5 ** 0.5) * l
+
+        def layer_norm(x, dim=-1, eps=1E-5):
+            mean = torch.mean(x, dim=dim, keepdim=True)
+            var = torch.square(x - mean).mean(dim=dim, keepdim=True)
+            return (x - mean) / torch.sqrt(var + eps)
+
+        for _i in range(self.n_layers):
+            td_x_o = self._td_stack_sample(td_x_i, _i, time_index, freq_index)
+            if self.has_centralized_stack:
+                if _i == (self.n_layers // 2) and self.has_attention:
+                    cd_att, alignment, attn_extras = self._attention_sample(cd_x_i, _i, memory, memory_mask, time_index, freq_index)
+                    has_cd_att = True
+                    # should this just replace the centralized stack here?
+                    cd_x_o = self._cd_centralized_stack_sample(res(cd_x_i + cd_att), _i, time_index, freq_index)
+                    fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_o + cd_x_i + cd_att))
+                else:
+                    if has_cd_att is False:
+                        cd_x_o = self._cd_centralized_stack_sample(cd_x_i, _i, time_index, freq_index)
+                        fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_i + cd_x_o))
+                    else:
+                        cd_x_o = self._cd_centralized_stack_sample(cd_x_i + cd_att, _i, time_index, freq_index)
+                        fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_o + cd_x_i + cd_att))
+            else:
+                fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index)
+            fd_x_i = res(fd_x_o + fd_x_i)
+            td_x_i = res(td_x_o + td_x_i)
+            if self.has_centralized_stack:
+                cd_x_i = res(cd_x_o + cd_x_i)
+                # don't add in the attention because we manually add it everwhere cd_x_i is used
+                #cd_x_i = cd_x_o + cd_x_i + cd_att
+            # set to none to be ensure no "carryover" / errors
+            td_x_o = None
+            fd_x_o = None
+            cd_x_o = None
+        out = self.out_proj([fd_x_i])
+        out = out.reshape((self.n_horiz, self.batch_size, 1, self.output_size))
+        #out = out.reshape((self.n_horiz, self.batch_size, self.n_vert, self.output_size))
+        out = out.permute((1, 2, 0, 3))
+        out = out[:, :, freq_index]
+        if self.has_attention:
+            return out, alignment, attn_extras
+        else:
+            return out
+
+    def _sample_initial(self, list_of_inputs,
+                        time_index, freq_index,
+                        list_of_spatial_conditions=None,
+                        bypass_td=None, bypass_fd=None, skip_input_embed=False,
+                        memory=None, memory_mask=None):
+        # this basically the same as the training method with exta caching to interact with sample when it is not an 
+        # by default embed the inputs, otherwise bypass
+        # batch, mel_time, mel_freq, feats
+
+        # shift and project the input
+        if len(list_of_inputs) > 1:
+            raise ValueError("Only support list_of_inputs length 1 for now")
+
+        self._sample_cache = {}
+        self._sample_cache["input"] = {}
+
+        x = list_of_inputs[0]
+        td_x = torch.cat((0 * x[:, 0][:, None], x[:, :-1]), dim=1)
+        fd_x = torch.cat((0 * x[:, :, 0][:, :, None], x[:, :, :-1]), dim=2)
+
+        self._sample_cache["input"]["tmp_x"] = x
+        self._sample_cache["input"]["tmp_td_x"] = td_x
+        self._sample_cache["input"]["tmp_fd_x"] = fd_x
+
+        batch_size = td_x.shape[0]
+        self.batch_size = batch_size
+
+        if self.has_centralized_stack:
+            # x should has dim of size 1 on the last for input
+            cd_x = torch.cat((0 * x[:, 0][:, None], x[:, :-1]), dim=1)[..., 0]
+            # cd is now t b f
+            cd_x = cd_x.permute(1, 0, 2)
+
+            if not skip_input_embed:
+                cd_x = self.centralized_input_proj([cd_x])
+        self.n_vert = x.shape[1]
+        self.n_horiz = x.shape[2]
+
+        if not skip_input_embed:
+            #td_x, td_e = self.embed_td(td_x)
+            #fd_x, fd_e = self.embed_fd(fd_x)
+            # reshape so the dot works
+            td_x = td_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+            td_x = self.td_input_proj([td_x])
+            td_x = td_x.reshape((batch_size, self.n_vert, self.n_horiz, -1))
+
+        if not skip_input_embed:
+            fd_x = fd_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+            # partial then concatenate
+            fd_x = self.fd_input_proj([fd_x])
+            fd_x = fd_x.reshape((batch_size, self.n_vert, self.n_horiz, -1))
+            # un reshape it?
+
+        if self.has_attention:
+            assert memory is not None
+            assert memory_mask is not None
+
+        if self.has_spatial_condition:
+            cond_info = self.cond_mn([list_of_spatial_conditions[0]])
+            td_x = td_x + cond_info
+            fd_x = fd_x + cond_info
+
+        if self.has_attention:
+            # t b f to b t f to stretch
+            #mem_shp = memory.shape
+            #memory_stretch = memory.permute(1, 0, 2)[:, :, None, :] + 0. * td_x[:, :1, :, :1]
+            #memory_stretch = memory_stretch.permute(0, 2, 1, 3).reshape((batch_size * self.n_vert, mem_shp[0], mem_shp[2]))
+            # back to t b f
+            #memory_stretch = memory_stretch.permute(1, 0, 2)
+            memory_stretch = memory
+
+        self._sample_initial = True
+        self._sample_step = False
+
+        self._sample_cache["input"]["td_x"] = td_x
+        self._sample_cache["input"]["fd_x"] = fd_x
+        # time batch feats
+        self._sample_cache["input"]["cd_x"] = cd_x
+
+        # batch, mel_time, mel_freq, feats -> batch * mel_time, mel_freq, feats
+        td_x = td_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+        fd_x = fd_x.reshape((batch_size * self.n_vert, self.n_horiz, -1))
+        # horiz (freq), batch * vert, feat
+        td_x = td_x.permute(1, 0, 2)
+        fd_x = fd_x.permute(1, 0, 2)
+
+        # cd_x is n_vert, batch, freq
+        has_cd_att = False
+        td_x_i = td_x
+        fd_x_i = fd_x
+        if self.has_centralized_stack:
+            cd_x_i = cd_x
+
+        def res(l):
+            return (0.5 ** 0.5) * l
+
+        def layer_norm(x, dim=-1, eps=1E-5):
+            mean = torch.mean(x, dim=dim, keepdim=True)
+            var = torch.square(x - mean).mean(dim=dim, keepdim=True)
+            return (x - mean) / torch.sqrt(var + eps)
+
+        for _i in range(self.n_layers):
+            self._sample_cache["layer{}".format(_i)] = {}
+            self._sample_cache["layer{}".format(_i)]["fd_stack"] = {}
+            self._sample_cache["layer{}".format(_i)]["cd_stack"] = {}
+            td_x_o = self._td_stack_sample(td_x_i, _i, time_index, freq_index)
+            if self.has_centralized_stack:
+                if _i == (self.n_layers // 2) and self.has_attention:
+                    cd_att, alignment, attn_extras = self._attention_sample(cd_x_i, _i, memory, memory_mask, time_index, freq_index)
+                    has_cd_att = True
+                    # should this just replace the centralized stack here?
+                    cd_x_o = self._cd_centralized_stack_sample(res(cd_x_i + cd_att), _i, time_index, freq_index)
+                    fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_o + cd_x_i + cd_att))
+                else:
+                    if has_cd_att is False:
+                        cd_x_o = self._cd_centralized_stack_sample(cd_x_i, _i, time_index, freq_index)
+                        fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_i + cd_x_o))
+                    else:
+                        cd_x_o = self._cd_centralized_stack_sample(cd_x_i + cd_att, _i, time_index, freq_index)
+                        fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_o + cd_x_i + cd_att))
+            else:
+                fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index)
+            fd_x_i = res(fd_x_o + fd_x_i)
+            td_x_i = res(td_x_o + td_x_i)
+            if self.has_centralized_stack:
+                cd_x_i = res(cd_x_o + cd_x_i)
+                # don't add in the attention because we manually add it everwhere cd_x_i is used
+                #cd_x_i = cd_x_o + cd_x_i + cd_att
+            # set to none to be ensure no "carryover" / errors
+            td_x_o = None
+            fd_x_o = None
+            cd_x_o = None
+        out = self.out_proj([fd_x_i])
+        out = out.reshape((self.n_horiz, self.batch_size, self.n_vert, self.output_size))
+        out = out.permute((1, 2, 0, 3))
+        if self.has_attention:
+            return out, alignment, attn_extras
+        else:
+            return out
+
 
 class YAMNetFullContextSubTier(torch.nn.Module):
     def __init__(self,
