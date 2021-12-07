@@ -6704,10 +6704,11 @@ class AttentionMelNetTier(torch.nn.Module):
         # x[:, time_index-1].sum() == self._sample_cache["input"]["tmp_td_x"][:, time_index].sum() 
         # we need to process only the frame at time_index to extend the sampling
         td_x = torch.cat((0 * x[:, 0][:, None], x), dim=1)
-        td_x = x[:, time_index][:, None]
+        td_x = td_x[:, time_index][:, None]
 
         fd_x = torch.cat((0 * x[:, :, 0][:, :, None], x[:, :, :-1]), dim=2)
         fd_x = fd_x[:, time_index][:, None]
+
         #if freq_index > 0:
         #    freq_index = freq_index - 1
         #    fd_x = x[:, :, freq_index]
@@ -6727,7 +6728,8 @@ class AttentionMelNetTier(torch.nn.Module):
 
         if self.has_centralized_stack:
             # x should has dim of size 1 on the last for input
-            cd_x = x[:, time_index][:, None][..., 0]
+            cd_x = torch.cat((0 * x[:, 0][:, None], x[:, :-1]), dim=1)[..., 0]
+            cd_x = cd_x[:, time_index][:, None]
             # cd is now t b f
             cd_x = cd_x.permute(1, 0, 2)
 

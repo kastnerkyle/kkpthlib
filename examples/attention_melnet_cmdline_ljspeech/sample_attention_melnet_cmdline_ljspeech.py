@@ -392,6 +392,37 @@ else:
         pred_out = model(x_in, x_mask=x_mask_in,
                          spatial_condition=cond,
                          batch_norm_flag=batch_norm_flag)
+#print("testing sample")
+#from IPython import embed; embed(); raise ValueError()
+
+import matplotlib.pyplot as plt
+
+if args.terminate_early_attention_plot:
+    # take output dir directly for terminate early attention plot
+    folder = input_output_dir
+    if not os.path.exists(input_output_dir):
+        os.mkdir(input_output_dir)
+
+    if not os.path.exists(folder):
+        os.mkdir(folder)
+
+    teacher_forced_pred = pred_out
+    teacher_forced_attn = model.attention_alignment
+
+    for _i in range(hp.real_batch_size):
+        mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
+        text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
+        # matshow vs imshow?
+        this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:mel_cut, :text_cut]
+        this_att = this_att.astype("float32")
+        plt.imshow(this_att)
+        plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
+        plt.savefig(folder + "attn_{}.png".format(_i))
+        plt.close()
+
+    import sys
+    print("Terminating early after only plotting attention due to commandline flag --terminate_early_attention_plot")
+    sys.exit()
 
 def tst(x, x_mask=None,
            spatial_condition=None,
@@ -433,6 +464,7 @@ def tst(x, x_mask=None,
         start_freq_index = 0
         mem_lstm = mem_lstm
         memory_condition_mask = memory_condition_mask
+        x[:, start_time_index + 1:, :] *= 0
         print("start sample step")
         for _ii in range(start_time_index, x.shape[1]):
             for _jj in range(start_freq_index, x.shape[2]):
@@ -473,39 +505,18 @@ else:
                              spatial_condition=cond,
                              batch_norm_flag=batch_norm_flag)
 
-#print("testing sample")
-#from IPython import embed; embed(); raise ValueError()
+unnormalized = pred_out.cpu().data.numpy() * saved_std + saved_mean
+_i = 0
+plt.imshow(unnormalized[_i, :, :, 0])
+plt.savefig("tmpfast.png")
 
-import matplotlib.pyplot as plt
+unnormalized = x_in.cpu().data.numpy() * saved_std + saved_mean
+_i = 0
+plt.imshow(unnormalized[_i, :, :, 0])
+plt.savefig("tmpfast_orig.png")
 
-if args.terminate_early_attention_plot:
-    # take output dir directly for terminate early attention plot
-    folder = input_output_dir
-    if not os.path.exists(input_output_dir):
-        os.mkdir(input_output_dir)
-
-    if not os.path.exists(folder):
-        os.mkdir(folder)
-
-    teacher_forced_pred = pred_out
-    teacher_forced_attn = model.attention_alignment
-
-    for _i in range(hp.real_batch_size):
-        mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
-        text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
-        # matshow vs imshow?
-        this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:mel_cut, :text_cut]
-        this_att = this_att.astype("float32")
-        plt.imshow(this_att)
-        plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
-        plt.savefig(folder + "attn_{}.png".format(_i))
-        plt.close()
-
-    import sys
-    print("Terminating early after only plotting attention due to commandline flag --terminate_early_attention_plot")
-    sys.exit()
-print("stahp")
 from IPython import embed; embed(); raise ValueError()
+
 
 def to_one_hot(tensor, n, fill_with=1.):
     # we perform one hot encore with respect to the last axis
