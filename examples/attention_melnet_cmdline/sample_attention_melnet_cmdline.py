@@ -718,11 +718,11 @@ def fast_sample(x, x_mask=None,
                 mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
                                                                         is_initial_step=is_initial_step,
                                                                         memory=mem_lstm, memory_mask=memory_condition_mask)
-                total_alignments = torch.cat((total_alignments, alignment[None]), dim=0)
-                total_extras.append(attn_extras)
                 x[:, _ii, _jj, 0] = mn_out.squeeze()
                 if verbose:
                     print("sampled index {},{} out of total size ({},{})".format(_ii, _jj, max_time_step, max_freq_step))
+            total_alignments = torch.cat((total_alignments, alignment[None]), dim=0)
+            total_extras.append(attn_extras)
         model.attention_alignment = total_alignments
         model.attention_extras = total_extras
     else:
