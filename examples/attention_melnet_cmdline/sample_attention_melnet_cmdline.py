@@ -495,6 +495,7 @@ if valid_el is not None:
         json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
         f.write(json_string)
 
+
 for _i in range(hp.real_batch_size):
     teacher_forced_pred = pred_out
 
@@ -649,10 +650,127 @@ else:
         # add in extra frame(s) based on the upsampling resolution due to ambiguity
         last_sil_frame_scaled = last_sil_frame * int(last_sil_resolution / this_resolution) + (int(last_sil_resolution / this_resolution) - 1)
 
+def fast_sample(x, x_mask=None,
+                   spatial_condition=None,
+                   memory_condition=None, memory_condition_mask=None,
+                   bias_boundary="default",
+                   early_termination="default",
+                   pytorch_saved_mean=None,
+                   pytorch_saved_std=None,
+                   batch_norm_flag=0.,
+                   verbose=True):
+    # for now we don't use the x_mask in the model itself, only in the loss calculations
+    frst = time.time()
+    new_x = copy.deepcopy(x)
+    x = new_x
+    if spatial_condition is None:
+        assert memory_condition is not None
+        mem, mem_e = model.embed_text(memory_condition)
+
+        #mem_conv = self.conv_text([mem], batch_norm_flag)
+        # mask based on the conditioning mask
+
+        #mem_conv = mem_conv * memory_condition_mask[..., None]
+
+        # use mask in BiLSTM
+        mem_lstm = model.bilstm_text([mem], input_mask=memory_condition_mask)
+        # x currently batch, time, freq, 1
+        # mem time, batch, feat
+        # feed mask for attention calculations as well
+        #mn_out, alignment, attn_extras = model.mn_t([x], memory=mem_lstm, memory_mask=memory_condition_mask)
+        # centralized stack means we cannot do better than frame cuts
+        time_index = 0
+        freq_index = 0
+        is_initial_step = True
+        # b t f feat
+        mem_lstm = mem_lstm
+        memory_condition_mask = memory_condition_mask
+        if bias_boundary == "default":
+            start_time_index = x.shape[1] // 2
+            start_freq_index = 0
+        else:
+            start_time_index = int(bias_boundary)
+            start_freq_index = 0
+
+        x_a = x[:, :start_time_index]
+        mn_out, alignment, attn_extras = model.mn_t.sample([x_a], time_index=time_index, freq_index=freq_index,
+                                                                  is_initial_step=is_initial_step,
+                                                                  memory=mem_lstm, memory_mask=memory_condition_mask)
+        is_initial_step = False
+
+        mem_lstm = mem_lstm
+        memory_condition_mask = memory_condition_mask
+        x[:, start_time_index:, :] *= 0
+
+        if verbose:
+            print("start sample step")
+        max_time_step = x.shape[1]
+        max_freq_step = x.shape[2]
+
+        total_alignments = alignment
+        total_extras = attn_extras
+
+        for _ii in range(start_time_index, max_time_step):
+            for _jj in range(start_freq_index, max_freq_step):
+                if early_termination != "default":
+                    if _ii > int(early_termination):
+                        continue
+                mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
+                                                                        is_initial_step=is_initial_step,
+                                                                        memory=mem_lstm, memory_mask=memory_condition_mask)
+                total_alignments = torch.cat((total_alignments, alignment[None]), dim=0)
+                total_extras.append(attn_extras)
+                x[:, _ii, _jj, 0] = mn_out.squeeze()
+                if verbose:
+                    print("sampled index {},{} out of total size ({},{})".format(_ii, _jj, max_time_step, max_freq_step))
+        model.attention_alignment = total_alignments
+        model.attention_extras = total_extras
+    else:
+        raise ValueError("Handle spatial condition...")
+        x = x[0:1, 0:1]
+        spatial_condition = spatial_condition[0:1]
+        mn_out = model.mn_t.sample([x], list_of_spatial_conditions=[spatial_condition])
+    fin = time.time()
+    print("fast sampling complete, time {} sec".format(fin - frst))
+    return x
+
 import time
 begin_time = time.time()
 torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
 torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
+
+x_in = torch.tensor(sample_buffer).contiguous().to(hp.use_device)
+x_mask_in = torch.tensor(sample_mask).contiguous().to(hp.use_device)
+
+p_saved_mean = torch.tensor(saved_mean).contiguous().to(hp.use_device)
+p_saved_std = torch.tensor(saved_std).contiguous().to(hp.use_device)
+
+if input_tier_condition_tag is None:
+    # no noise here in pred
+    with torch.no_grad():
+        pred_out = fast_sample(x_in, x_mask=x_mask_in,
+                                     memory_condition=torch_cond_seq_data_batch,
+                                     memory_condition_mask=torch_cond_seq_data_mask,
+                                     batch_norm_flag=batch_norm_flag,
+                                     bias_boundary=bias_til)
+else:
+    raise ValueError("Need to fix non-input_tier_condition tag sample")
+    cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+    # conditioning input currently unnormalized
+    if input_stored_conditioning is not None:
+        cond_np = input_stored_conditioning
+    cond = torch.tensor(cond_np).contiguous().to(hp.use_device)
+    if use_half:
+        cond = torch.tensor(cond_np).contiguous().to(hp.use_device).half()
+    with torch.no_grad():
+        pred_out = tst(x_in, x_mask=x_mask_in,
+                             spatial_condition=cond,
+                             batch_norm_flag=batch_norm_flag)
+teacher_forced_pred = pred_out
+sample_buffer = pred_out.cpu().data.numpy()
+
+
+'''
 for time_step in range(remaining_steps):
     for mel_step in range(x_in_np.shape[2]):
         cur_time = time.time()
@@ -725,6 +843,7 @@ for time_step in range(remaining_steps):
         print("minibatch time {} secs".format(end_time - cur_time))
 
 sample_completed = time.time()
+'''
 
 folder = input_output_dir + "sampled_forced_images/"
 if not os.path.exists(folder):
@@ -797,7 +916,6 @@ if input_tier_condition_tag is None:
     np.save(folder + "/" + "attn_activation.npy", teacher_forced_attn.cpu().data.numpy())
 else:
     np.save(folder + "/" + "unnormalized_cond_input.npy", cond_np)
-print("finished sampling in {} sec".format(sample_completed - begin_time))
 sys.exit()
 from IPython import embed; embed(); raise ValueError()
 

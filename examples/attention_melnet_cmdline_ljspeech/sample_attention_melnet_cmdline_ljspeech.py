@@ -473,10 +473,14 @@ def fast_sample(x, x_mask=None,
         mem_lstm = mem_lstm
         memory_condition_mask = memory_condition_mask
         x[:, start_time_index:, :] *= 0
+
         if verbose:
             print("start sample step")
         max_time_step = x.shape[1]
         max_freq_step = x.shape[2]
+
+        total_alignment = alignment
+        total_extras = attn_extras
 
         for _ii in range(start_time_index, max_time_step):
             for _jj in range(start_freq_index, max_freq_step):
