@@ -184,7 +184,7 @@ def midi_parse_and_save_json(midi_path, fpath, tempo_factor=1, quarter_quantizat
          print(j, file=f)
 
 
-def music21_parse_and_save_json(p, fpath, tempo_factor=1):
+def music21_parse_and_save_json_squopo(p, fpath, tempo_factor=1):
     piece_container = {}
     piece_container["parts"] = []
     piece_container["parts_times"] = []
@@ -1022,6 +1022,44 @@ def music21_parse_and_save_json_squig(p, fpath, tempo_factor=1, max_possible_voi
          print(j, file=f)
 
 
+def music21_parse_and_save_json(p, fpath, tempo_factor=1):
+    print("eeee")
+    from IPython import embed; embed(); raise ValueError()
+    piece_container = {}
+    piece_container["parts"] = []
+    piece_container["parts_times"] = []
+    piece_container["parts_cumulative_times"] = []
+    piece_container["parts_names"] = []
+    # we check for multiple timings when loading files, usually
+    spq = p.metronomeMarkBoundaries()[0][-1].secondsPerQuarter()
+    qbpm = p.metronomeMarkBoundaries()[0][-1].getQuarterBPM()
+    # set ppq to 220 to line up with magenta and pretty_midi
+    ppq = 220
+    #https://stackoverflow.com/questions/2038313/converting-midi-ticks-to-actual-playback-seconds
+    piece_container["seconds_per_quarter"] = spq
+    piece_container["quarter_beats_per_minute"] = qbpm
+    piece_container["pulses_per_quarter"] = ppq
+    for i, pi in enumerate(p.parts):
+        piece_container["parts"].append([])
+        piece_container["parts_times"].append([])
+        piece_container["parts_cumulative_times"].append([])
+        piece_container["parts_names"].append(pi.id)
+        part = []
+        part_time = []
+        for n in pi.flat.notesAndRests:
+            if n.isRest:
+                part.append(0)
+            else:
+                part.append(n.pitch.midi)
+            part_time.append(n.duration.quarterLength * tempo_factor)
+        piece_container["parts"][i] += part
+        piece_container["parts_times"][i] += part_time
+        piece_container["parts_cumulative_times"][i] += list(np.cumsum(part_time))
+    j = json.dumps(piece_container, indent=4)
+    with open(fpath, "w") as f:
+         print(j, file=f)
+
+
 def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
     if os.path.exists(get_kkpthlib_dataset_dir() + os.sep + "jsb_chorales_json"):
         dataset_path = get_kkpthlib_dataset_dir("jsb_chorales_json")
@@ -1035,6 +1073,7 @@ def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
         logger.info("JSB Chorales not yet cached, processing...")
         logger.info("Total number of Bach pieces to process from music21: {}".format(len(all_bach_paths)))
     for it, p_bach in enumerate(all_bach_paths):
+        from IPython import embed; embed(); raise ValueError()
         if "riemenschneider" in str(p_bach):
             # skip certain files we don't care about
             continue
@@ -1841,11 +1880,365 @@ def pitch_duration_velocity_lists_from_music_json_file(json_file, default_veloci
     return new_parts, new_parts_times, new_parts_velocities
 
 
+def convert_voice_roll_to_music_json(voice_roll, quantization_rate=.25, onsets_boundary=100, verbose=True):
+    """
+    take in voice roll and turn it into a pitch, duration thing again
+
+    currently assume onsets are any notes > 100 , 0 is rest
+
+    example input, where 170, 70, 70, 70 is an onset of pitch 70 (noted as 170), followed by a continuation for 4 steps
+    array([[170.,  70.,  70.,  70.],
+           [165.,  65.,  65.,  65.],
+           [162.,  62.,  62.,  62.],
+           [158.,  58.,  58.,  58.]])
+    """
+    duration_step = quantization_rate
+    voice_data = {}
+    voice_data["parts"] = []
+    voice_data["parts_times"] = []
+    voice_data["parts_cumulative_times"] = []
+    for v in range(voice_roll.shape[0]):
+        voice_data["parts"].append([])
+        voice_data["parts_times"].append([])
+        voice_data["parts_cumulative_times"].append([])
+    for v in range(voice_roll.shape[0]):
+        ongoing_duration = duration_step
+        note_held = 0
+        for t in range(len(voice_roll[v])):
+            token = int(voice_roll[v][t])
+            if voice_roll[v][t] > onsets_boundary:
+                voice_data["parts"][v].append(note_held)
+                voice_data["parts_times"][v].append(ongoing_duration)
+                ongoing_duration = duration_step
+                note_held = token - onsets_boundary
+            elif token != 0:
+                if token != note_held:
+                    # make it an onset?
+                    if verbose:
+                        print("WARNING: got non-onset pitch change, forcing onset token at step {}, voice {}".format(t, v))
+                    voice_data["parts"][v].append(note_held)
+                    voice_data["parts_times"][v].append(ongoing_duration)
+                    note_held = token
+                    ongoing_duration = duration_step
+                else:
+                    ongoing_duration += duration_step
+            else:
+                # just adding 16th note silences?
+                ongoing_duration = duration_step
+                note_held = 0
+                voice_data["parts"][v].append(note_held)
+                voice_data["parts_times"][v].append(ongoing_duration)
+        voice_data["parts_cumulative_times"][v] = [e for e in np.cumsum(voice_data["parts_times"][v])]
+    spq = .5
+    ppq = 220
+    qbpm = 120
+    voice_data["seconds_per_quarter"] = spq
+    voice_data["quarter_beats_per_minute"] = qbpm
+    voice_data["pulses_per_quarter"] = ppq
+    voice_data["parts_names"] = ["Soprano", "Alto", "Tenor", "Bass"]
+    j = json.dumps(voice_data, indent=4)
+    return j
+
+
+def convert_voice_lists_to_music_json(pitch_lists, duration_lists, velocity_lists=None, voices_list=None,
+                                      default_velocity=120,
+                                      measure_value=99,
+                                      onsets_boundary=100):
+    """
+    can either work by providing a list of lists input for pitch_lists and duration_lists (optionally velocity lists)
+
+    or
+
+    1 long list for pitch, 1 long list for duration (optionally velocity), and the voices_list argument which has
+    indicators for each voice and how it maps
+    """
+    voice_data = {}
+    voice_data["parts"] = []
+    voice_data["parts_times"] = []
+    voice_data["parts_cumulative_times"] = []
+    if voices_list is not None:
+        assert len(pitch_lists) == len(duration_lists)
+        voices = sorted(list(set(voices_list)))
+        for v in voices:
+            selector = [v_i == v for v_i in voices_list]
+            parts = [pitch_lists[i] for i in range(len(pitch_lists)) if selector[i]]
+            parts_times = [duration_lists[i] for i in range(len(pitch_lists)) if selector[i]]
+            if velocity_lists is not None:
+                parts_velocities = [velocity_lists[i] for i in range(len(pitch_lists)) if selector[i]]
+            else:
+                parts_velocities = [default_velocity for i in range(len(pitch_lists)) if selector[i]]
+            # WE ASSUME MEASURE SELECTOR IS A UNIQUE ONE
+            if any([p == measure_value for p in parts]):
+                continue
+            else:
+                voice_data["parts"].append(parts)
+                voice_data["parts_times"].append(parts_times)
+                voice_data["parts_cumulative_times"].append([0.] + [e for e in np.cumsum(parts_times)])
+    else:
+        from IPython import embed; embed(); raise ValueError()
+    spq = .5
+    ppq = 220
+    qbpm = 120
+    voice_data["seconds_per_quarter"] = spq
+    voice_data["quarter_beats_per_minute"] = qbpm
+    voice_data["pulses_per_quarter"] = ppq
+    voice_data["parts_names"] = ["Soprano", "Alto", "Tenor", "Bass"]
+    j = json.dumps(voice_data, indent=4)
+    return j
+
+
+def convert_sampled_pkl_sequence_to_music_json_data(np_arr, corpus, measure_quarters=4, force_column=False, no_measure_mark=True, add_const=0,
+                                                    verbose=True):
+    # 16 * 4 = 64
+    # 4 16ths per quarter, 4 voices
+    shape_bound = int(measure_quarters * 4 * 4)
+    all_data = []
+    for i in range(np_arr.shape[1]):
+        tmp = np_arr[:, i]
+
+        if force_column:
+            if no_measure_mark:
+                if len(tmp) % shape_bound != 0:
+                    tmp = tmp[:len(tmp) - (len(tmp) % shape_bound)]
+                r_tmp = tmp.reshape(-1, shape_bound)
+                voices_rolls = [[] for i in range(4)]
+                for mi in range(len(r_tmp)):
+                    # no skip, no measure marks
+                    measure_tmp = r_tmp[mi, :]
+                    notes_measure_tmp = [corpus.dictionary.idx2word[m] for m in measure_tmp]
+                    # 4 voices, X events each
+                    voices_measure = np.array(notes_measure_tmp).reshape(-1, 4).transpose()
+                    # final array will be 4 lists of N steps, no measure marks
+                    # can check the conversion with:
+                    # convert_voice_roll_to_music_json(voices_measure)
+                    for v in range(len(voices_measure)):
+                        voices_rolls[v].extend([m for m in voices_measure[v]])
+            else:
+                tmp = np.concatenate(([corpus.dictionary.word2idx[999]], tmp))
+                boundaries = np.where(tmp == corpus.dictionary.word2idx[999])[0]
+                r_tmp = tmp[:boundaries[-1]].reshape(-1, shape_bound + 1)
+                voices_rolls = [[] for i in range(4)]
+                for mi in range(len(r_tmp)):
+                    # 1: to skip the initial marker
+                    assert r_tmp[mi, 0] == corpus.dictionary.word2idx[999]
+                    measure_tmp = r_tmp[mi, 1:]
+                    notes_measure_tmp = [corpus.dictionary.idx2word[m] for m in measure_tmp]
+                    # 4 voices, X events each
+                    voices_measure = np.array(notes_measure_tmp).reshape(-1, 4).transpose()
+                    # final array will be 4 lists of N steps, no measure marks
+                    # can check the conversion with:
+                    # convert_voice_roll_to_music_json(voices_measure)
+                    for v in range(len(voices_measure)):
+                        voices_rolls[v].extend([m for m in voices_measure[v]])
+        else:
+            # append on 1 value to make it uniform
+            tmp = np.concatenate(([corpus.dictionary.word2idx[999]], tmp))
+            # last multiple?
+            boundaries = np.where(tmp == corpus.dictionary.word2idx[999])[0]
+            l = 0
+            for b in boundaries:
+                if b % (shape_bound + 1) == 0:
+                    l = b
+            # dont use l for now
+            measure_chunk_shp = shape_bound
+
+            # + 1 for measure mark
+
+            r_tmp = tmp[:l].reshape(-1, measure_chunk_shp + 1)
+
+            voices_rolls = [[] for i in range(4)]
+            for mi in range(len(r_tmp)):
+                # 1: to skip the initial marker
+                assert r_tmp[mi, 0] == corpus.dictionary.word2idx[999]
+                measure_tmp = r_tmp[mi, 1:]
+                notes_measure_tmp = [corpus.dictionary.idx2word[m] for m in measure_tmp]
+                # 4 voices, X events each
+                voices_measure = np.array(notes_measure_tmp).reshape(4, -1)
+                # final array will be 4 lists of N steps, no measure marks
+                # can check the conversion with:
+                # convert_voice_roll_to_music_json(voices_measure)
+                for v in range(len(voices_measure)):
+                    voices_rolls[v].extend([m for m in voices_measure[v]])
+        vr = np.array(voices_rolls)
+        for ii in range(vr.shape[1]):
+            nz = np.where(vr[:, ii] > 0)[0]
+            vr[nz, ii] += add_const
+        data = convert_voice_roll_to_music_json(vr, verbose=verbose)
+        all_data.append(data)
+    return all_data
+
+
+class MusicJSONCorpus(object):
+    def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
+                 max_vocabulary_size=-1,
+                 voices=[0,1,2,3]):
+        """
+        """
+        self.dictionary = LookupDictionary()
+        self.max_vocabulary_size = max_vocabulary_size
+        self.voices = voices
+        self.fill_symbol = (-2, -2)
+        self.measure_symbol = (-1, -1)
+        self.dictionary.add_word(self.fill_symbol)
+
+        self.train_data_file_paths = train_data_file_paths
+        self.valid_data_file_paths = valid_data_file_paths
+
+        train_pitches, train_durations, train_voices = self._load_music_json(train_data_file_paths)
+
+        self.build_vocabulary(train_data_file_paths)
+        if valid_data_file_paths != None:
+            valid_pitches, valid_durations, valid_voices = self._load_music_json(valid_data_file_paths)
+            self.build_vocabulary(valid_data_file_paths)
+        if test_data_file_paths != None:
+            test_pitches, test_durations, test_voices = self._load_music_json(test_data_file_paths)
+
+        self.train, self.train_offsets = self.pre_tokenize(train_data_file_paths)
+        if valid_data_file_paths is not None:
+            self.valid, self.valid_offsets = self.pre_tokenize(valid_data_file_paths)
+        if test_data_file_paths is not None:
+            self.test, self.test_offsets = self.pre_tokenize(test_data_file_paths)
+
+    def _load_music_json(self, json_file_paths):
+        all_pitches = []
+        all_durations = []
+        all_voices = []
+        for path in json_file_paths:
+            pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
+            all_pitches.append([p for n, p in enumerate(pitches) if n in self.voices])
+            all_durations.append([d for n, d in enumerate(durations) if n in self.voices])
+            all_voices.append([v for n, v in enumerate(voices) if n in self.voices])
+        return all_pitches, all_durations, all_voices
+
+    def build_vocabulary(self, json_file_paths):
+        for path in json_file_paths:
+            pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
+            all_pitches = []
+            all_durations = []
+            if self.raster_scan:
+                joint = []
+                v = 0
+                voice_counter = [0, 0, 0, 0]
+                while True:
+                    if voice_counter[v] < len(pitches[v]):
+                        if all([voice_counter[i] >= len(pitches[i]) for i in range(len(voice_counter))]):
+                            break
+                        all_pitches.append(pitches[voice_counter[v]])
+                        all_durations.append(durations[voice_counter[v]])
+                    v = v + 1
+                    v = v % len(pitches)
+                for p, d in zip(all_pitches, all_durations):
+                    if d == -1:
+                        continue
+                    else:
+                        joint.append((p, d))
+
+                for j in joint:
+                    if j not in self.dictionary.word2idx:
+                        self.dictionary.add_word(j)
+            else:
+                for v in self.voices:
+                    _pitches = [p for n, p in enumerate(pitches) if n == v]
+                    _durations = [d for n, d in enumerate(durations) if n == v]
+                    _pitches = _pitches[0]
+                    _durations = _durations[0]
+                    assert len(_pitches) == len(_durations)
+                    joint = []
+                    for p, d in zip(_pitches, _durations):
+                        if d == -1:
+                            continue
+                        else:
+                            joint.append((p, d))
+                    for j in joint:
+                        if j not in self.dictionary.word2idx:
+                            self.dictionary.add_word(j)
+
+    def pre_tokenize(self, json_file_paths):
+        joints = []
+        joints_offsets = []
+        print("NYI handle joint offsets")
+        from IPython import embed; embed(); raise ValueError()
+        for path in json_file_paths:
+            pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
+            all_pitches = []
+            all_durations = []
+            if self.raster_scan:
+                joint = []
+                v = 0
+                voice_counter = [0, 0, 0, 0]
+                while True:
+                    if voice_counter[v] < len(pitches[v]):
+                        if all([voice_counter[i] >= len(pitches[i]) for i in range(len(voice_counter))]):
+                            break
+                        all_pitches.append(pitches[voice_counter[v]])
+                        all_durations.append(durations[voice_counter[v]])
+                    v = v + 1
+                    v = v % len(pitches)
+                for p, d in zip(all_pitches, all_durations):
+                    if d == -1:
+                        continue
+                    else:
+                        joint.append((p, d))
+                joints.extend(joint)
+            else:
+                for v in self.voices:
+                    _pitches = [p for n, p in enumerate(pitches) if n == v]
+                    _durations = [d for n, d in enumerate(durations) if n == v]
+                    _pitches = _pitches[0]
+                    _durations = _durations[0]
+                    assert len(_pitches) == len(_durations)
+                    joint = []
+                    for p, d in zip(_pitches, _durations):
+                        if d == -1:
+                            continue
+                        else:
+                            joint.append((p, d))
+                    joints.extend(joint)
+        return joints, joints_offsets
+
+    def get_iterator(self, batch_size, random_seed, sequence_len=64, context_len=32, sample_percent=.15,
+                     max_n_gram=8, _type="train"):
+        random_state = np.random.RandomState(random_seed)
+        if _type == "train":
+            content = self.train
+            offsets = self.train_offsets
+        elif _type == "valid":
+            content = self.valid
+            offsets = self.valid_offsets
+        elif _type == "test":
+            content = self.test
+            offsets = self.test_offsets
+
+        fill_symbol = self.fill_symbol
+
+        def sample_minibatch(batch_size=batch_size, content=content, random_state=random_state,
+                             sequence_len=sequence_len,
+                             context_len=context_len,
+                             fill_symbol=fill_symbol,
+                             sample_percent=sample_percent,
+                             max_n_gram=max_n_gram):
+            while True:
+                cur_batch = []
+                for i in range(batch_size):
+                    # sample place to start element from the dataset
+                    el = random_state.choice(len(content) - sequence_len - 1)
+                    cur = content[el:el + sequence_len]
+                    cur_batch.append(cur)
+                # make transformer masks for constructed batch
+                max_len = max([len(b) for b in cur_batch])
+                cur_batch_masks = [[0] * len(b) + [1] * (max_len - len(b)) for b in cur_batch]
+                cur_batch = [b + [fill_symbol] * (max_len - len(b)) for b in cur_batch]
+                token_batch = [[self.dictionary.word2idx[bi] for bi in b] for b in cur_batch]
+                yield np.array(token_batch).T[..., None], np.array(cur_batch_masks).T
+        return sample_minibatch()
+
+
 class MusicJSONPitchDurationCorpus(object):
     def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
                  max_vocabulary_size=-1,
                  voices=[0,1,2,3],
                  raster_scan=False):
+        raise ValueError("deprecated")
         """
         """
         self.dictionary = LookupDictionary()
@@ -2012,6 +2405,7 @@ class MusicJSONInfillCorpus(object):
                  max_vocabulary_size=-1,
                  voices=[0,1,2,3],
                  raster_scan=True):
+        raise ValueError("deprecated")
         """
         """
         self.dictionary = LookupDictionary()
@@ -2584,6 +2978,7 @@ class MusicPklCorpus(object):
                  eof_mark_token=None,
                  repeat_data_once=True,
                  show_skip_error=False):
+        raise ValueError("deprecated")
         if force_column == False:
             if no_measure_mark == True:
                 raise ValueError("Row based rasterization requires measure marks! force_column=False, no_measure_mark=True cannot be specified")
@@ -2921,6 +3316,7 @@ class MusicJSONRowRasterCorpus(object):
                  tokenization_fn="row_flatten",
                  default_velocity=120, quantization_rate=.25, n_voices=4,
                  separate_onsets=True, onsets_boundary=100):
+        raise ValueError("deprecated")
         """
         """
         self.dictionary = LookupDictionary()
@@ -3177,6 +3573,7 @@ class MusicJSONRasterCorpus(object):
                  tokenization_fn="flatten",
                  default_velocity=120, quantization_rate=.25, n_voices=4,
                  separate_onsets=True, onsets_boundary=100):
+        raise ValueError("deprecated")
         """
         """
         self.dictionary = LookupDictionary()
@@ -3267,6 +3664,7 @@ class MusicJSONFlatKeyframeMeasureCorpus(object):
                  transition_value=9999,
                  fill_value=-1,
                  separate_onsets=True, onsets_boundary=100):
+        raise ValueError("deprecated")
         """
         """
         self._make_dictionaries()
@@ -4020,6 +4418,7 @@ class MusicJSONFlatMeasureCorpus(object):
                  measure_value=99,
                  fill_value=-1,
                  separate_onsets=True, onsets_boundary=100):
+        raise ValueError("deprecated")
         """
         """
         self.pitch_dictionary = LookupDictionary()
@@ -4160,7 +4559,7 @@ class MusicJSONFlatMeasureCorpus(object):
         return pitches, durations, velocities, voices
 
 
-class MusicJSONCorpus(object):
+class MusicJSONCorpusDEP(object):
     def __init__(self, train_data_file_paths, valid_data_file_paths=None, test_data_file_paths=None,
                  max_vocabulary_size=-1,
                  add_eos=False,
@@ -4171,6 +4570,7 @@ class MusicJSONCorpus(object):
                  separate_onsets=True, onsets_boundary=100):
         """
         """
+        raise ValueError("deprecated")
         self.dictionary = LookupDictionary()
 
         self.max_vocabulary_size = max_vocabulary_size
@@ -4262,6 +4662,7 @@ class MusicJSONRasterIterator(object):
                  separate_onsets=False,
                  #with_clocks=None,
                  resolution="sixteenth"):
+        raise ValueError("deprecated")
         super(MusicJSONRasterIterator, self).__init__()
         self.list_of_music_json_files = list_of_music_json_files
         self.random_seed = random_seed
@@ -4421,113 +4822,6 @@ class MusicJSONRasterIterator(object):
             return raster_roll_voices, mask, [ac.astype(np.float32) * mask[..., None] for ac in all_clocks]
 
 
-def convert_voice_roll_to_music_json(voice_roll, quantization_rate=.25, onsets_boundary=100, verbose=True):
-    """
-    take in voice roll and turn it into a pitch, duration thing again
-
-    currently assume onsets are any notes > 100 , 0 is rest
-
-    example input, where 170, 70, 70, 70 is an onset of pitch 70 (noted as 170), followed by a continuation for 4 steps
-    array([[170.,  70.,  70.,  70.],
-           [165.,  65.,  65.,  65.],
-           [162.,  62.,  62.,  62.],
-           [158.,  58.,  58.,  58.]])
-    """
-    duration_step = quantization_rate
-    voice_data = {}
-    voice_data["parts"] = []
-    voice_data["parts_times"] = []
-    voice_data["parts_cumulative_times"] = []
-    for v in range(voice_roll.shape[0]):
-        voice_data["parts"].append([])
-        voice_data["parts_times"].append([])
-        voice_data["parts_cumulative_times"].append([])
-    for v in range(voice_roll.shape[0]):
-        ongoing_duration = duration_step
-        note_held = 0
-        for t in range(len(voice_roll[v])):
-            token = int(voice_roll[v][t])
-            if voice_roll[v][t] > onsets_boundary:
-                voice_data["parts"][v].append(note_held)
-                voice_data["parts_times"][v].append(ongoing_duration)
-                ongoing_duration = duration_step
-                note_held = token - onsets_boundary
-            elif token != 0:
-                if token != note_held:
-                    # make it an onset?
-                    if verbose:
-                        print("WARNING: got non-onset pitch change, forcing onset token at step {}, voice {}".format(t, v))
-                    voice_data["parts"][v].append(note_held)
-                    voice_data["parts_times"][v].append(ongoing_duration)
-                    note_held = token
-                    ongoing_duration = duration_step
-                else:
-                    ongoing_duration += duration_step
-            else:
-                # just adding 16th note silences?
-                ongoing_duration = duration_step
-                note_held = 0
-                voice_data["parts"][v].append(note_held)
-                voice_data["parts_times"][v].append(ongoing_duration)
-        voice_data["parts_cumulative_times"][v] = [e for e in np.cumsum(voice_data["parts_times"][v])]
-    spq = .5
-    ppq = 220
-    qbpm = 120
-    voice_data["seconds_per_quarter"] = spq
-    voice_data["quarter_beats_per_minute"] = qbpm
-    voice_data["pulses_per_quarter"] = ppq
-    voice_data["parts_names"] = ["Soprano", "Alto", "Tenor", "Bass"]
-    j = json.dumps(voice_data, indent=4)
-    return j
-
-
-def convert_voice_lists_to_music_json(pitch_lists, duration_lists, velocity_lists=None, voices_list=None,
-                                      default_velocity=120,
-                                      measure_value=99,
-                                      onsets_boundary=100):
-    """
-    can either work by providing a list of lists input for pitch_lists and duration_lists (optionally velocity lists)
-
-    or
-
-    1 long list for pitch, 1 long list for duration (optionally velocity), and the voices_list argument which has
-    indicators for each voice and how it maps
-    """
-    voice_data = {}
-    voice_data["parts"] = []
-    voice_data["parts_times"] = []
-    voice_data["parts_cumulative_times"] = []
-    if voices_list is not None:
-        assert len(pitch_lists) == len(duration_lists)
-        voices = sorted(list(set(voices_list)))
-        for v in voices:
-            selector = [v_i == v for v_i in voices_list]
-            parts = [pitch_lists[i] for i in range(len(pitch_lists)) if selector[i]]
-            parts_times = [duration_lists[i] for i in range(len(pitch_lists)) if selector[i]]
-            if velocity_lists is not None:
-                parts_velocities = [velocity_lists[i] for i in range(len(pitch_lists)) if selector[i]]
-            else:
-                parts_velocities = [default_velocity for i in range(len(pitch_lists)) if selector[i]]
-            # WE ASSUME MEASURE SELECTOR IS A UNIQUE ONE
-            if any([p == measure_value for p in parts]):
-                continue
-            else:
-                voice_data["parts"].append(parts)
-                voice_data["parts_times"].append(parts_times)
-                voice_data["parts_cumulative_times"].append([0.] + [e for e in np.cumsum(parts_times)])
-    else:
-        from IPython import embed; embed(); raise ValueError()
-    spq = .5
-    ppq = 220
-    qbpm = 120
-    voice_data["seconds_per_quarter"] = spq
-    voice_data["quarter_beats_per_minute"] = qbpm
-    voice_data["pulses_per_quarter"] = ppq
-    voice_data["parts_names"] = ["Soprano", "Alto", "Tenor", "Bass"]
-    j = json.dumps(voice_data, indent=4)
-    return j
-
-
 class MusicJSONVoiceIterator(object):
     """
             return pitch_batch, time_batch, voice_batch, cumulative_time_batch, mask
@@ -4543,6 +4837,7 @@ class MusicJSONVoiceIterator(object):
                  iterate_once=False,
                  with_clocks=[2, 4, 8, 16, 32, 64],
                  resolution="sixteenth"):
+        raise ValueError("deprecated")
         super(MusicJSONVoiceIterator, self).__init__()
         self.list_of_music_json_files = list_of_music_json_files
         self.random_seed = random_seed
@@ -4727,84 +5022,3 @@ class MusicJSONVoiceIterator(object):
             return pitch_batch, time_batch, voice_batch, cumulative_time_batch, mask
         else:
             return pitch_batch, time_batch, voice_batch, cumulative_time_batch, mask, clock_batches
-
-
-def convert_sampled_pkl_sequence_to_music_json_data(np_arr, corpus, measure_quarters=4, force_column=False, no_measure_mark=True, add_const=0,
-                                                    verbose=True):
-    # 16 * 4 = 64
-    # 4 16ths per quarter, 4 voices
-    shape_bound = int(measure_quarters * 4 * 4)
-    all_data = []
-    for i in range(np_arr.shape[1]):
-        tmp = np_arr[:, i]
-
-        if force_column:
-            if no_measure_mark:
-                if len(tmp) % shape_bound != 0:
-                    tmp = tmp[:len(tmp) - (len(tmp) % shape_bound)]
-                r_tmp = tmp.reshape(-1, shape_bound)
-                voices_rolls = [[] for i in range(4)]
-                for mi in range(len(r_tmp)):
-                    # no skip, no measure marks
-                    measure_tmp = r_tmp[mi, :]
-                    notes_measure_tmp = [corpus.dictionary.idx2word[m] for m in measure_tmp]
-                    # 4 voices, X events each
-                    voices_measure = np.array(notes_measure_tmp).reshape(-1, 4).transpose()
-                    # final array will be 4 lists of N steps, no measure marks
-                    # can check the conversion with:
-                    # convert_voice_roll_to_music_json(voices_measure)
-                    for v in range(len(voices_measure)):
-                        voices_rolls[v].extend([m for m in voices_measure[v]])
-            else:
-                tmp = np.concatenate(([corpus.dictionary.word2idx[999]], tmp))
-                boundaries = np.where(tmp == corpus.dictionary.word2idx[999])[0]
-                r_tmp = tmp[:boundaries[-1]].reshape(-1, shape_bound + 1)
-                voices_rolls = [[] for i in range(4)]
-                for mi in range(len(r_tmp)):
-                    # 1: to skip the initial marker
-                    assert r_tmp[mi, 0] == corpus.dictionary.word2idx[999]
-                    measure_tmp = r_tmp[mi, 1:]
-                    notes_measure_tmp = [corpus.dictionary.idx2word[m] for m in measure_tmp]
-                    # 4 voices, X events each
-                    voices_measure = np.array(notes_measure_tmp).reshape(-1, 4).transpose()
-                    # final array will be 4 lists of N steps, no measure marks
-                    # can check the conversion with:
-                    # convert_voice_roll_to_music_json(voices_measure)
-                    for v in range(len(voices_measure)):
-                        voices_rolls[v].extend([m for m in voices_measure[v]])
-        else:
-            # append on 1 value to make it uniform
-            tmp = np.concatenate(([corpus.dictionary.word2idx[999]], tmp))
-            # last multiple?
-            boundaries = np.where(tmp == corpus.dictionary.word2idx[999])[0]
-            l = 0
-            for b in boundaries:
-                if b % (shape_bound + 1) == 0:
-                    l = b
-            # dont use l for now
-            measure_chunk_shp = shape_bound
-
-            # + 1 for measure mark
-
-            r_tmp = tmp[:l].reshape(-1, measure_chunk_shp + 1)
-
-            voices_rolls = [[] for i in range(4)]
-            for mi in range(len(r_tmp)):
-                # 1: to skip the initial marker
-                assert r_tmp[mi, 0] == corpus.dictionary.word2idx[999]
-                measure_tmp = r_tmp[mi, 1:]
-                notes_measure_tmp = [corpus.dictionary.idx2word[m] for m in measure_tmp]
-                # 4 voices, X events each
-                voices_measure = np.array(notes_measure_tmp).reshape(4, -1)
-                # final array will be 4 lists of N steps, no measure marks
-                # can check the conversion with:
-                # convert_voice_roll_to_music_json(voices_measure)
-                for v in range(len(voices_measure)):
-                    voices_rolls[v].extend([m for m in voices_measure[v]])
-        vr = np.array(voices_rolls)
-        for ii in range(vr.shape[1]):
-            nz = np.where(vr[:, ii] > 0)[0]
-            vr[nz, ii] += add_const
-        data = convert_voice_roll_to_music_json(vr, verbose=verbose)
-        all_data.append(data)
-    return all_data

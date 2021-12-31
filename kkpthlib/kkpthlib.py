@@ -3257,7 +3257,7 @@ class RelativeDecoderLayer(nn.Module):
         return output
 
 
-class AWDTransformerXLDecoderBlock(nn.Module):
+class AWDTransformerXLBaseBlock(nn.Module):
     def __init__(self,
                  list_of_input_dims,
                  remove_context=False,
@@ -3277,7 +3277,7 @@ class AWDTransformerXLDecoderBlock(nn.Module):
                  scale="default",
                  device="default",
                  dtype="default"):
-        super(AWDTransformerXLDecoderBlock, self).__init__()
+        super(AWDTransformerXLBaseBlock, self).__init__()
 
         self.remove_context = remove_context
 
@@ -3321,6 +3321,7 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         self.memory_len = memory_len
         self.context_len = context_len
         if self.event_based_positions:
+            # ? get rid of this?
             self.pos_emb = EventPositionalEmbedding(model_dim,
                                                     device=device,
                                                     dtype=dtype)
@@ -3410,12 +3411,18 @@ class AWDTransformerXLDecoderBlock(nn.Module):
         mlen = list_of_mems[0].size(0) if list_of_mems is not None else 0
         klen = mlen + qlen
         # masking works internally by setting 1s to neg inf, 0s are left alone! This is slightly different than expected
+        # attention mask shows the position each tgt word (row) is allowed to look at (column).
+        # 0 1 1 1 1
+        # 0 0 1 1 1
+        # 0 0 0 1 1
+        # 0 0 0 0 1
         attn_mask = torch.triu(input_tensor.new_ones(qlen, klen), diagonal=1 + mlen).bool()[:, :, None]
         if input_mask_tensor is None:
             input_mask_tensor = (0. * input_tensor[:, :, 0]).long()
         input_mask_tensor_dtype = input_mask_tensor.dtype
         attn_mask = (attn_mask.type(input_mask_tensor_dtype) + input_mask_tensor[:, None, :] > 0).bool()
 
+        #? skip embed?
         if self.event_based_positions:
             if input_event_positions is None:
                 raise ValueError("event_based_positions enabled in init, but not passed in forward pass!")
@@ -3457,6 +3464,168 @@ class AWDTransformerXLDecoderBlock(nn.Module):
             core_out = core_out[self.context_len:]
         core_out = self.locked_drop_o(core_out)
         return core_out, new_mems
+
+
+class AWDTransformerXLEncoderBlock(nn.Module):
+    def __init__(self,
+                 list_of_input_dims,
+                 remove_context=False,
+                 n_layers=16, n_heads=10, head_dim=38, model_dim=380, inner_dim=900,
+                 input_dropout_keep_prob=0.4,
+                 attention_dropout_keep_prob=0.8,
+                 inner_dropout_keep_prob=0.8,
+                 hidden_dropout_keep_prob=1.0,
+                 output_dropout_keep_prob=0.5,
+                 event_based_positions=False,
+                 name=None,
+                 random_state=None,
+                 memory_len=0,
+                 context_len=0,
+                 strict=None,
+                 init=None,
+                 scale="default",
+                 device="default",
+                 dtype="default"):
+        super(AWDTransformerXLEncoderBlock, self).__init__()
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass random_state to AWDTransformerXLDecoderBlock")
+
+        self.transformer = AWDTransformerXLBaseBlock(list_of_input_dims,
+                                                     remove_context=remove_context,
+                                                     n_layers=n_layers,
+                                                     n_heads=n_heads,
+                                                     head_dim=head_dim,
+                                                     model_dim=model_dim,
+                                                     inner_dim=inner_dim,
+                                                     input_dropout_keep_prob=input_dropout_keep_prob,
+                                                     attention_dropout_keep_prob=attention_dropout_keep_prob,
+                                                     inner_dropout_keep_prob=inner_dropout_keep_prob,
+                                                     hidden_dropout_keep_prob=hidden_dropout_keep_prob,
+                                                     output_dropout_keep_prob=output_dropout_keep_prob,
+                                                     event_based_positions=event_based_positions,
+                                                     name=name,
+                                                     random_state=random_state,
+                                                     memory_len=memory_len,
+                                                     context_len=context_len,
+                                                     strict=strict,
+                                                     init=init,
+                                                     scale=scale,
+                                                     device=device,
+                                                     dtype=dtype)
+
+    def init_list_of_mems(self):
+        return self.transformer.init_list_of_mems()
+
+    def update_list_of_mems(self, hiddens, list_of_mems, query_len, memory_len):
+        return self.transformer.update_list_of_mems(hiddens, list_of_mems, query_len, memory_len)
+
+
+    def forward(self, input_tensor, input_mask_tensor=None, input_event_positions=None, list_of_mems=None):
+        """
+        if not list_of_mems:
+            list_of_mems = self.init_list_of_mems()
+
+        shp = input_tensor.shape
+        qlen = shp[0]
+        mlen = list_of_mems[0].size(0) if list_of_mems is not None else 0
+        klen = mlen + qlen
+        # masking works internally by setting 1s to neg inf, 0s are left alone! This is slightly different than expected
+        # attention mask shows the position each tgt word (row) is allowed to look at (column).
+        # 0 1 1 1 1
+        # 0 0 1 1 1
+        # 0 0 0 1 1
+        # 0 0 0 0 1
+        attn_mask = torch.triu(input_tensor.new_ones(qlen, klen), diagonal=1 + mlen).bool()[:, :, None]
+        if input_mask_tensor is None:
+            input_mask_tensor = (0. * input_tensor[:, :, 0]).long()
+        input_mask_tensor_dtype = input_mask_tensor.dtype
+        attn_mask = (attn_mask.type(input_mask_tensor_dtype) + input_mask_tensor[:, None, :] > 0).bool()
+        """
+        return self.transformer(input_tensor, input_mask_tensor, input_event_positions, list_of_mems)
+
+
+class AWDTransformerXLDecoderBlock(nn.Module):
+    def __init__(self,
+                 list_of_input_dims,
+                 remove_context=False,
+                 n_layers=16, n_heads=10, head_dim=38, model_dim=380, inner_dim=900,
+                 input_dropout_keep_prob=0.4,
+                 attention_dropout_keep_prob=0.8,
+                 inner_dropout_keep_prob=0.8,
+                 hidden_dropout_keep_prob=1.0,
+                 output_dropout_keep_prob=0.5,
+                 event_based_positions=False,
+                 name=None,
+                 random_state=None,
+                 memory_len=0,
+                 context_len=0,
+                 strict=None,
+                 init=None,
+                 scale="default",
+                 device="default",
+                 dtype="default"):
+        super(AWDTransformerXLEncoderBlock, self).__init__()
+        if name is None:
+            name = _get_name()
+
+        if random_state is None:
+            raise ValueError("Must pass random_state to AWDTransformerXLDecoderBlock")
+
+        self.transformer = AWDTransformerXLBaseBlock(list_of_input_dims,
+                                                     remove_context=remove_context,
+                                                     n_layers=n_layers,
+                                                     n_heads=n_heads,
+                                                     head_dim=head_dim,
+                                                     model_dim=model_dim,
+                                                     inner_dim=inner_dim,
+                                                     input_dropout_keep_prob=input_dropout_keep_prob,
+                                                     attention_dropout_keep_prob=attention_dropout_keep_prob,
+                                                     inner_dropout_keep_prob=inner_dropout_keep_prob,
+                                                     hidden_dropout_keep_prob=hidden_dropout_keep_prob,
+                                                     output_dropout_keep_prob=output_dropout_keep_prob,
+                                                     event_based_positions=event_based_positions,
+                                                     name=name,
+                                                     random_state=random_state,
+                                                     memory_len=memory_len,
+                                                     context_len=context_len,
+                                                     strict=strict,
+                                                     init=init,
+                                                     scale=scale,
+                                                     device=device,
+                                                     dtype=dtype)
+
+    def init_list_of_mems(self):
+        return self.transformer.init_list_of_mems()
+
+    def update_list_of_mems(self, hiddens, list_of_mems, query_len, memory_len):
+        return self.transformer.update_list_of_mems(hiddens, list_of_mems, query_len, memory_len)
+
+
+    def forward(self, input_tensor, input_mask_tensor=None, input_event_positions=None, list_of_mems=None):
+        """
+        if not list_of_mems:
+            list_of_mems = self.init_list_of_mems()
+
+        shp = input_tensor.shape
+        qlen = shp[0]
+        mlen = list_of_mems[0].size(0) if list_of_mems is not None else 0
+        klen = mlen + qlen
+        # masking works internally by setting 1s to neg inf, 0s are left alone! This is slightly different than expected
+        # attention mask shows the position each tgt word (row) is allowed to look at (column).
+        # 0 1 1 1 1
+        # 0 0 1 1 1
+        # 0 0 0 1 1
+        # 0 0 0 0 1
+        attn_mask = torch.triu(input_tensor.new_ones(qlen, klen), diagonal=1 + mlen).bool()[:, :, None]
+        if input_mask_tensor is None:
+            input_mask_tensor = (0. * input_tensor[:, :, 0]).long()
+        input_mask_tensor_dtype = input_mask_tensor.dtype
+        attn_mask = (attn_mask.type(input_mask_tensor_dtype) + input_mask_tensor[:, None, :] > 0).bool()
+        """
+        return self.transformer(input_tensor, input_mask_tensor, input_event_positions, list_of_mems)
 
 
 def _xlnet_make_sample_mask(seq, goal_n_to_mask, random_state, n_spans=None, max_n_gram=5,

@@ -192,6 +192,8 @@ def stft(X, fftsize=128, step="half", mean_normalize=True, real=False,
     else:
         X = overlap(X, fftsize, step)
     size = fftsize
+    # hamming window, 75% overlap!
+    # https://www.dsprelated.com/freebooks/sasp/Choice_Hop_Size.html
     win = 0.54 - .46 * np.cos(2 * np.pi * np.arange(size) / (size - 1))
     X = X * win[None]
     X = local_fft(X)[:, :cut]

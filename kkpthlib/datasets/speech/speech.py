@@ -53,6 +53,8 @@ class EnglishSpeechCorpus(object):
         self.extract_subsequences = extract_subsequences
 
         self.bypass_checks = bypass_checks
+        if bypass_checks == True:
+            raise ValueError("Unable to bypass safety checks at this time - do cleaning at the dataset level")
         self.build_skiplist = build_skiplist
         self.combine_all_into_valid = combine_all_into_valid
 
@@ -61,7 +63,6 @@ class EnglishSpeechCorpus(object):
             self.bypass_checks = True
             self.combine_all_info_valid = True
             self.build_skiplist = False
-
 
         self.cached_mean_vec_ = None
         self.cached_std_vec_ = None
@@ -77,7 +78,7 @@ class EnglishSpeechCorpus(object):
         self.mel_freq_min = 125
         self.mel_freq_max = 7600
 
-        self.stft_size = 6 * 256
+        self.stft_size = 6 * 256 #2 * 960 #6 * 256
         self.stft_step = 256
 
         # preemphasis filter
@@ -125,6 +126,7 @@ class EnglishSpeechCorpus(object):
                         self.misaligned_keys.append(k)
                     else:
                         self.aligned_keys.append(k)
+
         if self.combine_all_into_valid:
             shuf_keys = self.aligned_keys
             self.train_keys = self.aligned_keys
