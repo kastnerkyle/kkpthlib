@@ -70,6 +70,7 @@ class EnglishSpeechCorpus(object):
 
         self.sample_rate = sample_rate
 
+        # initial number of mels to design with, will be further reduced later
         self.n_mels = 256
 
         self.cut_on_alignment = cut_on_alignment
@@ -78,8 +79,11 @@ class EnglishSpeechCorpus(object):
         self.mel_freq_min = 125
         self.mel_freq_max = 7600
 
+        # increased overlap to compensate for downsampling in freq
         self.stft_size = 6 * 256 #2 * 960 #6 * 256
         self.stft_step = 256
+
+        self._split_gap_time_s = 0.0
 
         # preemphasis filter
         self.preemphasis_coef = 0.97
@@ -321,11 +325,15 @@ class EnglishSpeechCorpus(object):
         assert len(self.valid_keep_keys) > 0
 
     def get_utterances(self, size, all_keys, skip_mel=False,
+                       fastforward_state=False,
                        min_length_words=None, max_length_words=None,
                        min_length_symbols=None, max_length_symbols=None,
                        min_length_time_secs=None, max_length_time_secs=None,
                        extract_subsequences=None,
+                       debug_print_filtered=False,
+                       allow_zero_length_utt=False,
                        do_not_filter=False):
+        # allow_zero_length_utt only used for debug
         if min_length_words is None:
             min_length_words = self.min_length_words
         if max_length_words is None:
@@ -345,8 +353,20 @@ class EnglishSpeechCorpus(object):
         used_keys = []
         # get a bigger extent, so if some don't match out filters we can keep going
         idx = self.random_state.choice(len(all_keys), 100 * size)
-        for ii in idx:
-            utt = self._fetch_utterance(all_keys[ii], skip_mel=skip_mel)
+        if fastforward_state:
+            # the internal logic of fetch utterance can call the shuffle up to 3 or 4 times
+            # call it several times so that once we are done fastforwarding, the state is *definitely* in a new place
+            aa = [1, 2, 3]
+            for i in idx:
+                self.random_state.shuffle(aa)
+                self.random_state.shuffle(aa)
+                self.random_state.shuffle(aa)
+                self.random_state.shuffle(aa)
+            return []
+        # don't re-iterate duplicates, and don't sort them (so it stays in random order defined by random choice)
+        u_idx = idx[np.sort(np.unique(idx, return_index=True)[1])]
+        for this_idx in u_idx:
+            utt = self._fetch_utterance(all_keys[this_idx], skip_mel=skip_mel)
             utt[3]["flagged_for_subsequence"] = False
 
             # fs, d, melspec, info
@@ -365,11 +385,18 @@ class EnglishSpeechCorpus(object):
             if do_not_filter:
                 pass
             else:
+                # categorically reject sentences which are too long
                 if word_length > max_length_words or word_length < min_length_words:
+                    if debug_print_filtered:
+                        print("wl reject {}".format(this_idx))
                     continue
                 if symbol_length > max_length_symbols or symbol_length < min_length_symbols:
+                    if debug_print_filtered:
+                        print("sl reject {}".format(this_idx))
                     continue
                 if time_length < min_length_time_secs:
+                    if debug_print_filtered:
+                        print("tl min reject {}".format(this_idx))
                     continue
                 if self.extract_subsequences == False:
                     if time_length > max_length_time_secs:
@@ -384,11 +411,13 @@ class EnglishSpeechCorpus(object):
                         w_0 = np.array([w["end"] for w in aligned_words[:-1]])
                         w_1 = np.array([w["start"] for w in aligned_words[1:]])
                         gaps = w_1 - w_0
-                        if np.any(gaps > .01):
+                        if np.any(gaps > self._split_gap_time_s):
                             # there is at least one valid split point
                             # now we check that the split subsequence has at least one part
                             # which is a valid length subsequence aka
-                            proposed_splits = list(np.where(gaps > .01)[0])
+                            proposed_splits = list(np.where(gaps > self._split_gap_time_s)[0])
+                            # sort in order of largest to smallest gap, so we prefer the largest gap if it meets conditions below
+                            proposed_splits = np.argsort(gaps)[::-1][:len(proposed_splits)]
                             all_proposed_subwords = []
                             for p in proposed_splits:
                                 if p == (len(aligned_words) - 1):
@@ -412,23 +441,33 @@ class EnglishSpeechCorpus(object):
                                 subtime_length = subwords[-1]["end"] - subwords[0]["start"]
 
                                 if subword_length > max_length_words or subword_length < min_length_words:
+                                    if debug_print_filtered:
+                                        print("sw wl reject {}".format(this_idx))
                                     continue
                                 if subsymbol_length > max_length_symbols or subsymbol_length < min_length_symbols:
+                                    if debug_print_filtered:
+                                        print("sw sl reject {}".format(this_idx))
                                     continue
                                 if subtime_length < min_length_time_secs:
+                                    if debug_print_filtered:
+                                        print("sw tl min reject {}".format(this_idx))
                                     continue
                                 utt[3]["flagged_for_subsequence"] = True
                                 break
                         else:
-                            # no splits of > .01, ignore this utt for processing
+                            if debug_print_filtered:
+                                print("no splits {}".format(this_idx))
+                            # no splits ignore this utt for processing
                             continue
 
             utts.append(utt)
-            used_keys.append(all_keys[ii])
+            used_keys.append(all_keys[this_idx])
             if len(utts) >= size:
                 break
+
         if len(utts) < size:
-            raise ValueError("Unable to build correct length in get_utterances! Something has gone very wrong, debug this!")
+            if not allow_zero_length_utt:
+                raise ValueError("Unable to build correct length in get_utterances! Something has gone very wrong, debug this!")
 
         self._batch_used_keys_queue.append(used_keys)
         self._batch_used_keys_queue = self._batch_used_keys_queue[-5:]
@@ -437,19 +476,19 @@ class EnglishSpeechCorpus(object):
         self._batch_utts_queue = self._batch_utts_queue[-5:]
         return utts
 
-    def get_train_utterances(self, size, skip_mel=False):
+    def get_train_utterances(self, size, skip_mel=False, fastforward_state=False):
         if self.build_skiplist:
             # we skip elements which had poor recognition
-            return self.get_utterances(size, self.train_keep_keys, skip_mel=skip_mel)
+            return self.get_utterances(size, self.train_keep_keys, skip_mel=skip_mel, fastforward_state=fastforward_state)
         else:
-            return self.get_utterances(size, self.train_keys, skip_mel=skip_mel)
+            return self.get_utterances(size, self.train_keys, skip_mel=skip_mel, fastforward_state=fastforward_state)
 
-    def get_valid_utterances(self, size, skip_mel=False):
+    def get_valid_utterances(self, size, skip_mel=False, fastforward_state=False):
         if self.build_skiplist:
             # we skip elements which had poor recognition
-            return self.get_utterances(size, self.valid_keep_keys, skip_mel=skip_mel)
+            return self.get_utterances(size, self.valid_keep_keys, skip_mel=skip_mel, fastforward_state=fastforward_state)
         else:
-            return self.get_utterances(size, self.valid_keys, skip_mel=skip_mel)
+            return self.get_utterances(size, self.valid_keys, skip_mel=skip_mel, fastforward_state=fastforward_state)
 
     def load_mean_std_from_filepath(self, filepath):
         if not os.path.exists(filepath):
@@ -497,6 +536,7 @@ class EnglishSpeechCorpus(object):
                 words = al[k]["full_alignment"]["words"]
                 # start_to_end is no crop
                 crop_type = "start_to_end"
+
                 if al["flagged_for_subsequence"] == True or melspec.shape[0] > max_frame_count:
                     # assume gap check was done already
                     w_0 = np.array([w["end"] for w in words[:-1]])
@@ -505,8 +545,11 @@ class EnglishSpeechCorpus(object):
                     # there is at least one valid split point
                     # now we check that the split subsequence has at least one part
                     # which is a valid length subsequence aka
+                    proposed_splits = list(np.where(gaps > self._split_gap_time_s)[0])
+                    # sort in order of largest to smallest gap, so we prefer the largest gap if it meets conditions below
                     # add 1 because the split is at the end of the word
-                    proposed_splits = list(np.where(gaps > .01)[0] + 1)
+                    proposed_splits = np.argsort(gaps)[::-1][:len(proposed_splits)] + 1
+
                     start_to_mid = []
                     mid_to_mid = []
                     mid_to_end = []
@@ -694,7 +737,7 @@ class EnglishSpeechCorpus(object):
                     # continuation symbol
                     flat_phones_and_gaps.append("&")
                 flat_phones_and_gaps.append("!{}".format(gaps_arr[-1]))
-                seq_as_ints = [self.phone_lookup[s] for s in flat_phones_and_gaps]
+                seq_as_ints = [self.phone_lookup[s.split("_")[0]] for s in flat_phones_and_gaps]
                 phoneme_sequences.append(seq_as_ints)
 
                 if write_out_debug_info:

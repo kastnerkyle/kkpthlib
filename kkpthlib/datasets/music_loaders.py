@@ -1,5 +1,5 @@
 from __future__ import print_function
-from music21 import corpus, interval, pitch, converter, note, chord
+from music21 import corpus, interval, pitch, converter, note, chord, repeat
 from music21.midi import MidiTrack, MidiFile, MidiEvent, DeltaTime
 import os
 import json
@@ -1061,10 +1061,12 @@ def music21_parse_and_save_json(p, fpath, tempo_factor=1):
 
 
 def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
+    """
     if os.path.exists(get_kkpthlib_dataset_dir() + os.sep + "jsb_chorales_json"):
         dataset_path = get_kkpthlib_dataset_dir("jsb_chorales_json")
         # if the dataset already exists, assume the preprocessing is already complete
         return dataset_path
+    """
     dataset_path = get_kkpthlib_dataset_dir("jsb_chorales_json")
 
     all_bach_paths = corpus.getComposer('bach')
@@ -1072,12 +1074,280 @@ def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
     if verbose:
         logger.info("JSB Chorales not yet cached, processing...")
         logger.info("Total number of Bach pieces to process from music21: {}".format(len(all_bach_paths)))
+
+    all_file_keys = []
+    all_file_information = collections.OrderedDict()
+
     for it, p_bach in enumerate(all_bach_paths):
-        from IPython import embed; embed(); raise ValueError()
         if "riemenschneider" in str(p_bach):
             # skip certain files we don't care about
             continue
-        p = corpus.parse(str(p_bach))
+            # WANT analysis=True but breaks expander/repeat finder
+        el = corpus.parse(str(p_bach))
+        # do we have to manually expand/repeat the analysis part of the stream to match other parts?
+        #lu = str(el.filePath).split("/")[-1]
+        #if lu != "bwv347.mxl":
+        #    continue
+        has_expansion = [False] * len(el.parts)
+        for _ii in range(len(el.parts)):
+            try:
+                # this errors for the last part, which corresponds to the textual annotations
+                new_p = el.parts[_ii].expandRepeats()
+                has_expansion[_ii] = True
+            except:
+                # the last part is the "analysis=True", and the repeat Expander doesnt directly handle it
+                # but in all testing, analysis was the same length as the other 4 parts so we can manually handle it
+                # (? double check this with an assert on the last part length)
+                if _ii == (len(el.parts) - 1) and all(has_expansion[:_ii]):
+                    has_expansion[_ii] = True
+                continue
+
+        global_measure_map = None
+        for _ii in range(len(el.parts)):
+            try:
+                new_p = el.parts[_ii].expandRepeats()
+            except:
+                continue
+            all_meas_hashes = []
+            for meas in el.parts[_ii].recurse().getElementsByClass('Measure'):
+                #Expander.measureMap gives the wrong indices on bwv347
+                # believe to be due to this line https://github.com/cuthbertLab/music21/blob/master/music21/repeat.py#L850
+                # plus the fact that bwv347 has measure named 4 and 4a but the measureMap logic seems to auto add suffix "a" to repeats
+                # meaning 0 1 2 3 4 0 1 2 3 4 5 becomes 0 1 2 3 4 0a 1a 2a 3a 4a 5 but 5 is already named 4a in the XML! 
+
+                # need to do similar logic by hand, using hashes of notes
+                all_note_hashes = []
+                for note in meas.recurse().getElementsByClass("Note"):
+                    n_hash = hash((note.pitch, note.duration.quarterLength, note.offset))
+                    all_note_hashes.append(n_hash)
+                all_meas_hashes.append(tuple(all_note_hashes))
+
+            # build lookup table which holds the index of the FIRST occurence of a measure hash
+            # here we assume that if 2 measures hash the same, using the first one is fine
+            # theorectically could have a hash collision but seems.... unlikely
+            h_lu = {}
+            for m, m_hash in enumerate(all_meas_hashes):
+                if m_hash not in h_lu:
+                    h_lu[m_hash] = [m]
+                else:
+                    h_lu[m_hash].append(m)
+
+            # measure hashes for expansion
+            all_meas_hashes_exp = []
+            for meas in el.parts[_ii].expandRepeats().recurse().getElementsByClass('Measure'):
+                #Expander.measureMap gives the wrong indices on bwv347
+                #need to do similar logic by hand, using hashes of notes and then hashes of the measure
+                # we go part by part because analysis=True in the iterator breaks expandReapeats() at the score level
+                all_note_hashes = []
+                for note in meas.recurse().getElementsByClass("Note"):
+                    n_hash = hash((note.pitch, note.duration.quarterLength, note.offset))
+                    all_note_hashes.append(n_hash)
+                all_meas_hashes_exp.append(tuple(all_note_hashes))
+
+            match_indices = []
+            for m1, m_hash1 in enumerate(all_meas_hashes_exp):
+                if len(h_lu[m_hash1]) == 1:
+                    match_indices.append(h_lu[m_hash1][0])
+                else:
+                    match_indices.append(h_lu[m_hash1])
+
+            if global_measure_map is None:
+                global_measure_map = match_indices
+            else:
+                assert len(match_indices) == len(global_measure_map)
+                # merge new estimate with old global measure map
+                # theres only 1 choice in the global, be sure the 1 global choice 
+                # exists in our new match set, then set it.
+                # if both have multiple, use all the keys that exist in *both* sets
+                # think of this like a superposition of states, we loop through
+                # reducing or eliminating them until only 1 option remains
+                for ttt in range(len(match_indices)):
+                    if hasattr(global_measure_map[ttt], "__len__"):
+                        subset = []
+                        if hasattr(match_indices[ttt], "__len__"):
+                            for mik in match_indices[ttt]:
+                                if mik in global_measure_map[ttt]:
+                                    subset.append(mik)
+                            global_measure_map[ttt] = subset
+                        else:
+                            assert match_indices[ttt] in global_measure_map[ttt]
+                            global_measure_map[ttt] = match_indices[ttt]
+                    else:
+                        if hasattr(match_indices[ttt], "__len__"):
+                            assert global_measure_map[ttt] in match_indices[ttt]
+                        else:
+                            assert global_measure_map[ttt] == match_indices[ttt]
+
+        if global_measure_map is not None:
+            # if global measure map is None then we don't need to check for repeats etc
+            # now that global measure map is formed we have 1 more step
+            # there may still be multi-key matches in the list
+            # collapse them, preferring keys which "continue" a sequence
+            # eg [0 1 2 [3, 12] 4 5] prefers 3 over 12
+            # preference for key which is 1 away from both left and right
+            # then preference for key which is 1 away from left
+            # then preference for key 1 away from right
+            # however, if none of the keys are within 1 of *either* of the neighbors, take the lowest value
+            final_gmmap = []
+            # do 2 passes, fill in all the easy ones then go back and fill the multi-key matches
+            for gmmk in global_measure_map:
+                if not hasattr(gmmk, "__len__"):
+                    final_gmmap.append(gmmk)
+                else:
+                    final_gmmap.append(None)
+
+            for _n, gmmk in enumerate(global_measure_map):
+                if final_gmmap[_n] is None:
+                    left_ok = False
+                    right_ok = False
+                    # use shortcuts to prevent some if statements
+                    if _n >= 1:
+                        left_ok = True
+                    if _n <= (len(global_measure_map) - 2):
+                        right_ok = True
+
+                    # default, lowest prio choice is just the min
+                    if final_gmmap[_n] is None:
+                        final_gmmap[_n] = min(global_measure_map[_n])
+
+                    # if we can make a right hand match, check it and set
+                    if right_ok and final_gmmap[_n + 1] is not None:
+                        if final_gmmap[_n + 1] - 1 in gmmk:
+                            final_gmmap[_n] = final_gmmap[_n + 1] - 1
+
+                     # if we can make a left hand match, check it and set
+                    if left_ok and final_gmmap[_n - 1] is not None:
+                        if final_gmmap[_n - 1] + 1 in gmmk:
+                            final_gmmap[_n] = final_gmmap[_n - 1] + 1
+
+                    # if we can make both a left and right hand match, check and set
+                    if left_ok and right_ok and final_gmmap[_n - 1] is not None and final_gmmap[_n + 1] is not None:
+                        if final_gmmap[_n - 1] + 1 == final_gmmap[_n + 1] - 1:
+                            if final_gmmap[_n - 1] + 1 in gmmk:
+                                final_gmmap[_n] = final_gmmap[_n - 1] + 1
+
+            # be sure there are no None values left in final_gmmap
+            assert all([a != None for a in final_gmmap])
+            # now assign it
+            global_measure_map = final_gmmap
+
+        try:
+            last = len(el.parts[0].expandRepeats().recurse().getElementsByClass('Measure'))
+        except:
+            last = len(el.parts[0].recurse().getElementsByClass('Measure'))
+        #if lu == "bwv347.mxl":
+        #    el.show("text")
+        #    print(global_measure_map)
+        #    raise ValueError()
+
+        if global_measure_map is None:
+            global_measure_map = list(range(last + 1))
+
+        # sequentially roman numeral, measure, starting offset, duration
+        romans = []
+        # sequentially key change, measure, starting offset
+        keys = []
+        # sequentially time signature, measure, starting offset, numerator, denominator
+        time_signatures = []
+        # note value, note name with octave, measure, starting offset, duration
+        notes_and_durations = {"Soprano": [],
+                               "Alto": [],
+                               "Tenor": [],
+                               "Bass": []}
+        for _n, j in enumerate(global_measure_map):
+            romans.append([])
+            keys.append([])
+            time_signatures.append([])
+            for key in ["Soprano", "Alto", "Tenor", "Bass"]:
+                notes_and_durations[key].append([])
+            # check if measure-by-index and .measures are the same?
+            # if they are different we probably need to do something special for time signatures / romans
+            for _ii in range(len(el.parts)):
+                try:
+                    p = list(el.parts[_ii].recurse().getElementsByClass("Measure"))[j]
+                    p_class = el.parts[_ii]
+                except:
+                    if j >= len(list(el.parts[_ii].recurse().getElementsByClass("Measure"))) - 1:
+                        continue
+                    if _ii >= len(el.parts) - 1:
+                        continue
+                # start with crucial structural information - time signature, roman annotations, keys
+                # might need to do something very weird with measures with stuff like 4 4a since the annotations arent split in this way...
+                if str(p_class).split(" ")[-1].split(">")[0] not in ["Soprano", "Alto", "Tenor", "Bass"]:
+                    for pi in p.flat:
+                        if "RomanNumeral" in pi.classes and "||" not in str(pi):
+                            romans[-1].append((str(pi).split(" ")[1], _n, j, pi.offset, pi.duration.quarterLength))
+                        if "Key" in pi.classes:
+                            keys[-1].append((str(pi), _n, j, pi.offset))
+                        if "TimeSignature" in pi.classes:
+                            time_signatures[-1].append((str(pi), _n, j, pi.offset, pi.numerator, pi.denominator))
+            for _ii in range(len(el.parts)):
+                try:
+                    p = list(el.parts[_ii].recurse().getElementsByClass("Measure"))[j]
+                    p_class = el.parts[_ii]
+                except:
+                    if j >= len(list(el.parts[_ii].recurse().getElementsByClass("Measure"))) - 1:
+                        continue
+                    if _ii >= len(el.parts) - 1:
+                        continue
+                p = list(el.parts[_ii].recurse().getElementsByClass("Measure"))[j]
+                p_class = el.parts[_ii]
+                if str(p_class).split(" ")[-1].split(">")[0] in ["Soprano", "Alto", "Tenor", "Bass"]:
+                    key = str(p_class).split(" ")[-1][:-1]
+                    for pi in p.flat:
+                        if "Note" in pi.classes or "Rest" in pi.classes:
+                            if "Note" in pi.classes:
+                                notes_and_durations[key][-1].append((pi.pitch.midi, pi.nameWithOctave, _n, j, pi.offset, pi.duration.quarterLength))
+                            else:
+                                notes_and_durations[key][-1].append((0, "R", _n, j, pi.offset, pi.duration.quarterLength))
+        '''
+        for _n, j in enumerate(global_measure_map):
+            romans.append([])
+            keys.append([])
+            time_signatures.append([])
+            for key in ["Soprano", "Alto", "Tenor", "Bass"]:
+                notes_and_durations[key].append([])
+            for p in el.measure(j).parts:
+                # start with crucial structural information - time signature, roman annotations, keys
+                if str(p).split(" ")[-1].split(">")[0] not in ["Soprano", "Alto", "Tenor", "Bass"]:
+                    for pi in p.flat:
+                        if "RomanNumeral" in pi.classes and "||" not in str(pi):
+                            romans[-1].append((str(pi).split(" ")[1], _n, j, pi.offset, pi.duration.quarterLength))
+                        if "Key" in pi.classes:
+                            keys[-1].append((str(pi), _n, j, pi.offset))
+                        if "TimeSignature" in pi.classes:
+                            time_signatures[-1].append((str(pi), _n, j, pi.offset, pi.numerator, pi.denominator))
+            for p in el.measure(j).parts:
+                if str(p).split(" ")[-1].split(">")[0] in ["Soprano", "Alto", "Tenor", "Bass"]:
+                    key = str(p).split(" ")[-1][:-1]
+                    for pi in p.flat:
+                        if "Note" in pi.classes or "Rest" in pi.classes:
+                            if "Note" in pi.classes:
+                                notes_and_durations[key][-1].append((pi.pitch.midi, pi.nameWithOctave, _n, j, pi.offset, pi.duration.quarterLength))
+                            else:
+                                notes_and_durations[key][-1].append((0, "R", _n, j, pi.offset, pi.duration.quarterLength))
+        '''
+        lu = str(el.filePath).split("/")[-1]
+        # will be 5 when we do analysis == True, pieces without analysis will be 4
+        if ".krn" in lu or lu == "bwv41.6.mxl" or len(el.parts) not in [4,]:
+            print("skipped file {}".format(lu))
+            continue
+        print("processed file {}".format(lu))
+
+        all_file_keys.append(lu)
+        d = collections.OrderedDict()
+        k = el.analyze('key')
+        # cannot store music21 :(
+        #d["stream"] = el
+        d["original_fpath"] = str(p_bach)
+        d["measure_map"] = global_measure_map
+        d["romans"] = romans
+        d["keys"] = keys
+        d["time_signatures"] = time_signatures
+        d["notes"] = notes_and_durations
+        all_file_information[lu] = copy.deepcopy(d)
+        from IPython import embed; embed(); raise ValueError()
+
         if len(p.parts) not in only_pieces_with_n_voices:
             if verbose:
                 logger.info("Skipping file {}, {} due to undesired voice count...".format(it, p_bach))
@@ -1091,7 +1361,6 @@ def check_fetch_jsb_chorales(only_pieces_with_n_voices=[4], verbose=True):
         if verbose:
             logger.info("Processing {}, {} ...".format(it, p_bach))
 
-        k = p.analyze('key')
         if verbose:
             logger.info("Original key: {}".format(k))
         stripped_extension_name = ".".join(os.path.split(p_bach)[1].split(".")[:-1])
@@ -2156,8 +2425,6 @@ class MusicJSONCorpus(object):
     def pre_tokenize(self, json_file_paths):
         joints = []
         joints_offsets = []
-        print("NYI handle joint offsets")
-        from IPython import embed; embed(); raise ValueError()
         for path in json_file_paths:
             pitches, durations, voices = pitch_duration_velocity_lists_from_music_json_file(path)
             all_pitches = []

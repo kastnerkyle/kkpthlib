@@ -5947,6 +5947,8 @@ class AttentionMelNetTier(torch.nn.Module):
             """
 
             # we approximate tanh with x/(1+abs(x))
+            # https://stackoverflow.com/questions/10732027/fast-sigmoid-algorithm
+            # see comment about conversion to / from sigmoid
             def alt_tanh(x):
                 return x / (1. + torch.abs(x))
             # logistic can be expressed as 1/2 + 1/2 * tanh((x - u)/(2 * s)) instead of sigmoid
@@ -6839,19 +6841,19 @@ class AttentionMelNetTier(torch.nn.Module):
                      bypass_td=None, bypass_fd=None, skip_input_embed=False,
                      memory=None, memory_mask=None):
         if is_initial_step:
-            return self._sample_initial(list_of_inputs, time_index, freq_index,
+            return self._sample_initial_fn(list_of_inputs, time_index, freq_index,
                                         list_of_spatial_conditions=list_of_spatial_conditions,
                                         bypass_td=bypass_td, bypass_fd=bypass_fd,
                                         skip_input_embed=skip_input_embed,
                                         memory=memory, memory_mask=memory_mask)
         else:
-            return self._sample_inc(list_of_inputs, time_index, freq_index,
+            return self._sample_inc_fn(list_of_inputs, time_index, freq_index,
                                     list_of_spatial_conditions=list_of_spatial_conditions,
                                     bypass_td=bypass_td, bypass_fd=bypass_fd,
                                     skip_input_embed=skip_input_embed,
                                     memory=memory, memory_mask=memory_mask)
 
-    def _sample_inc(self, list_of_inputs,
+    def _sample_inc_fn(self, list_of_inputs,
                      time_index, freq_index,
                      list_of_spatial_conditions=None,
                      bypass_td=None, bypass_fd=None, skip_input_embed=False,
@@ -6999,7 +7001,7 @@ class AttentionMelNetTier(torch.nn.Module):
         else:
             return out
 
-    def _sample_initial(self, list_of_inputs,
+    def _sample_initial_fn(self, list_of_inputs,
                         time_index, freq_index,
                         list_of_spatial_conditions=None,
                         bypass_td=None, bypass_fd=None, skip_input_embed=False,

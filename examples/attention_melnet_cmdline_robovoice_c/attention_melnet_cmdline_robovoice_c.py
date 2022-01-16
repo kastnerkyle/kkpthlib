@@ -168,7 +168,9 @@ hp = HParams(input_dim=1,
              random_seed=2122)
 
 data_random_state = np.random.RandomState(hp.random_seed)
-folder_base = "/usr/local/data/kkastner/robovoice/robovoice_c_25k"
+folder_base = "/usr/local/data/kkastner/robovoice_cleaned/robovoice_c_25k"
+#folder_base = "/usr/local/data/kkastner/robovoice_cleaned/robovoice_d_25k"
+#folder_base = "/usr/local/data/kkastner/ljspeech_cleaned"
 fixed_minibatch_time_secs = 4
 fraction_train_split = .9
 speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
@@ -178,20 +180,21 @@ speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              train_split=fraction_train_split,
                              random_state=data_random_state)
 
-"""
 s = 0
 while True:
-    els = speech.get_utterances(input_real_batch_size, speech.train_keys, skip_mel=False)
+    els = speech.get_utterances(1, [speech.train_keys[s]], skip_mel=False, debug_print_filtered=False, allow_zero_length_utt=True)
+    #els = speech.get_utterances(1, [speech.valid_keys[s]], skip_mel=False, debug_print_filtered=False, allow_zero_length_utt=True)
+    #els = speech.get_utterances(input_real_batch_size, speech.train_keys[s], skip_mel=False)
     #els = speech.get_utterances(input_real_batch_size, speech.valid_keys, skip_mel=False)
-    cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(els,
-                                                                                        quantize_to_n_bins=None)
-
-    print("format test {}".format(s))
-    from IPython import embed; embed(); raise ValueError()
+    if len(els) != 0:
+        # return of 0 length means the element will be filtered out due to time / word / other constraints
+        # everything that isnt filtered should be formattable!
+        cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(els, quantize_to_n_bins=None)
+        print("format test {}".format(s))
     s += 1
-    if s > 10:
-        from IPython import embed; embed(); raise ValueError()
-"""
+    print(s)
+    #if s > 10:
+    #    from IPython import embed; embed(); raise ValueError()
 
 """
 els = speech.get_utterances(1, speech.train_keys, skip_mel=False)
@@ -326,6 +329,7 @@ def random_split(mel, axis_splits_str, axis_splits_offset, split_n_mels):
             # same for frequency but frequency is a power of 2 so no need to check it
             q = int(max_frame_count / di)
             if float(max_frame_count / di) == int(max_frame_count / di):
+
                 max_frame_count = di * q
             else:
                 max_frame_count = di * (q + 1)
@@ -628,6 +632,8 @@ if __name__ == "__main__":
             x_in_np = random_split(x_t, axis_splits_str, 0, input_size_at_depth[1])
             # add a trailing 1 dim
             x_in_np = x_in_np[..., None]
+            # mean std normalization!
+            x_in_np = (x_in_np - saved_mean) / saved_std
 
             x_mask_t = data_mask[..., None, None] + 0. * data_batch[..., None]
             x_mask_t = x_mask_t[..., 0]
@@ -777,7 +783,6 @@ if __name__ == "__main__":
          "optimizer": optimizer,
          "hparams": hp}
 
-    """
     r = loop(speech, {"train": True}, None)
     r2 = loop(speech, {"train": True}, None)
     print(r)
@@ -790,7 +795,6 @@ if __name__ == "__main__":
         rs.append(rx)
         print(rs)
     from IPython import embed; embed(); raise ValueError()
-    """
 
     if input_tier_condition_tag is None:
         tag = str(args.experiment_name) + "_tier_{}_{}_sz_{}_{}".format(input_tier_input_tag[0], input_tier_input_tag[1],

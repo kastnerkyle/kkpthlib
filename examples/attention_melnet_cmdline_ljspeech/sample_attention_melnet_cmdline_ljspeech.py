@@ -2,6 +2,8 @@ from __future__ import print_function
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from functools import reduce
+from operator import mul
 
 import os
 import argparse
@@ -263,7 +265,7 @@ from kkpthlib.utils import interleave
 from kkpthlib import softmax_np
 
 data_random_state = np.random.RandomState(hp.random_seed)
-folder_base = "/usr/local/data/kkastner/ljspeech"
+folder_base = "/usr/local/data/kkastner/ljspeech_cleaned"
 fixed_minibatch_time_secs = 4
 fraction_train_split = .9
 speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
@@ -349,21 +351,31 @@ if use_half:
 torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
 torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
 
-all_x_splits = []
-x_t = data_batch[..., None]
-for aa in input_axis_split_list:
-    all_x_splits.append(split_np(x_t, axis=aa))
-    x_t = all_x_splits[-1][0]
-x_in_np = all_x_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
-x_in_np = (x_in_np - saved_mean) / saved_std
-
-all_x_mask_splits = []
-# broadcast mask over frequency so we can downsample
 x_mask_t = data_mask[..., None, None] + 0. * data_batch[..., None]
-for aa in input_axis_split_list:
-    all_x_mask_splits.append(split_np(x_mask_t, axis=aa))
-    x_mask_t = all_x_mask_splits[-1][0]
-x_mask_in_np = all_x_mask_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+x_t = data_batch[..., None]
+divisors = [2, 4, 8]
+max_frame_count = x_t.shape[1]
+for di in divisors:
+    # nearest divisible number above, works because largest divisor divides by smaller
+    # we need something that has a length in time (frames) divisible by 2 4 and 8 due to the nature of melnet
+    # same for frequency but frequency is a power of 2 so no need to check it
+    q = int(max_frame_count / di)
+    if float(max_frame_count / di) == int(max_frame_count / di):
+        max_frame_count = di * q
+    else:
+        max_frame_count = di * (q + 1)
+assert max_frame_count == int(max_frame_count)
+
+axis_splits = input_axis_split_list
+splits_offset = 0
+axis1_m = [2 for a in str(axis_splits)[splits_offset:] if a == "1"]
+axis2_m = [2 for a in str(axis_splits)[splits_offset:] if a == "2"]
+axis1_m = reduce(mul, axis1_m)
+axis2_m = reduce(mul, axis2_m)
+
+x_in_np = x_t[:, ::axis1_m, ::axis2_m]
+x_mask_in_np = x_mask_t[:, ::axis1_m, ::axis2_m]
+x_in_np = (x_in_np - saved_mean) / saved_std
 
 x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
 x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
@@ -431,7 +443,6 @@ def fast_sample(x, x_mask=None,
                    bias_boundary="default",
                    batch_norm_flag=0.,
                    verbose=True):
-    # for now we don't use the x_mask in the model itself, only in the loss calculations
     frst = time.time()
     new_x = copy.deepcopy(x)
     x = new_x
@@ -490,8 +501,10 @@ def fast_sample(x, x_mask=None,
                 x[:, _ii, _jj, 0] = mn_out.squeeze()
                 if verbose:
                     print("sampled index {},{} out of total size ({},{})".format(_ii, _jj, max_time_step, max_freq_step))
-        model.attention_alignment = alignment
-        model.attention_extras = attn_extras
+            total_alignment = torch.cat((total_alignment, alignment[None]), dim=0)
+            total_extras.append(attn_extras)
+        model.attention_alignment = total_alignment
+        model.attention_extras = total_extras
     else:
         x = x[0:1, 0:1]
         spatial_condition = spatial_condition[0:1]
@@ -500,6 +513,7 @@ def fast_sample(x, x_mask=None,
     print("fast sampling complete, time {} sec".format(fin - frst))
     return x
 
+"""
 if input_tier_condition_tag is None:
     # no noise here in pred
     with torch.no_grad():
@@ -519,7 +533,9 @@ else:
         pred_out = tst(x_in, x_mask=x_mask_in,
                              spatial_condition=cond,
                              batch_norm_flag=batch_norm_flag)
+"""
 
+"""
 unnormalized = pred_out.cpu().data.numpy() * saved_std + saved_mean
 _i = 0
 plt.imshow(unnormalized[_i, :, :, 0])
@@ -529,9 +545,7 @@ unnormalized = x_in.cpu().data.numpy() * saved_std + saved_mean
 _i = 0
 plt.imshow(unnormalized[_i, :, :, 0])
 plt.savefig("tmpfast_orig.png")
-
-from IPython import embed; embed(); raise ValueError()
-
+"""
 
 def to_one_hot(tensor, n, fill_with=1.):
     # we perform one hot encore with respect to the last axis
@@ -624,16 +638,20 @@ for _i in range(hp.real_batch_size):
     plt.savefig(folder + os.sep + "data_x{}.png".format(_i))
     plt.close()
 
+    teacher_forced_pred = pred_out
+    teacher_forced_attn = model.attention_alignment
+
     if input_tier_condition_tag is None:
-        teacher_forced_attn = model.attention_alignment
-        text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
-        # matshow vs imshow?
-        this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:reduced_mel_cut, :text_cut]
-        this_att = this_att.astype("float32")
-        plt.imshow(this_att)
-        plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
-        plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
-        plt.close()
+        for _i in range(hp.real_batch_size):
+            mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
+            text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
+            # matshow vs imshow?
+            this_att = teacher_forced_attn[:, _i, 0][:mel_cut, :text_cut]
+            this_att = this_att.cpu().data.numpy().astype("float32")
+            plt.imshow(this_att)
+            plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
+            plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
+            plt.close()
     else:
         plt.imshow(cond_np[_i, :, :, 0])
         plt.savefig(folder + os.sep + "cond_small_x{}.png".format(_i))
@@ -672,7 +690,7 @@ else:
         time_step_per_frame = 1./fs * stft_step
         # due to overlap the neighbors might be valid too but for now just use the chosen index
         full_size_frame_index = ends[chosen_index] / time_step_per_frame
-        full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
+        full_n_frames = axis1_m * input_size_at_depth[0]
         time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
         downsampled_frame_index = full_size_frame_index / float(time_downsample_ratio)
         bias_til = int(downsampled_frame_index)
@@ -755,7 +773,7 @@ else:
         lines = f.readlines()
         last_sil_frame = int(float(lines[1].strip().split(":")[1]))
         last_sil_resolution = int(float(lines[2].strip().split(":")[1]))
-        full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
+        full_n_frames = axis1_m * input_size_at_depth[0]
         this_resolution = full_n_frames / input_size_at_depth[0] # should always be integer value
         # add in extra frame(s) based on the upsampling resolution due to ambiguity
         last_sil_frame_scaled = last_sil_frame * int(last_sil_resolution / this_resolution) + (int(last_sil_resolution / this_resolution) - 1)
@@ -764,6 +782,22 @@ import time
 begin_time = time.time()
 torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
 torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
+
+sample_buffer[:, :bias_til] = x_in_np[:, :bias_til]
+
+batch_norm_flag = 1.
+sample_buffer = torch.tensor(sample_buffer).contiguous().to(hp.use_device)
+sample_mask = torch.tensor(sample_mask).contiguous().to(hp.use_device)
+
+with torch.no_grad():
+    pred_out = fast_sample(sample_buffer,
+                           x_mask=sample_mask,
+                           memory_condition=torch_cond_seq_data_batch,
+                           memory_condition_mask=torch_cond_seq_data_mask,
+                           bias_boundary=bias_til,
+                           batch_norm_flag=batch_norm_flag)
+sample_buffer = pred_out
+'''
 for time_step in range(remaining_steps):
     for mel_step in range(x_in_np.shape[2]):
         cur_time = time.time()
@@ -834,6 +868,7 @@ for time_step in range(remaining_steps):
         sample_buffer[:, this_step, mel_step] = pred_out[:, this_step, mel_step].cpu().data.numpy()
         end_time = time.time()
         print("minibatch time {} secs".format(end_time - cur_time))
+'''
 
 sample_completed = time.time()
 
@@ -849,7 +884,7 @@ if valid_el is not None:
         f.write(json_string)
 
 with open(folder + "bias_information.txt", "w") as f:
-    full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
+    full_n_frames = axis1_m * input_axis_split_list[0] # 352 for current settings
     time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
     bias_in_seconds = bias_til * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
     out_string = "Biased using groundtruth data until frame {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)\nstart_frame:{}\n".format(bias_til, time_downsample_ratio, bias_til * time_downsample_ratio, bias_in_seconds, bias_til)
@@ -863,20 +898,25 @@ def ranges(nums):
     return list(zip(edges, edges))
 
 for _i in range(hp.real_batch_size):
-    unnormalized = sample_buffer * saved_std + saved_mean
+    unnormalized = sample_buffer.cpu().data.numpy() * saved_std + saved_mean
     plt.imshow(unnormalized[_i, :, :, 0])
     plt.savefig(folder + os.sep + "small_sampled_x{}.png".format(_i))
     plt.close()
 
-    # matshow vs imshow?
+    teacher_forced_pred = pred_out
+    teacher_forced_attn = model.attention_alignment
+
     if input_tier_condition_tag is None:
-        teacher_forced_attn = model.attention_alignment
-        this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:, :]
-        this_att = this_att.astype("float32")
-        plt.imshow(this_att)
-        plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
-        plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
-        plt.close()
+        for _i in range(hp.real_batch_size):
+            mel_cut = int(sample_mask[_i, :, 0, 0].cpu().data.numpy().sum())
+            text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
+            # matshow vs imshow?
+            this_att = teacher_forced_attn[:, _i, 0][:mel_cut, :text_cut]
+            this_att = this_att.cpu().data.numpy().astype("float32")
+            plt.imshow(this_att)
+            plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
+            plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
+            plt.close()
     else:
         plt.imshow(cond_np[_i, :, :, 0])
         plt.savefig(folder + os.sep + "cond_small_x{}.png".format(_i))
@@ -895,14 +935,14 @@ for _i in range(hp.real_batch_size):
         silent_subs = ranges(aa)
         last_sil_start = silent_subs[-1][0]
         with open(folder + "attention_termination_x{}.txt".format(_i), "w") as f:
-            full_n_frames = all_x_splits[0][0].shape[1] # 352 for current settings
+            full_n_frames = axis1_m * input_axis_split_list[0] # 352 for current settings
             time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
             sil_in_seconds = last_sil_start * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
             out_string = "Sil frames begin at {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)\nend_frame:{}\nend_scale:{}".format(last_sil_start, time_downsample_ratio, last_sil_start * time_downsample_ratio, sil_in_seconds, last_sil_start, time_downsample_ratio)
             f.write(out_string)
 
-np.save(folder + "/" + "raw_samples.npy", sample_buffer)
-np.save(folder + "/" + "unnormalized_samples.npy", sample_buffer * saved_std + saved_mean)
+np.save(folder + "/" + "raw_samples.npy", sample_buffer.cpu().data.numpy())
+np.save(folder + "/" + "unnormalized_samples.npy", sample_buffer.cpu().data.numpy() * saved_std + saved_mean)
 np.save(folder + "/" + "minibatch_input.npy", original_buffer)
 if input_tier_condition_tag is None:
     np.save(folder + "/" + "attn_activation.npy", teacher_forced_attn.cpu().data.numpy())
@@ -934,7 +974,6 @@ for _i in range(hp.real_batch_size):
 
 print("plotted")
 from IPython import embed; embed(); raise ValueError()
-
 
 if input_tier_condition_tag is None:
     tag = str(args.experiment_name) + "_tier_{}_{}_sz_{}_{}".format(input_tier_input_tag[0], input_tier_input_tag[1],
