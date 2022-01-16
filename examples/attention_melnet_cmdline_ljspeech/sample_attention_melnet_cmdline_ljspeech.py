@@ -780,11 +780,7 @@ else:
 
 import time
 begin_time = time.time()
-torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
-torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
-
-sample_buffer[:, :bias_til] = x_in_np[:, :bias_til]
-
+sample_buffer[:, :max(0, bias_til - 5)] = x_in_np[:, :max(0, bias_til - 5)]
 batch_norm_flag = 1.
 sample_buffer = torch.tensor(sample_buffer).contiguous().to(hp.use_device)
 sample_mask = torch.tensor(sample_mask).contiguous().to(hp.use_device)
@@ -794,7 +790,8 @@ with torch.no_grad():
                            x_mask=sample_mask,
                            memory_condition=torch_cond_seq_data_batch,
                            memory_condition_mask=torch_cond_seq_data_mask,
-                           bias_boundary=bias_til,
+                           # boundary?
+                           bias_boundary=max(0, bias_til - 5),
                            batch_norm_flag=batch_norm_flag)
 sample_buffer = pred_out
 '''
@@ -932,8 +929,11 @@ for _i in range(hp.real_batch_size):
         # get the start of the last contiguous subsequence with mean amplitude < 1E-3
         # should represent the end silence with a well trained model
 
-        silent_subs = ranges(aa)
-        last_sil_start = silent_subs[-1][0]
+        if len(aa) > 0:
+            silent_subs = ranges(aa)
+            last_sil_start = silent_subs[-1][0]
+        else:
+            last_sil_start = unnormalized.shape[1]
         with open(folder + "attention_termination_x{}.txt".format(_i), "w") as f:
             full_n_frames = axis1_m * input_axis_split_list[0] # 352 for current settings
             time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
