@@ -80,8 +80,11 @@ class EnglishSpeechCorpus(object):
         self.mel_freq_max = 7600
 
         # increased overlap to compensate for downsampling in freq
-        self.stft_size = 6 * 256 #2 * 960 #6 * 256
-        self.stft_step = 256
+        #self.stft_size = 6 * 256 #2 * 960 #6 * 256
+        #self.stft_step = 256
+
+        self.stft_size = 6 * 200 #2 * 960 #6 * 256
+        self.stft_step = 200
 
         self._split_gap_time_s = 0.0
 

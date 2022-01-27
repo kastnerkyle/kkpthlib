@@ -667,6 +667,7 @@ else:
     words = [w for w in timing_info["full_alignment"]["words"]]
     # this logic should find the biggest gap with at least 1/2 a second priming
     # in the first half of the overall word sequence
+    # according to the speech recognizer
     diffs = np.array([w["start"] for w in words[1:]]) - np.array([w["end"] for w in words[:-1]])
     ends = np.array([w["end"] for w in words])
     midpoint = ends[-1] / 2.
@@ -683,23 +684,58 @@ else:
     if chosen_index is None:
         bias_til = time_len // 2
     else:
-        # now we need to figure out a time in frames which matches where the gap is
+        # now we need to figure out a time in frames which matches where the gap from ASR is
         fs = float(speech.sample_rate)
         stft_sz = speech.stft_size
         stft_step = speech.stft_step
         time_step_per_frame = 1./fs * stft_step
         # due to overlap the neighbors might be valid too but for now just use the chosen index
-        full_size_frame_index = ends[chosen_index] / time_step_per_frame
-        full_n_frames = axis1_m * input_size_at_depth[0]
-        time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
-        downsampled_frame_index = full_size_frame_index / float(time_downsample_ratio)
+        base_full_size_frame_index = ends[chosen_index] / time_step_per_frame
+        # now we look at local energy of base data and find a min within +- 100 ms
+        lcl_window_s = .1
+        lcl_window_frames = int(lcl_window_s / (speech.stft_step * 1./ fs) + 1)
+        lcl_window_samples = int(np.round(lcl_window_frames * time_step_per_frame * fs))
+        # map that all the way back to raw timeseries sample point
+        # valid_el[0][1]
+        wav_sample_cut_point = int(np.round(base_full_size_frame_index * time_step_per_frame * fs))
+        orig_wav = valid_el[0][1]
+        # we need to find the quietest "proxy frame" in this wav, in a segment around wav_sample_cut_point
+        # then map it back 
+        # good discussion, we do it quick and dirty here but could do a proper A / E weighting etc
+        # https://dsp.stackexchange.com/questions/17628/python-audio-detecting-silence-in-audio-signal/17629
+        # https://github.com/endolith/waveform_analysis/blob/master/waveform_analysis/weighting_filters/ABC_weighting.py#L29
+        # https://stackoverflow.com/questions/30889748/how-to-obtain-sound-envelope-using-python
+        from scipy.signal import hilbert
+        analytic_wav = hilbert(orig_wav)
+        envelope_wav = np.abs(analytic_wav)
+        # use the combined rank from both sorts (min by env value, min by grad norm of env) to pick cut point
+        # roughly looking for a place where the envelope isnt really changing, and where the abs value of the signal is low
+        min_order = np.argsort(envelope_wav[wav_sample_cut_point - lcl_window_samples:wav_sample_cut_point + lcl_window_samples])
+        min_grad_order = np.argsort((envelope_wav[wav_sample_cut_point - lcl_window_samples + 1:wav_sample_cut_point + lcl_window_samples] - envelope_wav[wav_sample_cut_point - lcl_window_samples:wav_sample_cut_point + lcl_window_samples - 1]) ** 2)
+
+        combined_ranking = [int(np.where(min_grad_order == a)[0][0]) + idx1 if len(np.where(min_grad_order == a)[0]) > 0 else np.inf for idx1, a in enumerate(min_order)]
+        min_ranked_pos = np.argmin(combined_ranking)
+        min_cut_point = min_order[min_ranked_pos]
+        min_cut_point_samples = (wav_sample_cut_point - lcl_window_samples) + min_cut_point
+        # now that we have the exact point in the waveform, map that to a frame value
+        # not necessarily integer here
+        min_cut_point_frames = min_cut_point_samples / speech.stft_step
+        downsampled_frame_index = min_cut_point_frames / float(axis1_m)
+        # now we map the min cut point back to approximate frame value
+        # because there is overlap in the frame calcs, take the nearest frame boundary
         bias_til = int(downsampled_frame_index)
 
 remaining_steps = time_len - bias_til
 sample_buffer = 0. * x_in_np
 # 1. means value is used, 0. means it is masked. Can be different with transformers...
 sample_mask = 0. * x_mask_in_np + 1.
-sample_buffer[:, :bias_til] = x_in_np[:, :bias_til]
+# blend boundary
+btl = min(bias_til - 3, 0)
+btm = bias_til + 2
+sample_buffer[:, :btl] = x_in_np[:, :btl]
+sample_buffer[:, btl] = .6 * x_in_np[:, btl]
+sample_buffer[:, btl + 1] = .3 * x_in_np[:, btl + 1]
+sample_buffer[:, btl + 2] = 0. * x_in_np[:, btl + 2]
 original_buffer = copy.deepcopy(x_in_np)
 
 if input_custom_conditioning_json is not None:
@@ -729,10 +765,14 @@ if input_custom_conditioning_json is not None:
     # handle offset correction
     pre_offset = next_pre_word["startOffset"]
     pre_t = next_pre_word["start"]
+    # add optional time gap, should be respected when the minibatch conditioning is created
+    # model is sensitive to this, big gap -> model goes to silence
+    gap = .0
     post_words = new["words"]
     for _i in range(len(post_words)):
-        post_words[_i]["start"] = post_words[_i]["start"] + pre_t
-        post_words[_i]["end"] = post_words[_i]["end"] + pre_t
+        post_words[_i]["start"] = post_words[_i]["start"] + pre_t + gap
+        post_words[_i]["end"] = post_words[_i]["end"] + pre_t + gap
+        # we dont use offset but maybe should figure out what gap should be in terms of offset?
         post_words[_i]["startOffset"] = post_words[_i]["startOffset"] + pre_offset
         post_words[_i]["endOffset"] = post_words[_i]["endOffset"] + pre_offset
     # now put the words together
@@ -780,7 +820,14 @@ else:
 
 import time
 begin_time = time.time()
-sample_buffer[:, :max(0, bias_til - 5)] = x_in_np[:, :max(0, bias_til - 5)]
+#sample_buffer[:, :bias_til] = x_in_np[:, :bias_til]
+# blend boundary
+btl = max(bias_til - 3, 0)
+btm = bias_til + 2
+sample_buffer[:, :btl] = x_in_np[:, :btl]
+sample_buffer[:, btl] = .6 * x_in_np[:, btl]
+sample_buffer[:, btl + 1] = .3 * x_in_np[:, btl + 1]
+sample_buffer[:, btl + 2] = 0. * x_in_np[:, btl + 2]
 batch_norm_flag = 1.
 sample_buffer = torch.tensor(sample_buffer).contiguous().to(hp.use_device)
 sample_mask = torch.tensor(sample_mask).contiguous().to(hp.use_device)
@@ -791,7 +838,7 @@ with torch.no_grad():
                            memory_condition=torch_cond_seq_data_batch,
                            memory_condition_mask=torch_cond_seq_data_mask,
                            # boundary?
-                           bias_boundary=max(0, bias_til - 5),
+                           bias_boundary=bias_til,
                            batch_norm_flag=batch_norm_flag)
 sample_buffer = pred_out
 '''
