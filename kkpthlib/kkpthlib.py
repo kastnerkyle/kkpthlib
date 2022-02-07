@@ -6573,6 +6573,7 @@ class AttentionMelNetTier(torch.nn.Module):
             return res
 
     def _attention_step_sample(self, h_i, memory, memory_mask, previous_attn):
+        min_attention_step = self._sample_min_attention_step
         if self.attention_type == "sigmoid_logistic_alt":
             # condition on input sequence length?
             phi_hat = self.attn_proj([h_i])
@@ -6628,7 +6629,9 @@ class AttentionMelNetTier(torch.nn.Module):
                 # https://stackoverflow.com/questions/44230635/avoid-overflow-with-softplus-function-in-python
                 return alt_log1p(torch.exp(-torch.abs(x))) + torch.where(x > 0, x, 0. * x)
 
-            kappa = ksi + alt_softplus(phi_hat[:, :self.attention_mixture_components]) + 1E-3
+            kappa_step = alt_softplus(phi_hat[:, :self.attention_mixture_components]) + 1E-3
+            kappa_step = torch.max(kappa_step, 0. * kappa_step + min_attention_step)
+            kappa = ksi + kappa_step #alt_softplus(phi_hat[:, :self.attention_mixture_components]) + 1E-3
             #kappa = ksi + swish(phi_hat[:, :self.attention_mixture_components])
 
             #beta = (F.softplus(phi_hat[:, self.attention_mixture_components:2 * self.attention_mixture_components]) + 1E-4)
@@ -6820,7 +6823,9 @@ class AttentionMelNetTier(torch.nn.Module):
 
                 self._sample_cache["layer{}".format(layer)]["attention"]["attn_context"].append(new_context)
                 self._sample_cache["layer{}".format(layer)]["attention"]["attn_h"].append(h_t)
-                self._sample_cache["layer{}".format(layer)]["attention"]["attn_kappa"].append(extras["kappa"])
+
+                prev_attn = extras["kappa"]
+                self._sample_cache["layer{}".format(layer)]["attention"]["attn_kappa"].append(prev_attn)
 
                 self._sample_cache["layer{}".format(layer)]["attention"]["out"] = out
                 self._sample_cache["layer{}".format(layer)]["attention"]["attn_weight"] = attn_weight
@@ -6839,7 +6844,12 @@ class AttentionMelNetTier(torch.nn.Module):
                      time_index, freq_index, is_initial_step=True,
                      list_of_spatial_conditions=None,
                      bypass_td=None, bypass_fd=None, skip_input_embed=False,
-                     memory=None, memory_mask=None):
+                     memory=None, memory_mask=None,
+                     min_attention_step=None):
+        if min_attention_step is not None:
+            self._sample_min_attention_step = min_attention_step
+        else:
+            self._sample_min_attention_step = 0.
         if is_initial_step:
             return self._sample_initial_fn(list_of_inputs, time_index, freq_index,
                                         list_of_spatial_conditions=list_of_spatial_conditions,

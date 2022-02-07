@@ -335,6 +335,7 @@ else:
 
 
 cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
+
 batch_norm_flag = 1.
 
 # this is weird, need 2 load calls for conditional generator...
@@ -476,9 +477,12 @@ def fast_sample(x, x_mask=None,
             start_freq_index = 0
 
         x_a = x[:, :start_time_index]
+
+        min_attention_step = .0
         mn_out, alignment, attn_extras = model.mn_t.sample([x_a], time_index=time_index, freq_index=freq_index,
                                                                   is_initial_step=is_initial_step,
-                                                                  memory=mem_lstm, memory_mask=memory_condition_mask)
+                                                                  memory=mem_lstm, memory_mask=memory_condition_mask,
+                                                                  min_attention_step=min_attention_step)
         is_initial_step = False
 
         mem_lstm = mem_lstm
@@ -497,7 +501,8 @@ def fast_sample(x, x_mask=None,
             for _jj in range(start_freq_index, max_freq_step):
                 mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
                                                                         is_initial_step=is_initial_step,
-                                                                        memory=mem_lstm, memory_mask=memory_condition_mask)
+                                                                        memory=mem_lstm, memory_mask=memory_condition_mask,
+                                                                        min_attention_step=min_attention_step)
                 x[:, _ii, _jj, 0] = mn_out.squeeze()
                 if verbose:
                     print("sampled index {},{} out of total size ({},{})".format(_ii, _jj, max_time_step, max_freq_step))
@@ -831,6 +836,10 @@ sample_buffer[:, btl + 2] = 0. * x_in_np[:, btl + 2]
 batch_norm_flag = 1.
 sample_buffer = torch.tensor(sample_buffer).contiguous().to(hp.use_device)
 sample_mask = torch.tensor(sample_mask).contiguous().to(hp.use_device)
+
+# for checking / debugging converted symbols
+rev_p = {v: k for k, v in speech.phone_lookup.items()}
+cond_syms = [rev_p[el] for el in torch_cond_seq_data_batch.cpu().data.numpy().ravel()]
 
 with torch.no_grad():
     pred_out = fast_sample(sample_buffer,
