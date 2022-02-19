@@ -334,7 +334,7 @@ else:
     valid_el = speech.get_valid_utterances(hp.real_batch_size)
 
 
-cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
+cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el, is_sampling=True)
 
 batch_norm_flag = 1.
 
@@ -806,7 +806,7 @@ if input_custom_conditioning_json is not None:
         json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
         f.write(json_string)
 
-    cond_seq_data_batch, cond_seq_mask, _, __ = speech.format_minibatch(valid_el)
+    cond_seq_data_batch, cond_seq_mask, _, __ = speech.format_minibatch(valid_el, is_sampling=True)
 
     torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
     torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)

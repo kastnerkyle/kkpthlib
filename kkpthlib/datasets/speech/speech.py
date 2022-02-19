@@ -7,6 +7,7 @@ from scipy import signal
 from scipy.io import wavfile
 from collections import OrderedDict
 from .frontends import EnglishPhonemeLookup
+from .frontends import EnglishASCIILookup
 from .audio_processing.audio_tools import herz_to_mel, mel_to_herz
 from .audio_processing.audio_tools import stft, istft
 
@@ -201,6 +202,7 @@ class EnglishSpeechCorpus(object):
         plt.close()
         """
         self.pause_duration_breakpoints = [0.01, 0.0625, 0.1325, 0.25]
+
         self.phone_lookup = EnglishPhonemeLookup()
         # each sil starts with ! , so !0, !1, !2, !3, !4
 
@@ -222,6 +224,32 @@ class EnglishSpeechCorpus(object):
         # add pad symbol
         self.phone_lookup["_"] = sil_val
         assert len(self.phone_lookup.keys()) == len(np.unique(list(self.phone_lookup.keys())))
+
+        self.ascii_lookup = EnglishASCIILookup()
+
+        sil_val = len(self.ascii_lookup.keys())
+        self.ascii_lookup[" "] = sil_val
+        sil_val += 1
+
+        # we overload long pauses into 2 groups? potentially
+
+        special = [s for s in "!\',-.:;?"]
+        for s in special:
+            self.ascii_lookup[s] = sil_val
+            sil_val += 1
+
+        # add start symbol
+        self.ascii_lookup["$"] = sil_val
+        sil_val += 1
+        # add continuation symbol
+        self.ascii_lookup["&"] = sil_val
+        sil_val += 1
+        # add eos symbol
+        self.ascii_lookup["~"] = sil_val
+        sil_val += 1
+        # add pad symbol
+        self.ascii_lookup["_"] = sil_val
+        assert len(self.ascii_lookup.keys()) == len(np.unique(list(self.ascii_lookup.keys())))
 
         if self.build_skiplist:
             # should be deterministic if we run the same script 2x
@@ -327,6 +355,23 @@ class EnglishSpeechCorpus(object):
         assert len(self.train_keep_keys) > 0
         assert len(self.valid_keep_keys) > 0
 
+        # metadata key value
+        self.metadata_exact_lookup = {}
+        with open(self.metadata_csv, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split('|')
+                text_tup = (parts[1], parts[2])
+                assert parts[0] not in self.metadata_exact_lookup
+                self.metadata_exact_lookup[parts[0]] = text_tup
+
+        for t in self.train_keys:
+            if t not in self.metadata_exact_lookup:
+                raise ValueError("Mismatched key {} in train between metadata file and transcript files".format(t))
+        for v in self.valid_keys:
+            if v not in self.metadata_exact_lookup:
+                raise ValueError("Mismatched key {} in valid between metadata file and transcript files".format(v))
+
+
     def get_utterances(self, size, all_keys, skip_mel=False,
                        fastforward_state=False,
                        min_length_words=None, max_length_words=None,
@@ -357,10 +402,11 @@ class EnglishSpeechCorpus(object):
         # get a bigger extent, so if some don't match out filters we can keep going
         idx = self.random_state.choice(len(all_keys), 100 * size)
         if fastforward_state:
-            # the internal logic of fetch utterance can call the shuffle up to 3 or 4 times
+            # the internal logic of fetch utterance can call the shuffle up to 4 or 5 times
             # call it several times so that once we are done fastforwarding, the state is *definitely* in a new place
             aa = [1, 2, 3]
             for i in idx:
+                self.random_state.shuffle(aa)
                 self.random_state.shuffle(aa)
                 self.random_state.shuffle(aa)
                 self.random_state.shuffle(aa)
@@ -503,6 +549,7 @@ class EnglishSpeechCorpus(object):
 
     def format_minibatch(self, utterances,
                          symbol_type="phoneme",
+                         is_sampling=False,
                          pause_duration_breakpoints=None,
                          write_out_debug_info=False,
                          quantize_to_n_bins=None):
@@ -510,6 +557,9 @@ class EnglishSpeechCorpus(object):
             pause_duration_breakpoints = self.pause_duration_breakpoints
 
         phoneme_sequences = []
+        phoneme_nonspacing_sequences = []
+        ascii_spacing_sequences = []
+        ascii_nonspacing_sequences = []
         melspec_sequences = []
 
         fs, _, _, _ = utterances[0]
@@ -527,10 +577,10 @@ class EnglishSpeechCorpus(object):
                 max_frame_count = di * (q + 1)
         assert max_frame_count == int(max_frame_count)
 
-        if symbol_type != "phoneme":
-            raise ValueError("Only supporting symbol_type phoneme for now")
+        if symbol_type not in ["phoneme", "representation_mixed", "ascii"]:
+            raise ValueError("Unsupported symbol_type {}".format(symbol_type))
 
-        if symbol_type == "phoneme":
+        if symbol_type in ["phoneme", "representation_mixed", "ascii"]:
             if self.alignment_folder is None:
                 raise ValueError("symbol_type phoneme minibatch formatting not supported without 'aligment_folder' argument to speech corpus init!")
             for u_i, utt in enumerate(utterances):
@@ -616,8 +666,7 @@ class EnglishSpeechCorpus(object):
                                         tsplit_tmp = words[le_tmp:re]
                                         sub_dur_tmp = tsplit_tmp[-1]["end"] - tsplit_tmp[0]["start"] + (1. / fs * 4 * self.stft_size)
                                         # include a 4 window buffer on the max length check
-                                        if sub_dur_tmp > self.max_length_time_secs:
-                                            # we assume here that one word cannot put us above the max length
+                                        if sub_dur_tmp > self.max_length_time_secs: # we assume here that one word cannot put us above the max length
                                             tsplit = words[le_tmp + 1:re]
                                             mid_to_end.append((tsplit, le_tmp, re, True))
                                             break
@@ -699,6 +748,8 @@ class EnglishSpeechCorpus(object):
                     d = d2
 
                 melspec_sequences.append(melspec)
+
+                # this part makes all the phonetic sequences
                 phone_groups = [el["phones"] for el in words]#al[k]["full_alignment"]["words"]]
                 start_stop = [(el["start"], el["end"]) for el in words]#al[k]["full_alignment"]["words"]]
                 gaps = []
@@ -743,6 +794,139 @@ class EnglishSpeechCorpus(object):
                 seq_as_ints = [self.phone_lookup[s.split("_")[0]] for s in flat_phones_and_gaps]
                 phoneme_sequences.append(seq_as_ints)
 
+                phoneme_nonspacing_sequences.append(phone_group_syms)
+
+                # this part will make the word sequences
+                # lower? or keep upper case?
+                #TODO
+                ascii_groups = [el["alignedWord"] for el in words]#al[k]["full_alignment"]["words"]]
+                ascii_exact_text_tup = self.metadata_exact_lookup[k]
+                ascii_group_syms = [ag for ag in ascii_groups]
+
+                true_text = ascii_exact_text_tup[1]
+                # assume that split on spaces is possible
+                true_text_group_syms = true_text.split(" ")
+
+                def hamming(a, b):
+                    return len([i for i in filter(lambda x: x[0] != x[1], zip(a, b))])
+
+                def approx_contains(sub, pri, hamming_error=1):
+                    # returns all possible substring matches
+                    # allow 1 mismatch per match group (some issues with apostophe)
+                    # pri[matches[0][0]:matches[0][1]]
+                    # create all possible slicings of pri by length of sub
+                    slice_starts = [el for el in range(0, len(pri) - len(sub) + 1)]
+                    slice_ends = [ss + len(sub) for ss in slice_starts]
+                    pri_slice = [pri[ss:se] for ss, se in zip(slice_starts, slice_ends)]
+                    exact_matches = [(ss, se) for (ss, se), prs in zip(zip(slice_starts, slice_ends), pri_slice) if prs == sub]
+                    # we can have 1 mismatched word and still get a match
+                    hamming_matches = [(ss, se) for (ss, se), prs in zip(zip(slice_starts, slice_ends), pri_slice) if hamming(prs, sub) <= hamming_error]
+                    return exact_matches, hamming_matches
+                whitelist = set('abcdefghijklmnopqrstuvwxyz')
+                cleaned_true_text_group_syms = [''.join(filter(whitelist.__contains__, true_text_group_syms[_n].strip().lower()))
+                                                for _n in range(len(true_text_group_syms))]
+                # do the match on cleaned ascii syms rather than the base, catches some edge cases like apostrophes
+                cleaned_ascii_group_syms = [''.join(filter(whitelist.__contains__, ascii_group_syms[_n].strip().lower()))
+                                            for _n in range(len(ascii_group_syms))]
+                r, r_hamming = approx_contains(cleaned_ascii_group_syms, cleaned_true_text_group_syms)
+                if len(r) == 0:
+                   if is_sampling:
+                       # if we are sampling and don't get a match, just fall back to the ascii and call it a day
+                       true_text_sub_group_syms = ascii_group_syms
+                   else:
+                       if len(r_hamming) > 0:
+                           true_text_sub_group_syms = true_text_group_syms[r_hamming[0][0]:r_hamming[0][1]]
+                       else:
+                           print("hit match failure in string cleaning, unable to find match even with a relaxed hamming distance, resolve this")
+                           from IPython import embed; embed(); raise ValueError()
+                else:
+                    # if we have multiple identical matches, take the first one?
+                    # may be edge cases with ends of sentences, or commas but chalk it up as a loss
+                    true_text_sub_group_syms = true_text_group_syms[r[0][0]:r[0][1]]
+
+                # pause related symbols ',;'
+                # now go through and check if commas, other pause related specials line up with gaps
+                # if there is a mismatch, we fall back to the default (what was in the transcript file)
+                final_true_text_group_syms = copy.deepcopy(ascii_group_syms)
+                for _n in range(len(true_text_sub_group_syms)):
+                    t = final_true_text_group_syms[_n]
+                    if "," not in t and ";" not in t:
+                        final_true_text_group_syms[_n] = true_text_sub_group_syms[_n]
+                    elif t[-1] != "," or t[-1] != ";":
+                        # weird potential edge case here, let it just be whatever the original (cleaned up) ascii_group_syms was
+                        continue
+                    else:
+                        # had a trailing , or ;, handle it below
+                        final_true_text_group_syms[_n] = true_text_sub_group_syms[_n]
+
+                # change flat ascii and gaps based on if it was start_to_mid mid_to_mid mid_to_end or un-cropped (start to end)
+                if "start_to" in crop_type:
+                    # start of sentence symbol
+                    ascii_spacing_terms = [["$"]]
+                    ascii_nonspacing_terms  = []
+                else:
+                    # continuation symbol
+                    ascii_spacing_terms = [["&"]]
+                    ascii_nonspacing_terms = []
+
+                # we always use the "text" version of the spaces in this
+                # so we build a list of chunks that can be selected for representation mixing
+                # 1 per word, 1 per gap (~2x len(final_true_text_group_syms)
+                # gap part must contain , or ; if it is present. once we detect it is in the group_sym remove it from the word
+                # and add it to the spacing term
+                # looks the same when joined, but matters for repr mix selection
+
+                for _n in range(len(final_true_text_group_syms)):
+                    # find and replace group syms with the ascii exact equivalent???
+                    # use 1 because it has the number expansions in ljspeech
+                    t = final_true_text_group_syms[_n]
+                    ascii_nonspacing_terms.append([t])
+                    # don't add spacing for last element
+                    if _n == (len(final_true_text_group_syms) - 1):
+                        break
+
+                    if "," not in t and ";" not in t:
+                        ascii_spacing_terms.append([" "])
+                    else:
+                        # had a trailing , or ;, handle it below
+                        # ones with no trailing , or ; should have been handled before
+                        # g is the gap size
+                        # 0 or 1 should represent a value between 0 and 0.0625 according to the duration breakpoints
+                        # 2 and up should be anything above that
+                        #self.pause_duration_breakpoints = [0.01, 0.0625, 0.1325, 0.25]
+                        # this means that the buckets are 0 .... 1 ....  2 ..... 3 .... 4
+                        g = gaps_arr[_n]
+                        if t[-1] == ",":
+                            if g >= 2:
+                                ascii_spacing_terms.append([", "])
+                            else:
+                                ascii_spacing_terms.append([" "])
+                        elif t[-1] == ";":
+                            if g >= 3:
+                                ascii_spacing_terms.append(["; "])
+                            else:
+                                if g >= 2:
+                                    ascii_spacing_terms.append([", "])
+                                else:
+                                    ascii_spacing_terms.append([" "])
+                if "to_end" in crop_type:
+                    # eos symbol
+                    if final_true_text_group_syms[-1][-1] == "!":
+                        ascii_spacing_terms.append(["!~"])
+                    elif final_true_text_group_syms[-1][-1] == "?":
+                        ascii_spacing_terms.append(["?~"])
+                    else:
+                        ascii_spacing_terms.append([".~"])
+                else:
+                    # continuation symbol
+                    ascii_spacing_terms.append(["&"])
+
+                # gaps_arr[-1] unused in ascii (we don't have silence labeled)
+                # we use this to construct both the repr mix and the ascii later
+                # slightly different processing than phoneme
+                ascii_spacing_sequences.append(ascii_spacing_terms)
+                ascii_nonspacing_sequences.append(ascii_nonspacing_terms)
+
                 if write_out_debug_info:
                     # test write to listen to some samples
                     from kkpthlib.datasets.speech.audio_processing.audio_tools import soundsc
@@ -755,7 +939,10 @@ class EnglishSpeechCorpus(object):
                     with open(fldr + "out_{}.txt".format(u_i), "w") as f:
                         f.write("Part: {}\n".format(part_w))
                         f.write("Full: {}\n".format(full_w))
+        else:
+            raise ValueError("Unknown symbol_type {} specified!".format(symbol_type))
 
+        # phoneme sequences were pre-constructed so this is easier
         # pad it out so all are same length
         max_seq_len = max([len(ps) for ps in phoneme_sequences])
         # mask and padded sequence
@@ -783,7 +970,94 @@ class EnglishSpeechCorpus(object):
             quantized_melspec_sequences = np.digitize(padded_melspec_sequences, bins)
         else:
             quantized_melspec_sequences = padded_melspec_sequences
-        return phoneme_sequences, input_seq_mask.astype("float32"), quantized_melspec_sequences.astype("float32"), melspec_seq_mask.astype("float32")
+
+        if symbol_type == "phoneme":
+            return phoneme_sequences, input_seq_mask.astype("float32"), quantized_melspec_sequences.astype("float32"), melspec_seq_mask.astype("float32")
+
+        # ascii and repr mix actually constructed from the groups here 
+        ascii_sequences = []
+        repr_mixed_sequences = []
+        repr_mixed_sequences_masks = []
+        # be sure we have the same amount of sequences (should always be true)
+        assert len(ascii_nonspacing_sequences) == len(ascii_spacing_sequences)
+        assert len(ascii_nonspacing_sequences) == len(phoneme_nonspacing_sequences)
+        for _n in range(len(ascii_nonspacing_sequences)):
+            a_spacing = ascii_spacing_sequences[_n]
+            a_nonspacing = ascii_nonspacing_sequences[_n]
+            p_nonspacing = phoneme_nonspacing_sequences[_n]
+
+            this_ascii_sequence = []
+            this_repr_mixed_sequence = []
+            this_repr_mixed_sequence_mask = []
+
+            this_ascii_sequence.extend(a_spacing[0])
+            this_repr_mixed_sequence.extend(a_spacing[0])
+            # 0 is ascii, 1 is phoneme here
+            this_repr_mixed_sequence_mask.append(0)
+            assert len(a_nonspacing) == len(p_nonspacing)
+            assert len(a_spacing) == (len(a_nonspacing) + 1)
+            # 0 is ascii, 1 is phoneme for each "word"
+            # if we use 0.5, should be 50/50 choice
+            choosing = (self.random_state.rand(len(a_nonspacing)) > 0.5).astype("int32")
+            for _n, c in enumerate(choosing):
+                # build ascii sequence at the same time for convenience
+                this_ascii_sequence.extend([el for el in a_nonspacing[_n][0]])
+                this_ascii_sequence.extend([el for el in a_spacing[_n + 1][0]])
+                if c == 0:
+                    this_repr_mixed_sequence.extend([el for el in a_nonspacing[_n][0]])
+                    this_repr_mixed_sequence.extend([el for el in a_spacing[_n + 1][0]])
+                    this_repr_mixed_sequence_mask.extend([0] * len(a_nonspacing[_n][0]))
+                    this_repr_mixed_sequence_mask.extend([0] * len(a_spacing[_n + 1][0]))
+                elif c == 1:
+                    # p_nonspacing has multi groups, so have to handle slightly differently
+                    this_repr_mixed_sequence.extend(p_nonspacing[_n])
+                    this_repr_mixed_sequence.extend([el for el in a_spacing[_n + 1][0]])
+                    this_repr_mixed_sequence_mask.extend([1] * len(p_nonspacing[_n]))
+                    this_repr_mixed_sequence_mask.extend([0] * len(a_spacing[_n + 1][0]))
+                    # always use ascii spacing terms even for phones
+                else:
+                    raise ValueError("Some unknown error when generating masks")
+            ascii_sequences.append(this_ascii_sequence)
+            repr_mixed_sequences.append(this_repr_mixed_sequence)
+            repr_mixed_sequences_masks.append(this_repr_mixed_sequence_mask)
+
+        # now we need to convert pad, convert batches to ints and create masks for the batches
+        assert len(ascii_sequences) == len(repr_mixed_sequences)
+        assert len(repr_mixed_sequences) == len(repr_mixed_sequences_masks)
+        max_ascii_seq_len = max([len(a_s) for a_s in ascii_sequences])
+        max_repr_mixed_seq_len = max([len(r_s) for r_s in repr_mixed_sequences])
+
+        input_ascii_seq = [a_s + (max_ascii_seq_len - len(a_s)) * ["_"] for a_s in ascii_sequences]
+        input_ascii_seq_mask = [[1.] * len(a_s) + [0.] * (max_ascii_seq_len - len(a_s)) for a_s in ascii_sequences]
+
+        input_ascii_seq_lu = [[self.ascii_lookup[el] for el in a_s] for a_s in input_ascii_seq]
+        input_repr_mixed_seq = [r_s + (max_repr_mixed_seq_len - len(r_s)) * ["_"] for r_s in repr_mixed_sequences]
+        input_repr_mixed_seq_mask = [r_s_m + [0.] * (max_repr_mixed_seq_len - len(r_s_m)) for r_s_m in repr_mixed_sequences_masks]
+        input_repr_mixed_seq_mask_mask = [[1.] * len(r_s) + [0.] * (max_repr_mixed_seq_len - len(r_s)) for r_s in repr_mixed_sequences]
+
+        input_repr_mixed_seq_lu = [[self.ascii_lookup[el] if el_t == 0
+                                    else self.phone_lookup[el.split("_")[0].lower()]
+                                    for el, el_t in zip(r_s, r_s_m)]
+                                    for r_s, r_s_m in zip(input_repr_mixed_seq, input_repr_mixed_seq_mask)]
+
+        input_ascii_seq_lu = np.array(input_ascii_seq_lu).astype("float32").T
+        input_ascii_seq_mask = np.array(input_ascii_seq_mask).T
+        assert input_ascii_seq_lu.shape == input_ascii_seq_mask.shape
+
+        input_repr_mixed_seq_lu = np.array(input_repr_mixed_seq_lu).astype("float32").T
+        input_repr_mixed_seq_mask = np.array(input_repr_mixed_seq_mask).T
+        input_repr_mixed_seq_mask_mask = np.array(input_repr_mixed_seq_mask_mask).T
+        assert input_repr_mixed_seq_lu.shape == input_repr_mixed_seq_mask.shape
+        assert input_repr_mixed_seq_mask.shape == input_repr_mixed_seq_mask_mask.shape
+
+        if symbol_type == "ascii":
+            print("ascii")
+            from IPython import embed; embed(); raise ValueError()
+        elif symbol_type == "representation_mixed":
+            print("repr mix")
+            from IPython import embed; embed(); raise ValueError()
+        else:
+            raise ValueError("Unhandled symbol_type {}".format(symbol_type))
 
     def _fetch_utterance(self, basename, skip_mel=False):
         # fs, d, melspec, info
