@@ -1388,6 +1388,10 @@ class BatchNorm2d(torch.nn.Module):
         self.eps = eps
         self.dtype = dtype
         self.device = device
+        self.is_half = False
+
+    def half(self):
+        self.is_half = True
 
     def forward(self, input_tensor, train_test_flag=None):
         # 0 train, 1 test
@@ -1404,6 +1408,9 @@ class BatchNorm2d(torch.nn.Module):
 
         pop_mean = make_tensor(np.zeros((input_tensor.shape[1],)), dtype=dtype, device=device, requires_grad=False)
         pop_var = make_tensor(np.ones((input_tensor.shape[1],)), dtype=dtype, device=device, requires_grad=False)
+        if self.is_half:
+            pop_mean = pop_mean.half()
+            pop_var = pop_var.half()
 
         shp = _shape(input_tensor)
         def left():

@@ -160,7 +160,10 @@ hp = HParams(input_dim=1,
              # mixture of logistics n_mix == 10
              #output_size=2 * 10 + 10,
              output_size=1,
-             text_input_symbols=196, #51, #len(speech.phone_lookup),
+             #phone_input_symbols=52, #len(speech.phone_lookup),
+             #ascii_input_symbols=65, #len(speech.ascii_lookup)
+             phone_input_symbols=65, #max(len(speech.phone_lookup), len(speech.ascii_lookup))
+             ascii_input_symbols=65, #max(len(speech.phone_lookup), len(speech.ascii_lookup))
              input_image_size=input_size_at_depth,
              real_batch_size=input_real_batch_size,
              virtual_batch_size=input_virtual_batch_size,
@@ -177,7 +180,6 @@ speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              fixed_minibatch_time_secs=fixed_minibatch_time_secs,
                              train_split=fraction_train_split,
                              random_state=data_random_state)
-
 
 """
 s = 0
@@ -255,12 +257,17 @@ def build_model(hp):
             super(Model, self).__init__()
             if input_tier_condition_tag is None:
                 # handle text attention separately
-                self.embed_text = Embedding(hp.text_input_symbols, hp.hidden_dim, random_state=random_state,
-                                            name="tier_{}_{}_sz_{}_{}_embed_text".format(input_tier_input_tag[0], input_tier_input_tag[1], hp.input_image_size[0], hp.input_image_size[1]), device=hp.use_device)
-                """
+                self.embed_ascii = Embedding(hp.ascii_input_symbols, hp.hidden_dim, random_state=random_state,
+                                            name="tier_{}_{}_sz_{}_{}_embed_ascii".format(input_tier_input_tag[0], input_tier_input_tag[1], hp.input_image_size[0], hp.input_image_size[1]), device=hp.use_device)
+
+                self.embed_phone = Embedding(hp.phone_input_symbols, hp.hidden_dim, random_state=random_state,
+                                            name="tier_{}_{}_sz_{}_{}_embed_phone".format(input_tier_input_tag[0], input_tier_input_tag[1], hp.input_image_size[0], hp.input_image_size[1]), device=hp.use_device)
+
+                self.embed_mask = Embedding(2, hp.hidden_dim, random_state=random_state,
+                                            name="tier_{}_{}_sz_{}_{}_embed_mask".format(input_tier_input_tag[0], input_tier_input_tag[1], hp.input_image_size[0], hp.input_image_size[1]), device=hp.use_device)
+
                 self.conv_text = SequenceConv1dStack([hp.hidden_dim], hp.hidden_dim, n_stacks=3, random_state=random_state,
                                                      name="tier_{}_{}_sz_{}_{}_conv_text".format(input_tier_input_tag[0], input_tier_input_tag[1], hp.input_image_size[0], hp.input_image_size[1]), device=hp.use_device)
-                """
                 # divided by 2 so the output is hp.hidden_dim
                 self.bilstm_text = BiLSTMLayer([hp.hidden_dim], hp.hidden_dim // 2, random_state=random_state,
                                                init=hp.melnet_init,
@@ -299,21 +306,24 @@ def build_model(hp):
             # for now we don't use the x_mask in the model itself, only in the loss calculations
             if spatial_condition is None:
                 assert memory_condition is not None
-                print("repr mix embeds + layers")
-                from IPython import embed; embed(); raise ValueError()
-                mem, mem_e = self.embed_text(memory_condition)
+                mem_a, mem_a_e = self.embed_ascii(memory_condition)
+                mem_p, mem_p_e = self.embed_phone(memory_condition)
+                mem_j = memory_condition_mask[..., None] * mem_p + (1. - memory_condition_mask[..., None]) * mem_a
+                mem_m, mem_m_e = self.embed_mask(memory_condition_mask[..., None])
 
-                #mem_conv = self.conv_text([mem], batch_norm_flag)
+                mem_f = mem_j + mem_m
+
+                # doing bn in 16 bit is sketch to say the least
+                mem_conv = self.conv_text([mem_f], batch_norm_flag)
                 # mask based on the conditioning mask
-
-                #mem_conv = mem_conv * memory_condition_mask[..., None]
+                mem_conv = mem_conv * memory_condition_mask_mask[..., None]
 
                 # use mask in BiLSTM
-                mem_lstm = self.bilstm_text([mem], input_mask=memory_condition_mask)
+                mem_lstm = self.bilstm_text([mem_conv], input_mask=memory_condition_mask_mask)
                 # x currently batch, time, freq, 1
                 # mem time, batch, feat
                 # feed mask for attention calculations as well
-                mn_out, alignment, attn_extras = self.mn_t([x], memory=mem_lstm, memory_mask=memory_condition_mask)
+                mn_out, alignment, attn_extras = self.mn_t([x], memory=mem_lstm, memory_mask=memory_condition_mask_mask)
                 self.attention_alignment = alignment
                 self.attention_extras = attn_extras
             else:
@@ -673,8 +683,6 @@ if __name__ == "__main__":
                                          spatial_condition=x_cond_in,
                                          batch_norm_flag=batch_norm_flag)
 
-                    print("hey we made it out")
-                    from IPython import embed; embed(); raise ValueError()
                     # x_in comes in discretized between 0 and 256, now scale -1 to 1
                     #loss1 = loss_function(pred_out, 2 * (x_in / 256.) - 1., n_mix=hp.n_mix)
                     # for now just do mse
@@ -770,6 +778,7 @@ if __name__ == "__main__":
          "optimizer": optimizer,
          "hparams": hp}
 
+    """
     r = loop(speech, {"train": True}, None)
     r2 = loop(speech, {"train": True}, None)
     print(r)
@@ -782,6 +791,7 @@ if __name__ == "__main__":
         rs.append(rx)
         print(rs)
     from IPython import embed; embed(); raise ValueError()
+    """
 
     if input_tier_condition_tag is None:
         tag = str(args.experiment_name) + "_tier_{}_{}_sz_{}_{}".format(input_tier_input_tag[0], input_tier_input_tag[1],
