@@ -275,7 +275,11 @@ class EnglishSpeechCorpus(object):
                 train_failed_checks = OrderedDict()
                 train_passed_checks = OrderedDict()
                 for n, k in enumerate(self.train_keys):
-                    utt = self.get_utterances(1, [self.train_keys[n]], do_not_filter=True)
+                    try:
+                        utt = self.get_utterances(1, [self.train_keys[n]], do_not_filter=True)
+                    except:
+                        train_failed_checks[k] = [(n, k, 0)]
+                        continue
                     utt_key = list(utt[0][3].keys())[0]
                     words = utt[0][3][utt_key]["full_alignment"]["words"]
                     for i in range(len(words)):
@@ -297,7 +301,11 @@ class EnglishSpeechCorpus(object):
                 valid_failed_checks = OrderedDict()
                 valid_passed_checks = OrderedDict()
                 for n, k in enumerate(self.valid_keys):
-                    utt = self.get_utterances(1, [self.valid_keys[n]], do_not_filter=True)
+                    try:
+                        utt = self.get_utterances(1, [self.valid_keys[n]], do_not_filter=True)
+                    except:
+                        valid_failed_checks[k] = [(n, k, 0)]
+                        continue
                     utt_key = list(utt[0][3].keys())[0]
                     words = utt[0][3][utt_key]["full_alignment"]["words"]
                     for i in range(len(words)):
