@@ -31,6 +31,7 @@ class EnglishSpeechCorpus(object):
                        min_length_symbols=7, max_length_symbols=200,
                        min_length_time_secs=2, max_length_time_secs=None,
                        extract_subsequences=True,
+                       symbol_type="phoneme",
                        fixed_minibatch_time_secs=6,
                        build_skiplist=True,
                        bypass_checks=False,
@@ -42,6 +43,8 @@ class EnglishSpeechCorpus(object):
         self.alignment_folder = alignment_folder
         self.random_state = random_state
         self.train_split = train_split
+
+        self.symbol_type = symbol_type
 
         self.min_length_words = min_length_words
         self.max_length_words = max_length_words
@@ -548,11 +551,13 @@ class EnglishSpeechCorpus(object):
         self.cached_count_ = d["frame_count"].copy()
 
     def format_minibatch(self, utterances,
-                         symbol_type="phoneme",
+                         symbol_type=None,
                          is_sampling=False,
                          pause_duration_breakpoints=None,
                          write_out_debug_info=False,
                          quantize_to_n_bins=None):
+        if symbol_type == None:
+            symbol_type = self.symbol_type
         if pause_duration_breakpoints is None:
             pause_duration_breakpoints = self.pause_duration_breakpoints
 
@@ -810,6 +815,17 @@ class EnglishSpeechCorpus(object):
                 def hamming(a, b):
                     return len([i for i in filter(lambda x: x[0] != x[1], zip(a, b))])
 
+                whitelist = set('abcdefghijklmnopqrstuvwxyz')
+                def begend(a, b):
+                    j_a = "".join(a)
+                    j_b = "".join(b)
+                    i = min(10, min(len(j_a), len(j_b)))
+                    c_a = ''.join(filter(whitelist.__contains__, j_a.strip().lower()))
+                    c_b = ''.join(filter(whitelist.__contains__, j_b.strip().lower()))
+                    e = c_a[-i:] == c_b[-i:]
+                    #b = c_a[:i] == c_b[:i]
+                    return e #and b
+
                 def approx_contains(sub, pri, hamming_error=1):
                     # returns all possible substring matches
                     # allow 1 mismatch per match group (some issues with apostophe)
@@ -821,14 +837,15 @@ class EnglishSpeechCorpus(object):
                     exact_matches = [(ss, se) for (ss, se), prs in zip(zip(slice_starts, slice_ends), pri_slice) if prs == sub]
                     # we can have 1 mismatched word and still get a match
                     hamming_matches = [(ss, se) for (ss, se), prs in zip(zip(slice_starts, slice_ends), pri_slice) if hamming(prs, sub) <= hamming_error]
-                    return exact_matches, hamming_matches
-                whitelist = set('abcdefghijklmnopqrstuvwxyz')
+                    begend_matches = [(ss, se) for (ss, se), prs in zip(zip(slice_starts, slice_ends), pri_slice)
+                                      if begend(prs, sub)]
+                    return exact_matches, hamming_matches, begend_matches
                 cleaned_true_text_group_syms = [''.join(filter(whitelist.__contains__, true_text_group_syms[_n].strip().lower()))
                                                 for _n in range(len(true_text_group_syms))]
                 # do the match on cleaned ascii syms rather than the base, catches some edge cases like apostrophes
                 cleaned_ascii_group_syms = [''.join(filter(whitelist.__contains__, ascii_group_syms[_n].strip().lower()))
                                             for _n in range(len(ascii_group_syms))]
-                r, r_hamming = approx_contains(cleaned_ascii_group_syms, cleaned_true_text_group_syms)
+                r, r_hamming, r_begend = approx_contains(cleaned_ascii_group_syms, cleaned_true_text_group_syms)
                 if len(r) == 0:
                    if is_sampling:
                        # if we are sampling and don't get a match, just fall back to the ascii and call it a day
@@ -837,10 +854,13 @@ class EnglishSpeechCorpus(object):
                        if len(r_hamming) > 0:
                            true_text_sub_group_syms = true_text_group_syms[r_hamming[0][0]:r_hamming[0][1]]
                        else:
-                           print("hit match failure in string cleaning, unable to find match even with a relaxed hamming distance, resolve this")
-                           from IPython import embed; embed(); raise ValueError()
+                           if len(r_begend) > 0:
+                               true_text_sub_group_syms = true_text_group_syms[r_begend[0][0]:r_begend[0][1]]
+                           else:
+                               # fall back to just using the ascii group syms rather than the "true text"
+                               true_text_sub_group_syms = ascii_group_syms
                 else:
-                    # if we have multiple identical matches, take the first one?
+                    # if we have multiple identical matches, take the first one
                     # may be edge cases with ends of sentences, or commas but chalk it up as a loss
                     true_text_sub_group_syms = true_text_group_syms[r[0][0]:r[0][1]]
 
@@ -858,6 +878,10 @@ class EnglishSpeechCorpus(object):
                     else:
                         # had a trailing , or ;, handle it below
                         final_true_text_group_syms[_n] = true_text_sub_group_syms[_n]
+                # remove any extraneous symbols
+                symlist = "".join(sorted(self.ascii_lookup.keys()))
+                final_true_text_group_syms = [''.join(filter(symlist.__contains__, final_true_text_group_syms[_n]))
+                                              for _n in range(len(final_true_text_group_syms))]
 
                 # change flat ascii and gaps based on if it was start_to_mid mid_to_mid mid_to_end or un-cropped (start to end)
                 if "start_to" in crop_type:
@@ -995,7 +1019,29 @@ class EnglishSpeechCorpus(object):
             # 0 is ascii, 1 is phoneme here
             this_repr_mixed_sequence_mask.append(0)
             assert len(a_nonspacing) == len(p_nonspacing)
-            assert len(a_spacing) == (len(a_nonspacing) + 1)
+            if len(a_spacing) != (len(a_nonspacing) + 1):
+                # something has gone weird with the spacing. Bail and set spacing to all " "
+                # with the correct beginning and ending symbols (based on the cut type)
+                # this happens very rarely
+                if "start_to" in crop_type:
+                    new_a_spacing = [["$"]]
+                elif "mid_to" in crop_type:
+                    new_a_spacing = [["&"]]
+                else:
+                    raise ValueError("Unknown crop_type {}".format(crop_type))
+
+                for _s in range(len(a_nonspacing) - 1):
+                    new_a_spacing.append([" "])
+
+                if "to_end" in crop_type:
+                    new_a_spacing.append([".~"])
+                elif "to_mid" in crop_type:
+                    new_a_spacing.append(["&"])
+                else:
+                    raise ValueError("Unknown crop_type {}".format(crop_type))
+                assert len(new_a_spacing) == (len(a_nonspacing) + 1)
+                a_spacing = new_a_spacing
+
             # 0 is ascii, 1 is phoneme for each "word"
             # if we use 0.5, should be 50/50 choice
             choosing = (self.random_state.rand(len(a_nonspacing)) > 0.5).astype("int32")
@@ -1031,6 +1077,8 @@ class EnglishSpeechCorpus(object):
         input_ascii_seq_mask = [[1.] * len(a_s) + [0.] * (max_ascii_seq_len - len(a_s)) for a_s in ascii_sequences]
 
         input_ascii_seq_lu = [[self.ascii_lookup[el] for el in a_s] for a_s in input_ascii_seq]
+
+
         input_repr_mixed_seq = [r_s + (max_repr_mixed_seq_len - len(r_s)) * ["_"] for r_s in repr_mixed_sequences]
         input_repr_mixed_seq_mask = [r_s_m + [0.] * (max_repr_mixed_seq_len - len(r_s_m)) for r_s_m in repr_mixed_sequences_masks]
         input_repr_mixed_seq_mask_mask = [[1.] * len(r_s) + [0.] * (max_repr_mixed_seq_len - len(r_s)) for r_s in repr_mixed_sequences]
@@ -1051,11 +1099,22 @@ class EnglishSpeechCorpus(object):
         assert input_repr_mixed_seq_mask.shape == input_repr_mixed_seq_mask_mask.shape
 
         if symbol_type == "ascii":
-            print("ascii")
-            from IPython import embed; embed(); raise ValueError()
+            return input_ascii_seq_lu, input_ascii_seq_mask.astype("float32"), quantized_melspec_sequences.astype("float32"), melspec_seq_mask.astype("float32")
         elif symbol_type == "representation_mixed":
-            print("repr mix")
-            from IPython import embed; embed(); raise ValueError()
+            pack = []
+            pack.append(input_repr_mixed_seq_lu)
+            pack.append(input_repr_mixed_seq_mask.astype("float32"))
+            pack.append(input_repr_mixed_seq_mask_mask.astype("float32"))
+
+            pack.append(input_ascii_seq_lu)
+            pack.append(input_ascii_seq_mask.astype("float32"))
+
+            pack.append(phoneme_sequences)
+            pack.append(input_seq_mask.astype("float32"))
+
+            pack.append(quantized_melspec_sequences.astype("float32"))
+            pack.append(melspec_seq_mask.astype("float32"))
+            return pack
         else:
             raise ValueError("Unhandled symbol_type {}".format(symbol_type))
 
