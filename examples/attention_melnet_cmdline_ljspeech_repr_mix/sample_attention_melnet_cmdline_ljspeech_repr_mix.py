@@ -276,6 +276,7 @@ speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              wav_folder=folder_base + "/wavs/",
                              alignment_folder=folder_base + "/alignment_json/",
                              fixed_minibatch_time_secs=fixed_minibatch_time_secs,
+                             symbol_type="representation_mixed",
                              extract_subsequences=False,
                              train_split=fraction_train_split,
                              random_state=data_random_state)
@@ -338,7 +339,20 @@ else:
     valid_el = speech.get_valid_utterances(hp.real_batch_size)
 
 
-cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el, is_sampling=True)
+#cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
+
+r = speech.format_minibatch(valid_el,
+                            quantize_to_n_bins=None)
+cond_seq_data_repr_mix_batch = r[0]
+cond_seq_repr_mix_mask = r[1]
+cond_seq_repr_mix_mask_mask = r[2]
+cond_seq_data_ascii_batch = r[3]
+cond_seq_ascii_mask = r[4]
+cond_seq_data_phoneme_batch = r[5]
+cond_seq_phoneme_mask = r[6]
+data_batch = r[7]
+data_mask = r[8]
+
 
 batch_norm_flag = 1.
 
@@ -353,8 +367,9 @@ if use_half:
         layer.half()
     [a.half() for a in model.parameters()]
 
-torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
-torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
+torch_cond_seq_data_batch = torch.tensor(cond_seq_data_repr_mix_batch[..., None]).contiguous().to(hp.use_device)
+torch_cond_seq_data_mask = torch.tensor(cond_seq_repr_mix_mask).contiguous().to(hp.use_device)
+torch_cond_seq_data_mask_mask = torch.tensor(cond_seq_repr_mix_mask_mask).contiguous().to(hp.use_device)
 
 x_mask_t = data_mask[..., None, None] + 0. * data_batch[..., None]
 x_t = data_batch[..., None]
@@ -386,8 +401,9 @@ x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
 x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
 
 if use_half:
-    torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device).half()
-    torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device).half()
+    torch_cond_seq_data_batch = torch.tensor(cond_seq_data_repr_mix_batch[..., None]).contiguous().to(hp.use_device).half()
+    torch_cond_seq_data_mask = torch.tensor(cond_seq_repr_mix_mask).contiguous().to(hp.use_device).half()
+    torch_cond_seq_data_mask_mask = torch.tensor(cond_seq_repr_mix_mask_mask).contiguous().to(hp.use_device).half()
     x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device).half()
     x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device).half()
 
@@ -397,6 +413,7 @@ if input_tier_condition_tag is None:
         pred_out = model(x_in, x_mask=x_mask_in,
                          memory_condition=torch_cond_seq_data_batch,
                          memory_condition_mask=torch_cond_seq_data_mask,
+                         memory_condition_mask_mask=torch_cond_seq_data_mask_mask,
                          batch_norm_flag=batch_norm_flag)
 else:
     cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
@@ -429,7 +446,7 @@ if args.terminate_early_attention_plot:
 
     for _i in range(hp.real_batch_size):
         mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
-        text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
+        text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
         # matshow vs imshow?
         this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:mel_cut, :text_cut]
         this_att = this_att.astype("float32")
@@ -445,6 +462,7 @@ if args.terminate_early_attention_plot:
 def fast_sample(x, x_mask=None,
                    spatial_condition=None,
                    memory_condition=None, memory_condition_mask=None,
+                   memory_condition_mask_mask=None,
                    bias_boundary="default",
                    batch_norm_flag=0.,
                    verbose=True):
@@ -453,15 +471,23 @@ def fast_sample(x, x_mask=None,
     x = new_x
     if spatial_condition is None:
         assert memory_condition is not None
-        mem, mem_e = model.embed_text(memory_condition)
+        mem_a, mem_a_e = model.embed_ascii(memory_condition)
+        mem_p, mem_p_e = model.embed_phone(memory_condition)
+        # condition mask is 0 where it is ascii, 1 where it is phone
+        mem_j = memory_condition_mask[..., None] * mem_p + (1. - memory_condition_mask[..., None]) * mem_a
+        mem_m, mem_m_e = model.embed_mask(memory_condition_mask[..., None])
 
-        #mem_conv = self.conv_text([mem], batch_norm_flag)
-        # mask based on the conditioning mask
+        mem_f = mem_j + mem_m
 
-        #mem_conv = mem_conv * memory_condition_mask[..., None]
+        # doing bn in 16 bit is sketch to say the least
+        mem_conv = model.conv_text([mem_f], batch_norm_flag)
+        # mask based on the actual conditioning mask
+        mem_conv = mem_conv * memory_condition_mask_mask[..., None]
 
         # use mask in BiLSTM
-        mem_lstm = model.bilstm_text([mem], input_mask=memory_condition_mask)
+        mem_lstm = model.bilstm_text([mem_conv], input_mask=memory_condition_mask_mask)
+
+        # use mask in BiLSTM
         # x currently batch, time, freq, 1
         # mem time, batch, feat
         # feed mask for attention calculations as well
@@ -473,6 +499,7 @@ def fast_sample(x, x_mask=None,
         # b t f feat
         mem_lstm = mem_lstm
         memory_condition_mask = memory_condition_mask
+        memory_condition_mask_mask = memory_condition_mask_mask
         if bias_boundary == "default":
             start_time_index = x.shape[1] // 2
             start_freq_index = 0
@@ -485,12 +512,13 @@ def fast_sample(x, x_mask=None,
         min_attention_step = .0
         mn_out, alignment, attn_extras = model.mn_t.sample([x_a], time_index=time_index, freq_index=freq_index,
                                                                   is_initial_step=is_initial_step,
-                                                                  memory=mem_lstm, memory_mask=memory_condition_mask,
+                                                                  memory=mem_lstm, memory_mask=memory_condition_mask_mask,
                                                                   min_attention_step=min_attention_step)
         is_initial_step = False
 
         mem_lstm = mem_lstm
         memory_condition_mask = memory_condition_mask
+        memory_condition_mask_mask = memory_condition_mask_mask
         x[:, start_time_index:, :] *= 0
 
         if verbose:
@@ -505,7 +533,7 @@ def fast_sample(x, x_mask=None,
             for _jj in range(start_freq_index, max_freq_step):
                 mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
                                                                         is_initial_step=is_initial_step,
-                                                                        memory=mem_lstm, memory_mask=memory_condition_mask,
+                                                                        memory=mem_lstm, memory_mask=memory_condition_mask_mask,
                                                                         min_attention_step=min_attention_step)
                 x[:, _ii, _jj, 0] = mn_out.squeeze()
                 if verbose:
@@ -653,7 +681,7 @@ for _i in range(hp.real_batch_size):
     if input_tier_condition_tag is None:
         for _i in range(hp.real_batch_size):
             mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
-            text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
+            text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
             # matshow vs imshow?
             this_att = teacher_forced_attn[:, _i, 0][:mel_cut, :text_cut]
             this_att = this_att.cpu().data.numpy().astype("float32")
@@ -734,7 +762,6 @@ else:
         # because there is overlap in the frame calcs, take the nearest frame boundary
         bias_til = int(downsampled_frame_index)
 
-# dont go smaller than 0
 bias_til = max(0, bias_til - input_bias_data_frame_offset)
 
 remaining_steps = time_len - bias_til
@@ -813,10 +840,24 @@ if input_custom_conditioning_json is not None:
         json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
         f.write(json_string)
 
-    cond_seq_data_batch, cond_seq_mask, _, __ = speech.format_minibatch(valid_el, is_sampling=True)
+    # need to form new cmd line here
+    r = speech.format_minibatch(valid_el,
+                                quantize_to_n_bins=None)
+    cond_seq_data_repr_mix_batch = r[0]
+    cond_seq_repr_mix_mask = r[1]
+    cond_seq_repr_mix_mask_mask = r[2]
+    #cond_seq_data_ascii_batch = r[3]
+    #cond_seq_ascii_mask = r[4]
+    #cond_seq_data_phoneme_batch = r[5]
+    #cond_seq_phoneme_mask = r[6]
+    #data_batch = r[7]
+    #data_mask = r[8]
 
-    torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
-    torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
+    #cond_seq_data_batch, cond_seq_mask, _, __ = speech.format_minibatch(valid_el)
+
+    torch_cond_seq_data_batch = torch.tensor(cond_seq_data_repr_mix_batch[..., None]).contiguous().to(hp.use_device)
+    torch_cond_seq_data_mask = torch.tensor(cond_seq_repr_mix_mask).contiguous().to(hp.use_device)
+    torch_cond_seq_data_mask_mask = torch.tensor(cond_seq_repr_mix_mask_mask).contiguous().to(hp.use_device)
 
 if input_attention_early_termination_file == None:
     last_sil_frame_scaled = np.inf
@@ -846,13 +887,16 @@ sample_mask = torch.tensor(sample_mask).contiguous().to(hp.use_device)
 
 # for checking / debugging converted symbols
 rev_p = {v: k for k, v in speech.phone_lookup.items()}
-cond_syms = [rev_p[el] for el in torch_cond_seq_data_batch.cpu().data.numpy().ravel()]
+
+# fix this!
+#cond_syms = [rev_p[el] for el in torch_cond_seq_data_batch.cpu().data.numpy().ravel()]
 
 with torch.no_grad():
     pred_out = fast_sample(sample_buffer,
                            x_mask=sample_mask,
                            memory_condition=torch_cond_seq_data_batch,
                            memory_condition_mask=torch_cond_seq_data_mask,
+                           memory_condition_mask_mask=torch_cond_seq_data_mask_mask,
                            # boundary?
                            bias_boundary=bias_til,
                            batch_norm_flag=batch_norm_flag)
@@ -969,7 +1013,7 @@ for _i in range(hp.real_batch_size):
     if input_tier_condition_tag is None:
         for _i in range(hp.real_batch_size):
             mel_cut = int(sample_mask[_i, :, 0, 0].cpu().data.numpy().sum())
-            text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
+            text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
             # matshow vs imshow?
             this_att = teacher_forced_attn[:, _i, 0][:mel_cut, :text_cut]
             this_att = this_att.cpu().data.numpy().astype("float32")
@@ -1017,7 +1061,7 @@ from IPython import embed; embed(); raise ValueError()
 
 for _i in range(hp.real_batch_size):
     mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
-    text_cut = int(torch_cond_seq_data_mask[:, _i].cpu().data.numpy().sum())
+    text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
     # matshow vs imshow?
     plt.imshow(teacher_forced_attn[..., _i].cpu().data.numpy()[:mel_cut, :text_cut])
     plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))

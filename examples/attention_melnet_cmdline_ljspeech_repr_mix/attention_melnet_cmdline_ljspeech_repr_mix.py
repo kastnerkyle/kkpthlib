@@ -308,6 +308,7 @@ def build_model(hp):
                 assert memory_condition is not None
                 mem_a, mem_a_e = self.embed_ascii(memory_condition)
                 mem_p, mem_p_e = self.embed_phone(memory_condition)
+                # condition mask is 0 where it is ascii, 1 where it is phone
                 mem_j = memory_condition_mask[..., None] * mem_p + (1. - memory_condition_mask[..., None]) * mem_a
                 mem_m, mem_m_e = self.embed_mask(memory_condition_mask[..., None])
 
@@ -315,7 +316,7 @@ def build_model(hp):
 
                 # doing bn in 16 bit is sketch to say the least
                 mem_conv = self.conv_text([mem_f], batch_norm_flag)
-                # mask based on the conditioning mask
+                # mask based on the actual conditioning mask
                 mem_conv = mem_conv * memory_condition_mask_mask[..., None]
 
                 # use mask in BiLSTM
