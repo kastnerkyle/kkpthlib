@@ -60,7 +60,6 @@ parser.add_argument('--previous_saved_optimizer_path', type=str, default=None,
 parser.add_argument('--n_previous_save_steps', type=str, default=None,
                     help='number of save steps taken for previously run model, used to "replay" the data generator back to the same point')
 
-
 parser.add_argument('--terminate_early_attention_plot', action="store_true",
                     help='flag to terminate early for attention plotting meta-scripts')
 
@@ -96,6 +95,8 @@ parser.add_argument('--bias_data_frame_offset', type=int, default=0,
                     help='offset to mix into automatic data bias cuts, negative is "forward" in time, positive is "backward" in time')
 parser.add_argument('--bias_split_gap', type=float, default=0.05,
                     help='gap between bias text and generation')
+parser.add_argument('--override_dataset_path', type=str, default=None,
+                    help='string that overrides the default dataset path')
 
 parser.add_argument('--p_cutoff', type=float, default=.5,
                     help='cutoff to use in top p sampling (default .5)')
@@ -169,6 +170,7 @@ if args.output_dir is None:
 input_output_dir = args.output_dir if args.output_dir[-1] == "/" else args.output_dir + "/"
 input_bias_data_frame_offset = int(args.bias_data_frame_offset)
 input_bias_split_gap = float(args.bias_split_gap)
+input_override_dataset_path = str(args.override_dataset_path) if args.override_dataset_path is not None else None
 
 assert len(input_size_at_depth) == 2
 assert len(input_tier_input_tag) == 2
@@ -275,6 +277,15 @@ data_random_state = np.random.RandomState(hp.random_seed)
 folder_base = "/usr/local/data/kkastner/ljspeech_cleaned"
 fixed_minibatch_time_secs = 4
 fraction_train_split = .9
+dataset_name = folder_base.split("/")[-1]
+dataset_max_limit = fixed_minibatch_time_secs
+axis_splits_str = "".join([str(aa) for aa in input_axis_split_list])
+axis_size_str = "{}x{}".format(input_size_at_depth[0], input_size_at_depth[1])
+tier_depth_str = str(input_tier_input_tag[0])
+
+if input_override_dataset_path is not None:
+    folder_base = input_override_dataset_path
+
 speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              wav_folder=folder_base + "/wavs/",
                              alignment_folder=folder_base + "/alignment_json/",
@@ -282,12 +293,6 @@ speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              extract_subsequences=False,
                              train_split=fraction_train_split,
                              random_state=data_random_state)
-
-dataset_name = folder_base.split("/")[-1]
-dataset_max_limit = fixed_minibatch_time_secs
-axis_splits_str = "".join([str(aa) for aa in input_axis_split_list])
-axis_size_str = "{}x{}".format(input_size_at_depth[0], input_size_at_depth[1])
-tier_depth_str = str(input_tier_input_tag[0])
 
 # hardcoded per-dimension mean and std for mel data from the training iterator, read from a file
 full_cached_mean_std_name_for_experiment = "{}_max{}secs_{}splits_{}sz_{}tierdepth_mean_std.npz".format(dataset_name,
