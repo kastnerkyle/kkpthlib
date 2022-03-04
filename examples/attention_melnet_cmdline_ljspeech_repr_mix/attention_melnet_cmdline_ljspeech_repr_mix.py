@@ -266,8 +266,8 @@ def build_model(hp):
                 self.embed_mask = Embedding(2, hp.hidden_dim, random_state=random_state,
                                             name="tier_{}_{}_sz_{}_{}_embed_mask".format(input_tier_input_tag[0], input_tier_input_tag[1], hp.input_image_size[0], hp.input_image_size[1]), device=hp.use_device)
 
-                self.conv_text = SequenceConv1dStack([hp.hidden_dim], hp.hidden_dim, n_stacks=3, random_state=random_state,
-                                                     name="tier_{}_{}_sz_{}_{}_conv_text".format(input_tier_input_tag[0], input_tier_input_tag[1], hp.input_image_size[0], hp.input_image_size[1]), device=hp.use_device)
+                #self.conv_text = SequenceConv1dStack([hp.hidden_dim], hp.hidden_dim, n_stacks=3, random_state=random_state,
+                #                                     name="tier_{}_{}_sz_{}_{}_conv_text".format(input_tier_input_tag[0], input_tier_input_tag[1], hp.input_image_size[0], hp.input_image_size[1]), device=hp.use_device)
                 # divided by 2 so the output is hp.hidden_dim
                 self.bilstm_text = BiLSTMLayer([hp.hidden_dim], hp.hidden_dim // 2, random_state=random_state,
                                                init=hp.melnet_init,
@@ -315,12 +315,13 @@ def build_model(hp):
                 mem_f = mem_j + mem_m
 
                 # doing bn in 16 bit is sketch to say the least
-                mem_conv = self.conv_text([mem_f], batch_norm_flag)
+                #mem_conv = self.conv_text([mem_f], batch_norm_flag)
                 # mask based on the actual conditioning mask
-                mem_conv = mem_conv * memory_condition_mask_mask[..., None]
+                #mem_conv = mem_conv * memory_condition_mask_mask[..., None]
+                mem_f = mem_f * memory_condition_mask_mask[..., None]
 
                 # use mask in BiLSTM
-                mem_lstm = self.bilstm_text([mem_conv], input_mask=memory_condition_mask_mask)
+                mem_lstm = self.bilstm_text([mem_f], input_mask=memory_condition_mask_mask)
                 # x currently batch, time, freq, 1
                 # mem time, batch, feat
                 # feed mask for attention calculations as well

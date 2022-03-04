@@ -480,12 +480,14 @@ def fast_sample(x, x_mask=None,
         mem_f = mem_j + mem_m
 
         # doing bn in 16 bit is sketch to say the least
-        mem_conv = model.conv_text([mem_f], batch_norm_flag)
+        #mem_conv = model.conv_text([mem_f], batch_norm_flag)
         # mask based on the actual conditioning mask
-        mem_conv = mem_conv * memory_condition_mask_mask[..., None]
+        #mem_conv = mem_conv * memory_condition_mask_mask[..., None]
+
+        mem_f = mem_f * memory_condition_mask_mask[..., None]
 
         # use mask in BiLSTM
-        mem_lstm = model.bilstm_text([mem_conv], input_mask=memory_condition_mask_mask)
+        mem_lstm = model.bilstm_text([mem_f], input_mask=memory_condition_mask_mask)
 
         # use mask in BiLSTM
         # x currently batch, time, freq, 1
@@ -852,6 +854,13 @@ if input_custom_conditioning_json is not None:
     #cond_seq_phoneme_mask = r[6]
     #data_batch = r[7]
     #data_mask = r[8]
+
+
+    #r2 = speech.format_minibatch(old_valid_el,
+    #                             quantize_to_n_bins=None)
+    #old_cond_seq_data_repr_mix_batch = r2[0]
+    #old_cond_seq_repr_mix_mask = r2[1]
+    #old_cond_seq_repr_mix_mask_mask = r2[2]
 
     #cond_seq_data_batch, cond_seq_mask, _, __ = speech.format_minibatch(valid_el)
 
