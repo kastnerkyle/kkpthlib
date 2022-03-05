@@ -291,6 +291,8 @@ speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
                              alignment_folder=folder_base + "/alignment_json/",
                              fixed_minibatch_time_secs=fixed_minibatch_time_secs,
                              extract_subsequences=False,
+                             force_mini_sample=True,
+                             combine_all_into_valid=True,
                              train_split=fraction_train_split,
                              random_state=data_random_state)
 
@@ -344,7 +346,6 @@ elif input_use_sample_index[0] != 0 or input_use_sample_index[1] != 0:
     valid_el = [this_valid_el[input_use_sample_index[1]]] * hp.real_batch_size
 else:
     valid_el = speech.get_valid_utterances(hp.real_batch_size)
-
 
 cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el, is_sampling=True)
 

@@ -35,6 +35,7 @@ class EnglishSpeechCorpus(object):
                        fixed_minibatch_time_secs=6,
                        build_skiplist=True,
                        bypass_checks=False,
+                       force_mini_sample=False,
                        combine_all_into_valid=False,
                        sample_rate=22050,
                        random_state=None):
@@ -62,7 +63,7 @@ class EnglishSpeechCorpus(object):
         self.build_skiplist = build_skiplist
         self.combine_all_into_valid = combine_all_into_valid
 
-        if get_username() == "root":
+        if get_username() == "root" or force_mini_sample:
             print("WARNING: detected colab environment (due to username 'root'), using mini_robovoice settings to sample!\nThese settings will use all data in {} for both train and valid sets!".format(metadata_csv))
             self.bypass_checks = True
             self.combine_all_info_valid = True
