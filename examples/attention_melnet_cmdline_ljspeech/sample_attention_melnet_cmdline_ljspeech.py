@@ -862,7 +862,7 @@ cond_syms = [rev_p[el] for el in torch_cond_seq_data_batch.cpu().data.numpy().ra
 
 if use_half:
     torch_cond_seq_data_batch = torch.tensor(torch_cond_seq_data_batch.cpu().data.numpy()).contiguous().to(hp.use_device).half()
-    torch_cond_seq_data_mask = torch.tensor(torch_cond_seq_data_batch.cpu().data.numpy()).contiguous().to(hp.use_device).half()
+    torch_cond_seq_data_mask = torch.tensor(torch_cond_seq_data_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
     sample_buffer = torch.tensor(sample_buffer.cpu().data.numpy()).contiguous().to(hp.use_device).half()
     sample_mask = torch.tensor(sample_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
 
