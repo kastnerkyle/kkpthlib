@@ -98,6 +98,9 @@ parser.add_argument('--bias_split_gap', type=float, default=0.05,
 parser.add_argument('--override_dataset_path', type=str, default=None,
                     help='string that overrides the default dataset path')
 
+parser.add_argument('--use_half', action="store_true",
+                    help='whether to use half precision or not')
+
 parser.add_argument('--p_cutoff', type=float, default=.5,
                     help='cutoff to use in top p sampling (default .5)')
 parser.add_argument('--samples_to_average', type=int, default=10,
@@ -255,7 +258,7 @@ sys.path.pop(0)
 hp = get_hparams()
 model = build_model(hp)
 
-use_half = False
+use_half = args.use_half
 if use_half:
     model.half()  # convert to half precision
     for layer in model.modules():
