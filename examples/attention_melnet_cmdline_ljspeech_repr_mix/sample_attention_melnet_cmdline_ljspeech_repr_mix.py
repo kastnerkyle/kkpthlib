@@ -319,8 +319,8 @@ if input_use_sample_index is not None:
     # used this to get names of minibatch examples to form mini dataset
     # not used right now but may be logged in the future
     store_valid_els = []
-    for _ in range(input_use_sample_index[0] + 1):
-        this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
+    for _ii in range(input_use_sample_index[0] + 1):
+        this_valid_el = speech.get_utterances(hp.real_batch_size, [speech.valid_keys[_ii]], do_not_filter=True)
         store_valid_els.append(this_valid_el)
     valid_el = [store_valid_els[input_use_sample_index[0]][input_use_sample_index[1]]] * hp.real_batch_size
 elif args.use_longest:
