@@ -348,6 +348,8 @@ else:
 #cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
 
 r = speech.format_minibatch(valid_el,
+                            is_sampling=True,
+                            force_start_crop=True,
                             quantize_to_n_bins=None)
 cond_seq_data_repr_mix_batch = r[0]
 cond_seq_repr_mix_mask = r[1]
@@ -828,7 +830,8 @@ if input_custom_conditioning_json is not None:
     # now to splice the transcripts, find the first occurence of the word that would have followed, split on that
     search_key = next_pre_word["word"]
     matches = [(m.start(0), m.end(0)) for m in re.finditer(search_key, tmp[k]["transcript"])]
-    matches_in_pre = np.where([1 if w["word"] == search_key else 0 for w in pre_words])[0]
+    matches_in_pre = np.where([1 if ("alignedWord" in w and w["alignedWord"] == search_key) or ("word" in w and w["word"] == search_key) else 0 for w in pre_words])[0]
+
     if len(matches_in_pre) > 0:
         this_match = matches[len(matches_in_pre)]
     else:
@@ -850,6 +853,8 @@ if input_custom_conditioning_json is not None:
 
     # need to form new cmd line here
     r = speech.format_minibatch(valid_el,
+                                is_sampling=True,
+                                force_start_crop=True,
                                 quantize_to_n_bins=None)
     cond_seq_data_repr_mix_batch = r[0]
     cond_seq_repr_mix_mask = r[1]
