@@ -67,7 +67,7 @@ parser.add_argument('--batch_skips', type=int, default=0,
                     help='number of batches to skip before sampling - allows us to sample different examples!')
 parser.add_argument('--use_longest', action="store_true",
                     help='flag to use the longest of N examples for sampling due to biasing')
-parser.add_argument('--use_sample_index', type=str, default="0,0",
+parser.add_argument('--use_sample_index', type=str, default=None,
                     help='flag to use for deterministic sampling of same entry')
 
 parser.add_argument('--custom_conditioning_json', type=str, default=None,
@@ -157,7 +157,7 @@ input_real_batch_size = int(args.real_batch_size)
 input_batch_skips =int(args.batch_skips)
 input_virtual_batch_size = int(args.virtual_batch_size)
 input_tier_input_tag = [int(el) for el in args.tier_input_tag.split(",")]
-input_use_sample_index = [int(el) for el in args.use_sample_index.split(",")]
+input_use_sample_index = [int(el) for el in args.use_sample_index.split(",")] if args.use_sample_index is not None else None
 if args.custom_conditioning_json is not None:
     input_custom_conditioning_json = str(args.custom_conditioning_json)
 else:
@@ -315,7 +315,8 @@ if input_batch_skips > 0:
         tmp = speech.get_valid_utterances(hp.real_batch_size)
 
 # TODO: fix?
-if input_use_sample_index[0] != 0 or input_use_sample_index[1] != 0:
+if input_use_sample_index is not None:
+    #if input_use_sample_index[0] != 0 or input_use_sample_index[1] != 0:
     # used this to get names of minibatch examples to form mini dataset
     # not used right now but may be logged in the future
     store_valid_els = []
