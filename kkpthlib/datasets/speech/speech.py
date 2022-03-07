@@ -562,6 +562,7 @@ class EnglishSpeechCorpus(object):
     def format_minibatch(self, utterances,
                          symbol_type=None,
                          is_sampling=False,
+                         force_start_crop=False,
                          pause_duration_breakpoints=None,
                          write_out_debug_info=False,
                          quantize_to_n_bins=None):
@@ -692,6 +693,7 @@ class EnglishSpeechCorpus(object):
                             else:
                                 # chunk was too short to use due to configured min length
                                 pass
+
                     # choose a single crop to use from availables
                     # prefer non-cropped versions, but if a cropped one is necessary use that instead
                     selected_seq = None
@@ -700,22 +702,44 @@ class EnglishSpeechCorpus(object):
                         mid_to_mid_tmp = [t for t in mid_to_mid if t[-1] == is_cropped]
                         mid_to_end_tmp = [t for t in mid_to_end if t[-1] == is_cropped]
                         choices = [0, 1, 2]
-                        comb = [start_to_mid_tmp, mid_to_mid_tmp, mid_to_end_tmp]
                         # shuffle choices of start to mid mid to mid mid to end
                         self.random_state.shuffle(choices)
+                        if force_start_crop:
+                            choices[0] = 0
+                            choices[1] = 1
+                            choices[2] = 2
+                            if is_cropped and len(start_to_mid_tmp) == 0:
+                                start_to_mid_tmp = [(words, 0, len(words), False)]
+
+                        comb = [start_to_mid_tmp, mid_to_mid_tmp, mid_to_end_tmp]
+
                         for c in choices:
-                            if len(comb[c]) == 0:
-                                pass
-                            else:
-                                selected = self.random_state.choice(len(comb[c]))
-                                selected_seq = comb[c][selected]
-                                if c == 0:
-                                    crop_type = "start_to_mid"
-                                elif c == 1:
-                                    crop_type = "mid_to_mid"
-                                elif c == 2:
-                                    crop_type = "mid_to_end"
+                            if force_start_crop:
+                                # should be all start to mid crops
+                                selected = comb[0]
+                                # pick longest subsequence that fits in the time / frame window
+                                selected_seq = None
+                                for _lclii in range(len(selected)):
+                                    if selected_seq is None:
+                                         selected_seq = selected[_lclii]
+                                    else:
+                                         if selected[_lclii][0][-1]["end"] > selected_seq[0][-1]["end"] and selected[_lclii][0][-1]["end"] < self.max_length_time_secs:
+                                             selected_seq = selected[_lclii]
+                                crop_type = "start_to_mid"
                                 break
+                            else:
+                                if len(comb[c]) == 0:
+                                    pass
+                                else:
+                                    selected = self.random_state.choice(len(comb[c]))
+                                    selected_seq = comb[c][selected]
+                                    if c == 0:
+                                        crop_type = "start_to_mid"
+                                    elif c == 1:
+                                        crop_type = "mid_to_mid"
+                                    elif c == 2:
+                                        crop_type = "mid_to_end"
+                                    break
                         if selected_seq is not None:
                             break
 

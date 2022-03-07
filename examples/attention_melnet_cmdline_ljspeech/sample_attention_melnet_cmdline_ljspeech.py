@@ -351,7 +351,9 @@ elif args.use_longest:
 else:
     valid_el = speech.get_valid_utterances(hp.real_batch_size)
 
-cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el, is_sampling=True)
+cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el,
+                                                                                    is_sampling=True,
+                                                                                    force_start_crop=True)
 
 batch_norm_flag = 1.
 
@@ -806,7 +808,8 @@ if input_custom_conditioning_json is not None:
     # now to splice the transcripts, find the first occurence of the word that would have followed, split on that
     search_key = next_pre_word["word"]
     matches = [(m.start(0), m.end(0)) for m in re.finditer(search_key, tmp[k]["transcript"])]
-    matches_in_pre = np.where([1 if w["word"] == search_key else 0 for w in pre_words])[0]
+    matches_in_pre = np.where([1 if ("alignedWord" in w and w["alignedWord"] == search_key) or ("word" in w and w["word"] == search_key) else 0 for w in pre_words])[0]
+
     if len(matches_in_pre) > 0:
         this_match = matches[len(matches_in_pre)]
     else:
@@ -826,7 +829,9 @@ if input_custom_conditioning_json is not None:
         json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
         f.write(json_string)
 
-    cond_seq_data_batch, cond_seq_mask, _, __ = speech.format_minibatch(valid_el, is_sampling=True)
+    cond_seq_data_batch, cond_seq_mask, _, __ = speech.format_minibatch(valid_el,
+                                                                        is_sampling=True,
+                                                                        force_start_crop=True)
 
     torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
     torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)
