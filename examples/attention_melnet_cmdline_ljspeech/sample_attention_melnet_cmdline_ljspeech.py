@@ -315,7 +315,20 @@ if input_batch_skips > 0:
         tmp = speech.get_valid_utterances(hp.real_batch_size)
 
 # TODO: fix?
-if args.use_longest:
+if input_use_sample_index[0] != 0 or input_use_sample_index[1] != 0:
+    # used this to get names of minibatch examples to form mini dataset
+    # not used right now but may be logged in the future
+    store_valid_els = []
+    for _ in range(input_use_sample_index[0] + 1):
+        this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
+        store_valid_els.append(this_valid_el)
+    names = []
+    for _ii in range(len(store_valid_els)):
+        for _jj in range(len(store_valid_els[_ii])):
+            n = list(store_valid_els[_ii][_jj][3].keys())[0]
+            names.append(n)
+    valid_el = [store_valid_els[input_use_sample_index[0]][input_use_sample_index[1]]] * hp.real_batch_size
+elif args.use_longest:
     # sample 50 minibatches, find longest N examples of that...
     print("Performing length selection to choose base samples for biasing")
     valid_el = None
@@ -334,19 +347,6 @@ if args.use_longest:
                         kept_indices[0][kept] = itr_offset
                         kept_indices[1][kept] = candidate
                         break
-elif input_use_sample_index[0] != 0 or input_use_sample_index[1] != 0:
-    # used this to get names of minibatch examples to form mini dataset
-    # not used right now but may be logged in the future
-    store_valid_els = []
-    for _ in range(input_use_sample_index[0]):
-        this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
-        store_valid_els.append(this_valid_el)
-    names = []
-    for _ii in range(len(store_valid_els)):
-        for _jj in range(len(store_valid_els[_ii])):
-            n = list(store_valid_els[_ii][_jj][3].keys())[0]
-            names.append(n)
-    valid_el = [this_valid_el[input_use_sample_index[1]]] * hp.real_batch_size
 else:
     valid_el = speech.get_valid_utterances(hp.real_batch_size)
 

@@ -60,7 +60,6 @@ parser.add_argument('--previous_saved_optimizer_path', type=str, default=None,
 parser.add_argument('--n_previous_save_steps', type=str, default=None,
                     help='number of save steps taken for previously run model, used to "replay" the data generator back to the same point')
 
-
 parser.add_argument('--terminate_early_attention_plot', action="store_true",
                     help='flag to terminate early for attention plotting meta-scripts')
 
@@ -94,6 +93,13 @@ parser.add_argument('--bias_data_start', type=float, default=.5,
                     help='amount of data to use from gt biasing data')
 parser.add_argument('--bias_data_frame_offset', type=int, default=0,
                     help='offset to mix into automatic data bias cuts, negative is "forward" in time, positive is "backward" in time')
+parser.add_argument('--bias_split_gap', type=float, default=0.05,
+                    help='gap between bias text and generation')
+parser.add_argument('--override_dataset_path', type=str, default=None,
+                    help='string that overrides the default dataset path')
+
+parser.add_argument('--use_half', action="store_true",
+                    help='whether to use half precision or not')
 
 parser.add_argument('--p_cutoff', type=float, default=.5,
                     help='cutoff to use in top p sampling (default .5)')
@@ -166,6 +172,8 @@ if args.output_dir is None:
     raise ValueError("No output_dir passed! Required for sampling")
 input_output_dir = args.output_dir if args.output_dir[-1] == "/" else args.output_dir + "/"
 input_bias_data_frame_offset = int(args.bias_data_frame_offset)
+input_bias_split_gap = float(args.bias_split_gap)
+input_override_dataset_path = str(args.override_dataset_path) if args.override_dataset_path is not None else None
 
 assert len(input_size_at_depth) == 2
 assert len(input_tier_input_tag) == 2
@@ -250,7 +258,7 @@ sys.path.pop(0)
 hp = get_hparams()
 model = build_model(hp)
 
-use_half = False
+use_half = args.use_half
 if use_half:
     model.half()  # convert to half precision
     for layer in model.modules():
@@ -272,21 +280,24 @@ data_random_state = np.random.RandomState(hp.random_seed)
 folder_base = "/usr/local/data/kkastner/ljspeech_cleaned"
 fixed_minibatch_time_secs = 4
 fraction_train_split = .9
-speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
-                             wav_folder=folder_base + "/wavs/",
-                             alignment_folder=folder_base + "/alignment_json/",
-                             fixed_minibatch_time_secs=fixed_minibatch_time_secs,
-                             symbol_type="representation_mixed",
-                             extract_subsequences=False,
-                             train_split=fraction_train_split,
-                             random_state=data_random_state)
-
 dataset_name = folder_base.split("/")[-1]
 dataset_max_limit = fixed_minibatch_time_secs
 axis_splits_str = "".join([str(aa) for aa in input_axis_split_list])
 axis_size_str = "{}x{}".format(input_size_at_depth[0], input_size_at_depth[1])
 tier_depth_str = str(input_tier_input_tag[0])
 
+if input_override_dataset_path is not None:
+    folder_base = input_override_dataset_path
+speech = EnglishSpeechCorpus(metadata_csv=folder_base + "/metadata.csv",
+                             wav_folder=folder_base + "/wavs/",
+                             alignment_folder=folder_base + "/alignment_json/",
+                             fixed_minibatch_time_secs=fixed_minibatch_time_secs,
+                             symbol_type="representation_mixed",
+                             extract_subsequences=False,
+                             force_mini_sample=True,
+                             combine_all_into_valid=True,
+                             train_split=fraction_train_split,
+                             random_state=data_random_state)
 # hardcoded per-dimension mean and std for mel data from the training iterator, read from a file
 full_cached_mean_std_name_for_experiment = "{}_max{}secs_{}splits_{}sz_{}tierdepth_mean_std.npz".format(dataset_name,
                                                                                                         dataset_max_limit,
@@ -303,7 +314,15 @@ if input_batch_skips > 0:
         tmp = speech.get_valid_utterances(hp.real_batch_size)
 
 # TODO: fix?
-if args.use_longest:
+if input_use_sample_index[0] != 0 or input_use_sample_index[1] != 0:
+    # used this to get names of minibatch examples to form mini dataset
+    # not used right now but may be logged in the future
+    store_valid_els = []
+    for _ in range(input_use_sample_index[0] + 1):
+        this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
+        store_valid_els.append(this_valid_el)
+    valid_el = [store_valid_els[input_use_sample_index[0]][input_use_sample_index[1]]] * hp.real_batch_size
+elif args.use_longest:
     # sample 50 minibatches, find longest N examples of that...
     print("Performing length selection to choose base samples for biasing")
     valid_el = None
@@ -322,17 +341,8 @@ if args.use_longest:
                         kept_indices[0][kept] = itr_offset
                         kept_indices[1][kept] = candidate
                         break
-elif input_use_sample_index[0] != 0 or input_use_sample_index[1] != 0:
-    # used this to get names of minibatch examples to form mini dataset
-    # not used right now but may be logged in the future
-    store_valid_els = []
-    for _ in range(input_use_sample_index[0] + 1):
-        this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
-        store_valid_els.append(this_valid_el)
-    valid_el = [store_valid_els[input_use_sample_index[0]][input_use_sample_index[1]]] * hp.real_batch_size
 else:
     valid_el = speech.get_valid_utterances(hp.real_batch_size)
-
 
 #cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
 
@@ -803,7 +813,7 @@ if input_custom_conditioning_json is not None:
     pre_t = next_pre_word["start"]
     # add optional time gap, should be respected when the minibatch conditioning is created
     # model is sensitive to this, big gap -> model goes to silence
-    gap = .0
+    gap = input_bias_split_gap
     post_words = new["words"]
     for _i in range(len(post_words)):
         post_words[_i]["start"] = post_words[_i]["start"] + pre_t + gap
@@ -894,6 +904,12 @@ rev_p = {v: k for k, v in speech.phone_lookup.items()}
 
 # fix this!
 #cond_syms = [rev_p[el] for el in torch_cond_seq_data_batch.cpu().data.numpy().ravel()]
+if use_half:
+    torch_cond_seq_data_batch = torch.tensor(torch_cond_seq_data_batch.cpu().data.numpy()).contiguous().to(hp.use_device).half()
+    torch_cond_seq_data_mask = torch.tensor(torch_cond_seq_data_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
+    torch_cond_seq_data_mask_mask = torch.tensor(torch_cond_seq_data_mask_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
+    sample_buffer = torch.tensor(sample_buffer.cpu().data.numpy()).contiguous().to(hp.use_device).half()
+    sample_mask = torch.tensor(sample_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
 
 with torch.no_grad():
     pred_out = fast_sample(sample_buffer,
@@ -1060,328 +1076,3 @@ if input_tier_condition_tag is None:
 else:
     np.save(folder + "/" + "unnormalized_cond_input.npy", cond_np)
 print("finished sampling in {} sec".format(sample_completed - begin_time))
-sys.exit()
-from IPython import embed; embed(); raise ValueError()
-
-for _i in range(hp.real_batch_size):
-    mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
-    text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
-    # matshow vs imshow?
-    plt.imshow(teacher_forced_attn[..., _i].cpu().data.numpy()[:mel_cut, :text_cut])
-    plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
-    plt.savefig("teacher_forced_attn_{}.png".format(_i))
-    plt.close()
-
-
-#outs = sample_dml(pred_out)
-outs = pred_out * saved_std + saved_mean
-for _i in range(hp.real_batch_size):
-    reduced_mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
-    full_mel_cut = int(torch_data_mask[_i].cpu().data.numpy().sum())
-
-    plt.imshow(outs[_i, :reduced_mel_cut, :, 0].cpu().data.numpy())
-    plt.savefig("pred_x{}.png".format(_i))
-    plt.close()
-
-print("plotted")
-from IPython import embed; embed(); raise ValueError()
-
-if input_tier_condition_tag is None:
-    tag = str(args.experiment_name) + "_tier_{}_{}_sz_{}_{}".format(input_tier_input_tag[0], input_tier_input_tag[1],
-                                                                    input_size_at_depth[0], input_size_at_depth[1])
-else:
-    tag = str(args.experiment_name) + "_tier_{}_{}_cond_{}_{}_sz_{}_{}".format(input_tier_input_tag[0], input_tier_input_tag[1],
-                                                                               input_tier_condition_tag[0], input_tier_condition_tag[1],
-                                                                               input_size_at_depth[0], input_size_at_depth[1])
-folder_name = "sampled_" + tag
-if not os.path.exists(folder_name):
-    os.mkdir(folder_name)
-
-# sample and average?
-np_teacher_forced_pred = teacher_forced_pred.cpu().data.numpy()
-
-np_teacher_forced_samples = 0. * np_teacher_forced_pred[..., 0][..., None]
-
-global_temperature = float(args.temperature)
-global_sample_itr = int(args.samples_to_average)
-global_eps = 1E-3
-global_top_p = float(args.p_cutoff)
-global_bias_data_start = float(args.bias_data_start)
-
-def _q(s):
-    return str(s).replace(".", "pt")
-file_basename = tag + "_temperature_{}".format(_q(global_temperature))
-file_basename += "_samples_avg_{}".format(_q(global_sample_itr))
-file_basename += "_top_p_{}".format(_q(global_top_p))
-file_basename += "_bias_start_{}".format(_q(global_bias_data_start))
-
-eps = global_eps
-sample_itr = global_sample_itr
-temperature = global_temperature
-noise_random_state = np.random.RandomState(0)
-
-def get_top_p_mask(logits, top_p):
-    # 1 is keep 0 remove
-    all_indices_to_remove = []
-    shp = logits.shape
-    r_logits = logits.copy().reshape((-1, logits.shape[-1]))
-    for _i in range(len(r_logits)):
-        # ::-1 to reverse thus achieving descending order
-        sorted_indices = np.argsort(r_logits[_i])[::-1]
-        sorted_logits = r_logits[_i][sorted_indices]
-        cumulative_probs = np.cumsum(softmax_np(sorted_logits))
-
-        # Remove tokens with cumulative probability above the threshold
-        sorted_indices_to_remove = cumulative_probs > top_p
-        # Shift the indices to the right to keep also the first token above the threshold
-        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].copy()
-        sorted_indices_to_remove[..., 0] = 0
-
-        indices_to_remove = sorted_indices[sorted_indices_to_remove]
-        r_logits[_i, :] = 1.
-        r_logits[_i, indices_to_remove] = 0.
-    mask = r_logits.reshape(*shp)
-    return mask
-
-p_mask = get_top_p_mask(np_teacher_forced_pred, global_top_p)
-for i in range(sample_itr):
-    noise = -np.log(-np.log(np.clip(noise_random_state.uniform(size=np_teacher_forced_pred.shape) + eps, eps, 1. - eps)))
-    np_gumbel_noised_pred = np_teacher_forced_pred / temperature + noise
-    np_gumbel_pred = np.argmax(p_mask * np_gumbel_noised_pred + (1. - p_mask) * 1E-10, axis=-1)[..., None]
-    np_teacher_forced_samples += np_gumbel_pred
-np_teacher_forced_samples /= float(sample_itr)
-np_teacher_forced_samples = np.clip(np_teacher_forced_samples, 0, 255).astype("int32").astype("float32")
-
-np_teacher_forced_argmax = np.argmax(teacher_forced_pred.cpu().data.numpy(), axis=-1)[..., None].astype("float32")
-np_teacher_forced_plot = np_teacher_forced_samples
-
-for i in range(data_batch.shape[0]):
-    if input_tier_condition_tag is None:
-        f, axarr = plt.subplots(1, 2)
-        axarr[1].matshow(np_teacher_forced_plot[i], cmap="gray")
-    else:
-        f, axarr = plt.subplots(1, 3)
-        axarr[1].matshow(teacher_forced_cond[i].cpu().data.numpy().astype("float32"), cmap="gray")
-        axarr[2].matshow(np_teacher_forced_plot[i], cmap="gray")
-    axarr[0].matshow(teacher_forced_in[i].cpu().data.numpy().astype("float32"), cmap="gray")
-
-    for el_j in range(len(axarr)):
-        axarr[el_j].axis("off")
-
-    plt.savefig(folder_name + "/" + file_basename + "_teacher_forced_pred{}.png".format(i))
-    plt.close()
-
-blank_data_batch = torch.tensor(np.zeros((data_batch.shape[0], input_size_at_depth[0], input_size_at_depth[1])).astype("float32"))
-blank_data_batch = blank_data_batch[..., None]
-
-if input_tier_condition_tag is None:
-    pred_out = model(blank_data_batch)
-else:
-    cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
-    pred_out = model(blank_data_batch, spatial_condition=cond)
-
-teacher_conditioned_pred = pred_out
-
-# sample tier 0
-noise_random_state = np.random.RandomState(0)
-blank_data_batch = 0. * np_teacher_forced_plot
-for i in range(blank_data_batch.shape[1]):
-    for j in range(blank_data_batch.shape[2]):
-        if i < (int(blank_data_batch.shape[1] * global_bias_data_start)):
-            blank_data_batch[:, i, j] = teacher_forced_in.cpu().data.numpy()[:, i, j]
-            print("{} {} cell complete".format(i, j))
-            continue
-
-        if input_tier_condition_tag is None:
-            pred_out = model(torch.tensor(blank_data_batch))
-        else:
-            cond = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
-            pred_out = model(torch.tensor(blank_data_batch), spatial_condition=cond)
-
-        np_pred = pred_out.cpu().data.numpy()
-        np_samples = 0. * np_pred[..., 0][..., None]
-        sample_itr = global_sample_itr
-        eps = global_eps
-        temperature = global_temperature
-        noise_random_state = np.random.RandomState(0)
-        p_mask = get_top_p_mask(np_pred, global_top_p)
-        for _i in range(sample_itr):
-            noise = -np.log(-np.log(np.clip(noise_random_state.uniform(size=np_pred.shape) + eps, eps, 1. - eps)))
-            np_gumbel_noised_pred = np_pred / temperature + noise
-            np_gumbel_pred = np.argmax(p_mask * np_gumbel_noised_pred + (1. - p_mask) * 1E-10, axis=-1)[..., None]
-            np_samples += np_gumbel_pred
-        np_samples /= float(sample_itr)
-        np_samples = np.clip(np_samples, 0, 255).astype("int32").astype("float32")
-        blank_data_batch[:, i, j] = np_samples[:, i, j]
-        print("{} {} cell complete".format(i, j))
-
-np_pure_samples = blank_data_batch
-for i in range(blank_data_batch.shape[0]):
-    if input_tier_condition_tag is None:
-        f, axarr = plt.subplots(1, 2)
-        axarr[0].matshow(np_pure_samples[i], cmap="gray")
-    else:
-        f, axarr = plt.subplots(1, 2)
-        axarr[0].matshow(teacher_forced_cond[i].cpu().data.numpy().astype("float32"), cmap="gray")
-        axarr[1].matshow(np_pure_samples[i], cmap="gray")
-    for el_j in range(len(axarr)):
-        axarr[el_j].axis("off")
-
-    plt.savefig(folder_name + "/" + file_basename + "_biased_sampled{}.png".format(i))
-    plt.close()
-
-np.save(folder_name + "/" + "samples_" + file_basename + ".npy", np_pure_samples)
-np.save(folder_name + "/" + "teacher_forced_samples_" + file_basename + ".npy", np_teacher_forced_samples)
-np.save(folder_name + "/" + "teacher_forced_argmax_" + file_basename + ".npy", np_teacher_forced_argmax)
-np.save(folder_name + "/" + "groundtruth_" + file_basename + ".npy", teacher_forced_in.cpu().data.numpy().astype("float32"))
-
-print("step")
-from IPython import embed; embed(); raise ValueError()
-
-for i in range(a_0_0.shape[1]):
-    for j in range(a_0_0.shape[2]):
-        r = model(blank, direct_x_0_0=lcl_blank)
-        pred_0_0 = r[0]
-        pred_0_1 = r[1]
-        pred_1_1 = r[2]
-        pred_2_1 = r[3]
-        pred_3_1 = r[4]
-
-        lcl_pred = pred_0_0.cpu().data.numpy()
-        eps = 1E-3
-        temp = 1.
-        noise = -np.log(-np.log(np.clip(noise_random_state.uniform(size=lcl_pred.shape) + eps, eps, 1. - eps)))
-        np_pred = np.argmax(softmax_np(lcl_pred + noise) / temp, axis=-1)
-        torch_r = torch.FloatTensor(np_pred[:, i, j][..., None])
-        lcl_blank[:, i, j] = torch_r
-        print("{}: {} {}".format(0, i, j))
-lcl_0_0 = lcl_blank
-print("sample tier 0 done")
-
-# sample tier 1
-blank = 0. * data_batch
-lcl_blank = 0. * x_0_1
-for i in range(a_0_1.shape[1]):
-    for j in range(a_0_1.shape[2]):
-        r = model(blank, direct_x_0_0=lcl_0_0, direct_x_0_1=lcl_blank)
-        pred_0_0 = r[0]
-        pred_0_1 = r[1]
-        pred_1_1 = r[2]
-        pred_2_1 = r[3]
-        pred_3_1 = r[4]
-
-        lcl_pred = pred_0_1.cpu().data.numpy()
-        eps = 1E-3
-        temp = 1.
-        noise = -np.log(-np.log(np.clip(noise_random_state.uniform(size=lcl_pred.shape) + eps, eps, 1. - eps)))
-        np_pred = np.argmax(softmax_np(lcl_pred + noise) / temp, axis=-1)
-        torch_r = torch.FloatTensor(np_pred[:, i, j][..., None])
-        lcl_blank[:, i, j] = torch_r
-        print("{}: {} {}".format(1, i, j))
-lcl_0_1 = lcl_blank
-lcl_1_0 = interleave(lcl_0_0, lcl_0_1, axis=1)
-print("sample tier 1 done")
-
-# sample tier 2
-blank = 0. * data_batch
-lcl_blank = 0. * x_1_1
-for i in range(a_1_1.shape[1]):
-    for j in range(a_1_1.shape[2]):
-        r = model(blank, direct_x_0_0=lcl_0_0, direct_x_0_1=lcl_0_1, direct_x_1_0=lcl_1_0, direct_x_1_1=lcl_blank)
-        pred_0_0 = r[0]
-        pred_0_1 = r[1]
-        pred_1_1 = r[2]
-        pred_2_1 = r[3]
-        pred_3_1 = r[4]
-
-        lcl_pred = pred_1_1.cpu().data.numpy()
-        eps = 1E-3
-        temp = 1.
-        noise = -np.log(-np.log(np.clip(noise_random_state.uniform(size=lcl_pred.shape) + eps, eps, 1. - eps)))
-        np_pred = np.argmax(softmax_np(lcl_pred + noise) / temp, axis=-1)
-        torch_r = torch.FloatTensor(np_pred[:, i, j][..., None])
-        lcl_blank[:, i, j] = torch_r
-        print("{}: {} {}".format(2, i, j))
-lcl_1_1 = lcl_blank
-lcl_2_0 = interleave(lcl_1_0, lcl_1_1, axis=2)
-print("sample tier 2 done")
-
-# sample tier 3
-blank = 0. * data_batch
-lcl_blank = 0. * x_2_1
-for i in range(a_2_1.shape[1]):
-    for j in range(a_2_1.shape[2]):
-        r = model(blank, direct_x_0_0=lcl_0_0, direct_x_0_1=lcl_0_1, direct_x_1_0=lcl_1_0, direct_x_1_1=lcl_1_1, direct_x_2_0=lcl_2_0,
-                         direct_x_2_1=lcl_blank)
-        pred_0_0 = r[0]
-        pred_0_1 = r[1]
-        pred_1_1 = r[2]
-        pred_2_1 = r[3]
-        pred_3_1 = r[4]
-
-        lcl_pred = pred_2_1.cpu().data.numpy()
-        eps = 1E-3
-        temp = 1.
-        noise = -np.log(-np.log(np.clip(noise_random_state.uniform(size=lcl_pred.shape) + eps, eps, 1. - eps)))
-        np_pred = np.argmax(softmax_np(lcl_pred + noise) / temp, axis=-1)
-        torch_r = torch.FloatTensor(np_pred[:, i, j][..., None])
-        lcl_blank[:, i, j] = torch_r
-        print("{}: {} {}".format(3, i, j))
-lcl_2_1 = lcl_blank
-lcl_3_0 = interleave(lcl_2_0, lcl_2_1, axis=1)
-print("sample tier 3 done")
-
-# sample tier 4
-blank = 0. * data_batch
-lcl_blank = 0. * x_3_1
-for i in range(a_3_1.shape[1]):
-    for j in range(a_3_1.shape[2]):
-        r = model(blank, direct_x_0_0=lcl_0_0, direct_x_0_1=lcl_0_1, direct_x_1_0=lcl_1_0, direct_x_1_1=lcl_1_1, direct_x_2_0=lcl_2_0,
-                         direct_x_2_1=lcl_2_1, direct_x_3_0=lcl_3_0, direct_x_3_1=lcl_blank)
-        pred_0_0 = r[0]
-        pred_0_1 = r[1]
-        pred_1_1 = r[2]
-        pred_2_1 = r[3]
-        pred_3_1 = r[4]
-
-        lcl_pred = pred_3_1.cpu().data.numpy()
-        eps = 1E-3
-        temp = 1.
-        noise = -np.log(-np.log(np.clip(noise_random_state.uniform(size=lcl_pred.shape) + eps, eps, 1. - eps)))
-        np_pred = np.argmax(softmax_np(lcl_pred + noise) / temp, axis=-1)
-        torch_r = torch.FloatTensor(np_pred[:, i, j][..., None])
-        lcl_blank[:, i, j] = torch_r
-        print("{}: {} {}".format(4, i, j))
-lcl_3_1 = lcl_blank
-lcl_out = interleave(lcl_3_0, lcl_3_1, axis=2)
-print("sample tier 4 done")
-
-# convert to numpy for plots
-lcl_0_0 = lcl_0_0.cpu().data.numpy().astype("float32")
-lcl_0_1 = lcl_0_1.cpu().data.numpy().astype("float32")
-lcl_1_0 = lcl_1_0.cpu().data.numpy().astype("float32")
-lcl_1_1 = lcl_1_1.cpu().data.numpy().astype("float32")
-lcl_2_0 = lcl_2_0.cpu().data.numpy().astype("float32")
-lcl_2_1 = lcl_2_1.cpu().data.numpy().astype("float32")
-lcl_3_0 = lcl_3_0.cpu().data.numpy().astype("float32")
-lcl_3_1 = lcl_3_1.cpu().data.numpy().astype("float32")
-lcl_out = lcl_out.cpu().data.numpy().astype("float32")
-
-for i in range(data_batch.shape[0]):
-    f, axarr = plt.subplots(1, 9)
-
-    axarr[0].matshow(lcl_0_0[i], cmap="gray")
-    axarr[1].matshow(lcl_0_1[i], cmap="gray")
-    axarr[2].matshow(lcl_1_0[i], cmap="gray")
-    axarr[3].matshow(lcl_1_1[i], cmap="gray")
-    axarr[4].matshow(lcl_2_0[i], cmap="gray")
-    axarr[5].matshow(lcl_2_1[i], cmap="gray")
-    axarr[6].matshow(lcl_3_0[i], cmap="gray")
-    axarr[7].matshow(lcl_3_1[i], cmap="gray")
-    axarr[8].matshow(lcl_out[i], cmap="gray")
-
-    for el_i in range(9):
-        axarr[el_i].axis("off")
-
-    plt.savefig("sampled/deep_samp{}.png".format(i))
-    plt.close()
