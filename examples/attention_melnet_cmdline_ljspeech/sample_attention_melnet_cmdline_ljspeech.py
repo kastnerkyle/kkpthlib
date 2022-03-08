@@ -95,6 +95,8 @@ parser.add_argument('--bias_data_frame_offset', type=int, default=0,
                     help='offset to mix into automatic data bias cuts, negative is "forward" in time, positive is "backward" in time')
 parser.add_argument('--bias_split_gap', type=float, default=0.05,
                     help='gap between bias text and generation')
+parser.add_argument('--force_end_punctuation', type=str, default=None,
+                    help='string that overrides the end of conditioning sequence symbol(s)')
 parser.add_argument('--override_dataset_path', type=str, default=None,
                     help='string that overrides the default dataset path')
 
@@ -174,6 +176,7 @@ input_output_dir = args.output_dir if args.output_dir[-1] == "/" else args.outpu
 input_bias_data_frame_offset = int(args.bias_data_frame_offset)
 input_bias_split_gap = float(args.bias_split_gap)
 input_override_dataset_path = str(args.override_dataset_path) if args.override_dataset_path is not None else None
+input_force_end_punctuation = str(args.force_end_punctuation) if args.force_end_punctuation is not None else None
 
 assert len(input_size_at_depth) == 2
 assert len(input_tier_input_tag) == 2
@@ -353,7 +356,8 @@ else:
 
 cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el,
                                                                                     is_sampling=True,
-                                                                                    force_start_crop=True)
+                                                                                    force_start_crop=True,
+                                                                                    force_end_punctuation=input_force_end_punctuation)
 
 batch_norm_flag = 1.
 
@@ -831,7 +835,8 @@ if input_custom_conditioning_json is not None:
 
     cond_seq_data_batch, cond_seq_mask, _, __ = speech.format_minibatch(valid_el,
                                                                         is_sampling=True,
-                                                                        force_start_crop=True)
+                                                                        force_start_crop=True,
+                                                                        force_end_punctuation=input_force_end_punctuation)
 
     torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device)
     torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device)

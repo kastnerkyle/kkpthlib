@@ -563,6 +563,7 @@ class EnglishSpeechCorpus(object):
                          symbol_type=None,
                          is_sampling=False,
                          force_start_crop=False,
+                         force_end_punctuation=None,
                          pause_duration_breakpoints=None,
                          write_out_debug_info=False,
                          quantize_to_n_bins=None):
@@ -828,6 +829,10 @@ class EnglishSpeechCorpus(object):
                 else:
                     # continuation symbol
                     flat_phones_and_gaps.append("&")
+
+                if force_end_punctuation is not None:
+                    flat_phones_and_gaps[-1] = force_end_punctuation
+
                 flat_phones_and_gaps.append("!{}".format(gaps_arr[-1]))
                 seq_as_ints = [self.phone_lookup[s.split("_")[0]] for s in flat_phones_and_gaps]
                 phoneme_sequences.append(seq_as_ints)
@@ -977,6 +982,8 @@ class EnglishSpeechCorpus(object):
                 else:
                     # continuation symbol
                     ascii_spacing_terms.append(["&"])
+                if force_end_punctuation is not None:
+                    ascii_spacing_terms[-1] = [force_end_punctuation]
 
                 # gaps_arr[-1] unused in ascii (we don't have silence labeled)
                 # we use this to construct both the repr mix and the ascii later
