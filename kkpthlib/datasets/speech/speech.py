@@ -715,6 +715,9 @@ class EnglishSpeechCorpus(object):
                             for a_w in all_words:
                                 if a_w["end"] < self.max_length_time_secs:
                                     final_words.append(a_w)
+                            if final_words[-1] != all_words[-1]:
+                                print("WARNING: force_start_crop passed but sequence is longer than self.max_length_time_secs! Last accepted word {}".format(final_words[-1]))
+
                             start_to_mid_tmp = [(final_words, 0, len(all_words), False)]
 
                         comb = [start_to_mid_tmp, mid_to_mid_tmp, mid_to_end_tmp]
@@ -788,8 +791,6 @@ class EnglishSpeechCorpus(object):
                 melspec_sequences.append(melspec)
                 # this part makes all the phonetic sequences
                 phone_groups = [el["phones"] for el in words]#al[k]["full_alignment"]["words"]]
-                print(words)
-                print(phone_groups)
                 start_stop = [(el["start"], el["end"]) for el in words]#al[k]["full_alignment"]["words"]]
                 gaps = []
                 last_end = 0
@@ -811,8 +812,6 @@ class EnglishSpeechCorpus(object):
                 # reverse iterate pause duration breakpoints to quantized gap values
                 gaps_arr = gaps_arr.astype("int32")
                 phone_group_syms = [[pgi["phone"] for pgi in pg] for pg in phone_groups]
-                print(gaps_arr)
-                print(phone_group_syms)
 
                 # change flat phones and gaps based on if it was start_to_mid mid_to_mid mid_to_end or un-cropped (start to end)
                 if "start_to" in crop_type:

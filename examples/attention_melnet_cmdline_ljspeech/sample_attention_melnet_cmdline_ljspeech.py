@@ -877,10 +877,6 @@ if use_half:
     sample_buffer = torch.tensor(sample_buffer.cpu().data.numpy()).contiguous().to(hp.use_device).half()
     sample_mask = torch.tensor(sample_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
 
-print(torch_cond_seq_data_mask.shape)
-print(torch_cond_seq_data_batch.shape)
-raise ValueError()
-
 with torch.no_grad():
     pred_out = fast_sample(sample_buffer,
                            x_mask=sample_mask,
