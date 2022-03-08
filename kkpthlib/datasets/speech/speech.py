@@ -787,7 +787,8 @@ class EnglishSpeechCorpus(object):
                     d = d2
 
                 melspec_sequences.append(melspec)
-
+                print(words)
+                print(phone_groups)
                 # this part makes all the phonetic sequences
                 phone_groups = [el["phones"] for el in words]#al[k]["full_alignment"]["words"]]
                 start_stop = [(el["start"], el["end"]) for el in words]#al[k]["full_alignment"]["words"]]
