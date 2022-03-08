@@ -771,8 +771,8 @@ class EnglishSpeechCorpus(object):
                     gap_samp = end_in_samples - start_in_samples + (4 * self.stft_size)
                     gap_s = gap_samp / float(fs)
                     if gap_s > self.max_length_time_secs:
-                        print("ERROR FORMATTING CROP SAMPLE, DEBUG!")
-                        from IPython import embed; embed(); raise ValueError()
+                        print("WARNING: Detected excessive length, limiting using self.max_time_length_secs!")
+                        end_in_samples = start_in_samples + (self.max_time_length_secs * fs) - 1
 
                     # get new wav and melspec cuts
                     # should we window the wav cut?
