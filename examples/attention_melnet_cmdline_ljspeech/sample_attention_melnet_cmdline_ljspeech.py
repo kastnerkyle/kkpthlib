@@ -872,6 +872,12 @@ sample_mask = torch.tensor(sample_mask).contiguous().to(hp.use_device)
 rev_p = {v: k for k, v in speech.phone_lookup.items()}
 cond_syms = [rev_p[el] for el in torch_cond_seq_data_batch.cpu().data.numpy().ravel()]
 
+print("")
+print("Conditional symbols input:")
+print(cond_syms)
+print("".join(cond_syms))
+print("")
+
 if use_half:
     torch_cond_seq_data_batch = torch.tensor(torch_cond_seq_data_batch.cpu().data.numpy()).contiguous().to(hp.use_device).half()
     torch_cond_seq_data_mask = torch.tensor(torch_cond_seq_data_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()

@@ -97,6 +97,9 @@ parser.add_argument('--bias_split_gap', type=float, default=0.05,
                     help='gap between bias text and generation')
 parser.add_argument('--force_end_punctuation', type=str, default=None,
                     help='string that overrides the end of conditioning sequence symbol(s)')
+parser.add_argument('--force_conditioning_type', type=str, default=None,
+                    help='string that overrides the text conditioning type, either "ascii" or "phoneme" (default is mixed)')
+
 parser.add_argument('--override_dataset_path', type=str, default=None,
                     help='string that overrides the default dataset path')
 
@@ -177,6 +180,10 @@ input_bias_data_frame_offset = int(args.bias_data_frame_offset)
 input_bias_split_gap = float(args.bias_split_gap)
 input_override_dataset_path = str(args.override_dataset_path) if args.override_dataset_path is not None else None
 input_force_end_punctuation = str(args.force_end_punctuation) if args.force_end_punctuation is not None else None
+
+input_force_conditioning_type = str(args.force_conditioning_type) if args.force_conditioning_type is not None else None
+if input_force_conditioning_type not in ["ascii", "phoneme", None]:
+    raise ValueError("Unknown input for --force_conditioning_type, got {} but expected 'ascii' or 'phoneme'".format(input_force_conditioning_type))
 
 assert len(input_size_at_depth) == 2
 assert len(input_tier_input_tag) == 2
@@ -356,10 +363,10 @@ else:
     valid_el = speech.get_valid_utterances(hp.real_batch_size)
 
 #cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
-
 r = speech.format_minibatch(valid_el,
                             is_sampling=True,
                             force_start_crop=True,
+                            force_repr_mix_symbol_type=input_force_conditioning_type,
                             force_end_punctuation=input_force_end_punctuation)
 cond_seq_data_repr_mix_batch = r[0]
 cond_seq_repr_mix_mask = r[1]
@@ -370,7 +377,6 @@ cond_seq_data_phoneme_batch = r[5]
 cond_seq_phoneme_mask = r[6]
 data_batch = r[7]
 data_mask = r[8]
-
 
 batch_norm_flag = 1.
 
@@ -867,6 +873,7 @@ if input_custom_conditioning_json is not None:
     r = speech.format_minibatch(valid_el,
                                 is_sampling=True,
                                 force_start_crop=True,
+                                force_repr_mix_symbol_type=input_force_conditioning_type,
                                 force_end_punctuation=input_force_end_punctuation)
     cond_seq_data_repr_mix_batch = r[0]
     cond_seq_repr_mix_mask = r[1]
@@ -918,10 +925,17 @@ sample_buffer = torch.tensor(sample_buffer).contiguous().to(hp.use_device)
 sample_mask = torch.tensor(sample_mask).contiguous().to(hp.use_device)
 
 # for checking / debugging converted symbols
+rev_a = {v: k for k, v in speech.ascii_lookup.items()}
 rev_p = {v: k for k, v in speech.phone_lookup.items()}
 
-# fix this!
-#cond_syms = [rev_p[el] for el in torch_cond_seq_data_batch.cpu().data.numpy().ravel()]
+cond_syms = [(rev_p[int(l)], r) if r == 1 else (rev_a[int(l)], r)
+             for l, r in zip(torch_cond_seq_data_batch.cpu().data.numpy().ravel(), torch_cond_seq_data_mask.cpu().data.numpy().ravel())]
+print("")
+print("Conditional symbols (and symbol type) input:")
+print(cond_syms)
+print("".join([c[0] for c in cond_syms]))
+print("")
+
 if use_half:
     torch_cond_seq_data_batch = torch.tensor(torch_cond_seq_data_batch.cpu().data.numpy()).contiguous().to(hp.use_device).half()
     torch_cond_seq_data_mask = torch.tensor(torch_cond_seq_data_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()

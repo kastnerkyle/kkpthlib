@@ -64,7 +64,10 @@ class EnglishSpeechCorpus(object):
         self.combine_all_into_valid = combine_all_into_valid
 
         if get_username() == "root" or force_mini_sample:
-            print("WARNING: detected colab environment (due to username 'root'), using mini_robovoice settings to sample!\nThese settings will use all data in {} for both train and valid sets!".format(metadata_csv))
+            if get_username() == "root":
+                print("WARNING: detected colab environment (due to username 'root'), using mini settings to sample!\nThese settings will use all data in {} for both train and valid sets!".format(metadata_csv))
+            else:
+                print("WARNING: force_mini_sample=True, using mini settings to sample!\nThese settings will use all data in {} for both train and valid sets!".format(metadata_csv))
             self.bypass_checks = True
             self.combine_all_info_valid = True
             self.build_skiplist = False
@@ -564,9 +567,11 @@ class EnglishSpeechCorpus(object):
                          is_sampling=False,
                          force_start_crop=False,
                          force_end_punctuation=None,
+                         force_repr_mix_symbol_type=None,
                          pause_duration_breakpoints=None,
                          write_out_debug_info=False,
                          quantize_to_n_bins=None):
+        # need force_repr_mix_symbol_type in order to set the symbols while keeping the space symbols correct
         if symbol_type == None:
             symbol_type = self.symbol_type
         if pause_duration_breakpoints is None:
@@ -1086,6 +1091,14 @@ class EnglishSpeechCorpus(object):
             # 0 is ascii, 1 is phoneme for each "word"
             # if we use 0.5, should be 50/50 choice
             choosing = (self.random_state.rand(len(a_nonspacing)) > 0.5).astype("int32")
+            if force_repr_mix_symbol_type != None:
+                if force_repr_mix_symbol_type == "ascii":
+                    choosing = 0 * choosing
+                elif force_repr_mix_symbol_type == "phoneme":
+                    choosing = 0 * choosing + 1
+                else:
+                    raise ValueError("force_repr_mix_symbol was not None, but didn't recognize argument {}. Expected 'ascii' or 'phoneme'".format(force_repr_mix_symbol_type))
+
             for _n, c in enumerate(choosing):
                 # build ascii sequence at the same time for convenience
                 this_ascii_sequence.extend([el for el in a_nonspacing[_n][0]])
