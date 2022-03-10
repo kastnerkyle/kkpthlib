@@ -364,6 +364,7 @@ if not os.path.exists(mean_std_path):
 if full_input_use_sample_index is None:
     full_input_use_sample_index = [None]
 
+post_load_time = time.time()
 for input_use_sample_index in full_input_use_sample_index:
     if input_batch_skips > 0:
         for _ in range(input_batch_skips):
@@ -1196,3 +1197,4 @@ for input_use_sample_index in full_input_use_sample_index:
         shutil.rmtree(fldr + "_bias{}".format(ind))
 
     shutil.move(fldr, fldr + "_bias{}".format(ind))
+print("overall sampling time {} sec".format(time.time() - post_load_time))
