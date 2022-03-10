@@ -198,7 +198,7 @@ else:
 
 if args.force_phoneme_words is not None:
     arg_force_phoneme_words = args.force_phoneme_words if "," in args.force_phoneme_words else args.force_phoneme_words + ","
-    input_force_ascii_words = [str(el) for el in arg_force_phoneme_words.split(",") if str(el) != ""]
+    input_force_phoneme_words = [str(el) for el in arg_force_phoneme_words.split(",") if str(el) != ""]
 else:
     input_force_phoneme_words = None
 
