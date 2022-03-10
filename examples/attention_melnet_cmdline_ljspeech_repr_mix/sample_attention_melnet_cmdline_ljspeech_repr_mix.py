@@ -588,6 +588,7 @@ def fast_sample(x, x_mask=None,
 
         noise_random = np.random.RandomState(3142)
 
+        x_clean = copy.deepcopy(x)
 
         for _ii in range(start_time_index, max_time_step):
             for _jj in range(start_freq_index, max_freq_step):
@@ -596,6 +597,8 @@ def fast_sample(x, x_mask=None,
                                                                         memory=mem_lstm, memory_mask=memory_condition_mask_mask,
                                                                         min_attention_step=min_attention_step)
 
+                x_clean[:, _ii, _jj, 0] = mn_out.squeeze()
+                # this is the noisy one we use for teacher forcing
                 x[:, _ii, _jj, 0] = mn_out.squeeze() + input_additive_noise_level * noise_random.randn()
                 if verbose:
                     if ((_ii % 10) == 0 and (_jj == 0)) or (_ii == (max_time_step - 1) and (_jj == 0)):
@@ -610,7 +613,7 @@ def fast_sample(x, x_mask=None,
         mn_out = model.mn_t.sample([x], list_of_spatial_conditions=[spatial_condition])
     fin = time.time()
     print("fast sampling complete, time {} sec".format(fin - frst))
-    return x
+    return x_clean
 
 """
 if input_tier_condition_tag is None:
