@@ -100,11 +100,16 @@ parser.add_argument('--force_end_punctuation', type=str, default=None,
 parser.add_argument('--force_conditioning_type', type=str, default=None,
                     help='string that overrides the text conditioning type, either "ascii" or "phoneme" (default is mixed)')
 
+parser.add_argument('--additive_noise_level', type=float, default=0.0,
+                    help='noise level to add to the predictions, helps perturb out of flat attention spots')
+
 parser.add_argument('--override_dataset_path', type=str, default=None,
                     help='string that overrides the default dataset path')
 
 parser.add_argument('--use_half', action="store_true",
                     help='whether to use half precision or not')
+parser.add_argument('--use_double', action="store_true",
+                    help='whether to use double precision or not')
 
 parser.add_argument('--p_cutoff', type=float, default=.5,
                     help='cutoff to use in top p sampling (default .5)')
@@ -184,6 +189,8 @@ input_force_end_punctuation = str(args.force_end_punctuation) if args.force_end_
 input_force_conditioning_type = str(args.force_conditioning_type) if args.force_conditioning_type is not None else None
 if input_force_conditioning_type not in ["ascii", "phoneme", None]:
     raise ValueError("Unknown input for --force_conditioning_type, got {} but expected 'ascii' or 'phoneme'".format(input_force_conditioning_type))
+
+input_additive_noise_level = float(args.additive_noise_level)
 
 assert len(input_size_at_depth) == 2
 assert len(input_tier_input_tag) == 2
@@ -275,6 +282,13 @@ if use_half:
         layer.half()
     [a.half() for a in model.parameters()]
 
+use_double = args.use_double
+if use_double:
+    model.double()  # convert to double precision
+    for layer in model.modules():
+        layer.double()
+    [a.double() for a in model.parameters()]
+
 model_dict = torch.load(saved_model_path, map_location=hp.use_device)
 model.load_state_dict(model_dict)
 model.eval()
@@ -320,6 +334,8 @@ mean_std_cache = os.getcwd() + "/mean_std_cache/"
 mean_std_path = mean_std_cache + full_cached_mean_std_name_for_experiment
 if not os.path.exists(mean_std_path):
     raise ValueError("Unable to find cached mean std info at {}".format(mean_std_path))
+
+# loop here???
 
 if input_batch_skips > 0:
     for _ in range(input_batch_skips):
@@ -391,6 +407,12 @@ if use_half:
         layer.half()
     [a.half() for a in model.parameters()]
 
+if use_double:
+    model.double()  # convert to double precision
+    for layer in model.modules():
+        layer.double()
+    [a.double() for a in model.parameters()]
+
 torch_cond_seq_data_batch = torch.tensor(cond_seq_data_repr_mix_batch[..., None]).contiguous().to(hp.use_device)
 torch_cond_seq_data_mask = torch.tensor(cond_seq_repr_mix_mask).contiguous().to(hp.use_device)
 torch_cond_seq_data_mask_mask = torch.tensor(cond_seq_repr_mix_mask_mask).contiguous().to(hp.use_device)
@@ -431,6 +453,13 @@ if use_half:
     x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device).half()
     x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device).half()
 
+if use_double:
+    torch_cond_seq_data_batch = torch.tensor(cond_seq_data_repr_mix_batch[..., None]).contiguous().to(hp.use_device).double()
+    torch_cond_seq_data_mask = torch.tensor(cond_seq_repr_mix_mask).contiguous().to(hp.use_device).double()
+    torch_cond_seq_data_mask_mask = torch.tensor(cond_seq_repr_mix_mask_mask).contiguous().to(hp.use_device).double()
+    x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device).double()
+    x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device).double()
+
 if input_tier_condition_tag is None:
     # no noise here in pred
     with torch.no_grad():
@@ -447,6 +476,8 @@ else:
     cond = torch.tensor(cond_np).contiguous().to(hp.use_device)
     if use_half:
         cond = torch.tensor(cond_np).contiguous().to(hp.use_device).half()
+    if use_double:
+        cond = torch.tensor(cond_np).contiguous().to(hp.use_device).double()
     with torch.no_grad():
         pred_out = model(x_in, x_mask=x_mask_in,
                          spatial_condition=cond,
@@ -555,13 +586,17 @@ def fast_sample(x, x_mask=None,
         total_alignment = alignment
         total_extras = attn_extras
 
+        noise_random = np.random.RandomState(3142)
+
+
         for _ii in range(start_time_index, max_time_step):
             for _jj in range(start_freq_index, max_freq_step):
                 mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
                                                                         is_initial_step=is_initial_step,
                                                                         memory=mem_lstm, memory_mask=memory_condition_mask_mask,
                                                                         min_attention_step=min_attention_step)
-                x[:, _ii, _jj, 0] = mn_out.squeeze()
+
+                x[:, _ii, _jj, 0] = mn_out.squeeze() + input_additive_noise_level * noise_random.randn()
                 if verbose:
                     if ((_ii % 10) == 0 and (_jj == 0)) or (_ii == (max_time_step - 1) and (_jj == 0)):
                         print("sampled index {},{} out of total size ({},{})".format(_ii, _jj, max_time_step, max_freq_step))
@@ -942,6 +977,13 @@ if use_half:
     torch_cond_seq_data_mask_mask = torch.tensor(torch_cond_seq_data_mask_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
     sample_buffer = torch.tensor(sample_buffer.cpu().data.numpy()).contiguous().to(hp.use_device).half()
     sample_mask = torch.tensor(sample_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
+
+if use_double:
+    torch_cond_seq_data_batch = torch.tensor(torch_cond_seq_data_batch.cpu().data.numpy()).contiguous().to(hp.use_device).double()
+    torch_cond_seq_data_mask = torch.tensor(torch_cond_seq_data_mask.cpu().data.numpy()).contiguous().to(hp.use_device).double()
+    torch_cond_seq_data_mask_mask = torch.tensor(torch_cond_seq_data_mask_mask.cpu().data.numpy()).contiguous().to(hp.use_device).double()
+    sample_buffer = torch.tensor(sample_buffer.cpu().data.numpy()).contiguous().to(hp.use_device).double()
+    sample_mask = torch.tensor(sample_mask.cpu().data.numpy()).contiguous().to(hp.use_device).double()
 
 with torch.no_grad():
     pred_out = fast_sample(sample_buffer,
