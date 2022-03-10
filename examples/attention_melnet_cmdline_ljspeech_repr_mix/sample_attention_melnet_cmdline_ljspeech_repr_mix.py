@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.functional as F
+import shutil
 import re
 import copy
 import sys
@@ -172,7 +173,15 @@ input_real_batch_size = int(args.real_batch_size)
 input_batch_skips =int(args.batch_skips)
 input_virtual_batch_size = int(args.virtual_batch_size)
 input_tier_input_tag = [int(el) for el in args.tier_input_tag.split(",")]
-input_use_sample_index = [int(el) for el in args.use_sample_index.split(",")] if args.use_sample_index is not None else None
+if args.use_sample_index is not None:
+    if "[" in args.use_sample_index or "]" in args.use_sample_index:
+        assert "," in args.use_sample_index
+        full_input_use_sample_index = [int(el) for el in args.use_sample_index.replace("[", "").replace("]","").split(",")]
+    else:
+        full_input_use_sample_index = [int(args.use_sample_index)]
+else:
+    full_input_use_sample_index = None
+
 if args.custom_conditioning_json is not None:
     input_custom_conditioning_json = str(args.custom_conditioning_json)
 else:
@@ -351,823 +360,839 @@ mean_std_path = mean_std_cache + full_cached_mean_std_name_for_experiment
 if not os.path.exists(mean_std_path):
     raise ValueError("Unable to find cached mean std info at {}".format(mean_std_path))
 
-# loop here???
+# meta loop here... oy
+if full_input_use_sample_index is None:
+    full_input_use_sample_index = [None]
 
-if input_batch_skips > 0:
-    for _ in range(input_batch_skips):
-        tmp = speech.get_valid_utterances(hp.real_batch_size)
+for input_use_sample_index in full_input_use_sample_index:
+    if input_batch_skips > 0:
+        for _ in range(input_batch_skips):
+            tmp = speech.get_valid_utterances(hp.real_batch_size)
 
-# TODO: fix?
-if input_use_sample_index is not None:
-    #if input_use_sample_index[0] != 0 or input_use_sample_index[1] != 0:
-    # used this to get names of minibatch examples to form mini dataset
-    # not used right now but may be logged in the future
-    store_valid_els = []
-    for _ii in range(input_use_sample_index[0] + 1):
-        this_valid_el = speech.get_utterances(hp.real_batch_size, [speech.valid_keys[_ii]], do_not_filter=True)
-        store_valid_els.append(this_valid_el)
-    names = []
-    for _ii in range(len(store_valid_els)):
-        for _jj in range(len(store_valid_els[_ii])):
-            n = list(store_valid_els[_ii][_jj][3].keys())[0]
-            names.append(n)
-    valid_el = [store_valid_els[input_use_sample_index[0]][input_use_sample_index[1]]] * hp.real_batch_size
-elif args.use_longest:
-    # sample 50 minibatches, find longest N examples of that...
-    print("Performing length selection to choose base samples for biasing")
-    valid_el = None
-    kept_indices = [[0] * hp.real_batch_size, list(range(hp.real_batch_size))]
-    itr_offset = 0
-    for _ in range(50):
-        this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
-        itr_offset += 1
-        if valid_el is None:
-            valid_el = this_valid_el
-        else:
-            for candidate in range(len(this_valid_el)):
-                for kept in range(len(valid_el)):
-                    if this_valid_el[candidate][2].shape[0] > valid_el[kept][2].shape[0]:
-                        valid_el[kept] = this_valid_el[candidate]
-                        kept_indices[0][kept] = itr_offset
-                        kept_indices[1][kept] = candidate
-                        break
-else:
-    valid_el = speech.get_valid_utterances(hp.real_batch_size)
-
-#cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
-r = speech.format_minibatch(valid_el,
-                            is_sampling=True,
-                            force_start_crop=True,
-                            force_repr_mix_symbol_type=input_force_conditioning_type,
-                            force_end_punctuation=input_force_end_punctuation)
-cond_seq_data_repr_mix_batch = r[0]
-cond_seq_repr_mix_mask = r[1]
-cond_seq_repr_mix_mask_mask = r[2]
-cond_seq_data_ascii_batch = r[3]
-cond_seq_ascii_mask = r[4]
-cond_seq_data_phoneme_batch = r[5]
-cond_seq_phoneme_mask = r[6]
-data_batch = r[7]
-data_mask = r[8]
-
-batch_norm_flag = 1.
-
-# this is weird, need 2 load calls for conditional generator...
-speech.load_mean_std_from_filepath(mean_std_path)
-saved_mean = speech.cached_mean_vec_[None, None, :, None]
-saved_std = speech.cached_std_vec_[None, None, :, None]
-
-if use_half:
-    model.half()  # convert to half precision
-    for layer in model.modules():
-        layer.half()
-    [a.half() for a in model.parameters()]
-
-if use_double:
-    model.double()  # convert to double precision
-    for layer in model.modules():
-        layer.double()
-    [a.double() for a in model.parameters()]
-
-torch_cond_seq_data_batch = torch.tensor(cond_seq_data_repr_mix_batch[..., None]).contiguous().to(hp.use_device)
-torch_cond_seq_data_mask = torch.tensor(cond_seq_repr_mix_mask).contiguous().to(hp.use_device)
-torch_cond_seq_data_mask_mask = torch.tensor(cond_seq_repr_mix_mask_mask).contiguous().to(hp.use_device)
-
-x_mask_t = data_mask[..., None, None] + 0. * data_batch[..., None]
-x_t = data_batch[..., None]
-divisors = [2, 4, 8]
-max_frame_count = x_t.shape[1]
-for di in divisors:
-    # nearest divisible number above, works because largest divisor divides by smaller
-    # we need something that has a length in time (frames) divisible by 2 4 and 8 due to the nature of melnet
-    # same for frequency but frequency is a power of 2 so no need to check it
-    q = int(max_frame_count / di)
-    if float(max_frame_count / di) == int(max_frame_count / di):
-        max_frame_count = di * q
+    # TODO: fix?
+    if input_use_sample_index is not None:
+        #if input_use_sample_index[0] != 0 or input_use_sample_index[1] != 0:
+        # used this to get names of minibatch examples to form mini dataset
+        # not used right now but may be logged in the future
+        store_valid_els = []
+        for _ii in range(input_use_sample_index + 1):
+            this_valid_el = speech.get_utterances(hp.real_batch_size, [speech.valid_keys[_ii]], do_not_filter=True)
+            store_valid_els.append(this_valid_el)
+        names = []
+        for _ii in range(len(store_valid_els)):
+            for _jj in range(len(store_valid_els[_ii])):
+                n = list(store_valid_els[_ii][_jj][3].keys())[0]
+                names.append(n)
+        #valid_el = [store_valid_els[input_use_sample_index[0]][input_use_sample_index[1]]] * hp.real_batch_size
+        valid_el = [store_valid_els[input_use_sample_index][0]] * hp.real_batch_size
+    elif args.use_longest:
+        # sample 50 minibatches, find longest N examples of that...
+        print("Performing length selection to choose base samples for biasing")
+        valid_el = None
+        kept_indices = [[0] * hp.real_batch_size, list(range(hp.real_batch_size))]
+        itr_offset = 0
+        for _ in range(50):
+            this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
+            itr_offset += 1
+            if valid_el is None:
+                valid_el = this_valid_el
+            else:
+                for candidate in range(len(this_valid_el)):
+                    for kept in range(len(valid_el)):
+                        if this_valid_el[candidate][2].shape[0] > valid_el[kept][2].shape[0]:
+                            valid_el[kept] = this_valid_el[candidate]
+                            kept_indices[0][kept] = itr_offset
+                            kept_indices[1][kept] = candidate
+                            break
     else:
-        max_frame_count = di * (q + 1)
-assert max_frame_count == int(max_frame_count)
+        valid_el = speech.get_valid_utterances(hp.real_batch_size)
 
-axis_splits = input_axis_split_list
-splits_offset = 0
-axis1_m = [2 for a in str(axis_splits)[splits_offset:] if a == "1"]
-axis2_m = [2 for a in str(axis_splits)[splits_offset:] if a == "2"]
-axis1_m = reduce(mul, axis1_m)
-axis2_m = reduce(mul, axis2_m)
+    #cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
+    r = speech.format_minibatch(valid_el,
+                                is_sampling=True,
+                                force_start_crop=True,
+                                force_repr_mix_symbol_type=input_force_conditioning_type,
+                                force_end_punctuation=input_force_end_punctuation)
+    cond_seq_data_repr_mix_batch = r[0]
+    cond_seq_repr_mix_mask = r[1]
+    cond_seq_repr_mix_mask_mask = r[2]
+    cond_seq_data_ascii_batch = r[3]
+    cond_seq_ascii_mask = r[4]
+    cond_seq_data_phoneme_batch = r[5]
+    cond_seq_phoneme_mask = r[6]
+    data_batch = r[7]
+    data_mask = r[8]
 
-x_in_np = x_t[:, ::axis1_m, ::axis2_m]
-x_mask_in_np = x_mask_t[:, ::axis1_m, ::axis2_m]
-x_in_np = (x_in_np - saved_mean) / saved_std
+    batch_norm_flag = 1.
 
-x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
-x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
+    # this is weird, need 2 load calls for conditional generator...
+    speech.load_mean_std_from_filepath(mean_std_path)
+    saved_mean = speech.cached_mean_vec_[None, None, :, None]
+    saved_std = speech.cached_std_vec_[None, None, :, None]
 
-if use_half:
-    torch_cond_seq_data_batch = torch.tensor(cond_seq_data_repr_mix_batch[..., None]).contiguous().to(hp.use_device).half()
-    torch_cond_seq_data_mask = torch.tensor(cond_seq_repr_mix_mask).contiguous().to(hp.use_device).half()
-    torch_cond_seq_data_mask_mask = torch.tensor(cond_seq_repr_mix_mask_mask).contiguous().to(hp.use_device).half()
-    x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device).half()
-    x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device).half()
-
-if use_double:
-    torch_cond_seq_data_batch = torch.tensor(cond_seq_data_repr_mix_batch[..., None]).contiguous().to(hp.use_device).double()
-    torch_cond_seq_data_mask = torch.tensor(cond_seq_repr_mix_mask).contiguous().to(hp.use_device).double()
-    torch_cond_seq_data_mask_mask = torch.tensor(cond_seq_repr_mix_mask_mask).contiguous().to(hp.use_device).double()
-    x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device).double()
-    x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device).double()
-
-if input_tier_condition_tag is None:
-    # no noise here in pred
-    with torch.no_grad():
-        pred_out = model(x_in, x_mask=x_mask_in,
-                         memory_condition=torch_cond_seq_data_batch,
-                         memory_condition_mask=torch_cond_seq_data_mask,
-                         memory_condition_mask_mask=torch_cond_seq_data_mask_mask,
-                         batch_norm_flag=batch_norm_flag)
-else:
-    cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
-    # conditioning input currently unnormalized
-    if input_stored_conditioning is not None:
-        cond_np = input_stored_conditioning
-    cond = torch.tensor(cond_np).contiguous().to(hp.use_device)
     if use_half:
-        cond = torch.tensor(cond_np).contiguous().to(hp.use_device).half()
+        model.half()  # convert to half precision
+        for layer in model.modules():
+            layer.half()
+        [a.half() for a in model.parameters()]
+
     if use_double:
-        cond = torch.tensor(cond_np).contiguous().to(hp.use_device).double()
-    with torch.no_grad():
-        pred_out = model(x_in, x_mask=x_mask_in,
-                         spatial_condition=cond,
-                         batch_norm_flag=batch_norm_flag)
-#print("testing sample")
-#from IPython import embed; embed(); raise ValueError()
+        model.double()  # convert to double precision
+        for layer in model.modules():
+            layer.double()
+        [a.double() for a in model.parameters()]
 
-import matplotlib.pyplot as plt
+    torch_cond_seq_data_batch = torch.tensor(cond_seq_data_repr_mix_batch[..., None]).contiguous().to(hp.use_device)
+    torch_cond_seq_data_mask = torch.tensor(cond_seq_repr_mix_mask).contiguous().to(hp.use_device)
+    torch_cond_seq_data_mask_mask = torch.tensor(cond_seq_repr_mix_mask_mask).contiguous().to(hp.use_device)
 
-if args.terminate_early_attention_plot:
-    # take output dir directly for terminate early attention plot
-    folder = input_output_dir
+    x_mask_t = data_mask[..., None, None] + 0. * data_batch[..., None]
+    x_t = data_batch[..., None]
+    divisors = [2, 4, 8]
+    max_frame_count = x_t.shape[1]
+    for di in divisors:
+        # nearest divisible number above, works because largest divisor divides by smaller
+        # we need something that has a length in time (frames) divisible by 2 4 and 8 due to the nature of melnet
+        # same for frequency but frequency is a power of 2 so no need to check it
+        q = int(max_frame_count / di)
+        if float(max_frame_count / di) == int(max_frame_count / di):
+            max_frame_count = di * q
+        else:
+            max_frame_count = di * (q + 1)
+    assert max_frame_count == int(max_frame_count)
+
+    axis_splits = input_axis_split_list
+    splits_offset = 0
+    axis1_m = [2 for a in str(axis_splits)[splits_offset:] if a == "1"]
+    axis2_m = [2 for a in str(axis_splits)[splits_offset:] if a == "2"]
+    axis1_m = reduce(mul, axis1_m)
+    axis2_m = reduce(mul, axis2_m)
+
+    x_in_np = x_t[:, ::axis1_m, ::axis2_m]
+    x_mask_in_np = x_mask_t[:, ::axis1_m, ::axis2_m]
+    x_in_np = (x_in_np - saved_mean) / saved_std
+
+    x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
+    x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
+
+    if use_half:
+        torch_cond_seq_data_batch = torch.tensor(cond_seq_data_repr_mix_batch[..., None]).contiguous().to(hp.use_device).half()
+        torch_cond_seq_data_mask = torch.tensor(cond_seq_repr_mix_mask).contiguous().to(hp.use_device).half()
+        torch_cond_seq_data_mask_mask = torch.tensor(cond_seq_repr_mix_mask_mask).contiguous().to(hp.use_device).half()
+        x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device).half()
+        x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device).half()
+
+    if use_double:
+        torch_cond_seq_data_batch = torch.tensor(cond_seq_data_repr_mix_batch[..., None]).contiguous().to(hp.use_device).double()
+        torch_cond_seq_data_mask = torch.tensor(cond_seq_repr_mix_mask).contiguous().to(hp.use_device).double()
+        torch_cond_seq_data_mask_mask = torch.tensor(cond_seq_repr_mix_mask_mask).contiguous().to(hp.use_device).double()
+        x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device).double()
+        x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device).double()
+
+    if input_tier_condition_tag is None:
+        # no noise here in pred
+        with torch.no_grad():
+            pred_out = model(x_in, x_mask=x_mask_in,
+                             memory_condition=torch_cond_seq_data_batch,
+                             memory_condition_mask=torch_cond_seq_data_mask,
+                             memory_condition_mask_mask=torch_cond_seq_data_mask_mask,
+                             batch_norm_flag=batch_norm_flag)
+    else:
+        cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+        # conditioning input currently unnormalized
+        if input_stored_conditioning is not None:
+            cond_np = input_stored_conditioning
+        cond = torch.tensor(cond_np).contiguous().to(hp.use_device)
+        if use_half:
+            cond = torch.tensor(cond_np).contiguous().to(hp.use_device).half()
+        if use_double:
+            cond = torch.tensor(cond_np).contiguous().to(hp.use_device).double()
+        with torch.no_grad():
+            pred_out = model(x_in, x_mask=x_mask_in,
+                             spatial_condition=cond,
+                             batch_norm_flag=batch_norm_flag)
+    #print("testing sample")
+    #from IPython import embed; embed(); raise ValueError()
+
+    import matplotlib.pyplot as plt
+
+    if args.terminate_early_attention_plot:
+        # take output dir directly for terminate early attention plot
+        folder = input_output_dir
+        if not os.path.exists(input_output_dir):
+            os.mkdir(input_output_dir)
+
+        if not os.path.exists(folder):
+            os.mkdir(folder)
+
+        teacher_forced_pred = pred_out
+        teacher_forced_attn = model.attention_alignment
+
+        for _i in range(hp.real_batch_size):
+            mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
+            text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
+            # matshow vs imshow?
+            this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:mel_cut, :text_cut]
+            this_att = this_att.astype("float32")
+            plt.imshow(this_att)
+            plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
+            plt.savefig(folder + "attn_{}.png".format(_i))
+            plt.close()
+
+        import sys
+        print("Terminating early after only plotting attention due to commandline flag --terminate_early_attention_plot")
+        sys.exit()
+
+    def fast_sample(x, x_mask=None,
+                       spatial_condition=None,
+                       memory_condition=None, memory_condition_mask=None,
+                       memory_condition_mask_mask=None,
+                       bias_boundary="default",
+                       batch_norm_flag=0.,
+                       verbose=True):
+        frst = time.time()
+        new_x = copy.deepcopy(x)
+        x = new_x
+        if spatial_condition is None:
+            assert memory_condition is not None
+            mem_a, mem_a_e = model.embed_ascii(memory_condition)
+            mem_p, mem_p_e = model.embed_phone(memory_condition)
+            # condition mask is 0 where it is ascii, 1 where it is phone
+            mem_j = memory_condition_mask[..., None] * mem_p + (1. - memory_condition_mask[..., None]) * mem_a
+            mem_m, mem_m_e = model.embed_mask(memory_condition_mask[..., None])
+
+            mem_f = mem_j + mem_m
+
+            # doing bn in 16 bit is sketch to say the least
+            #mem_conv = model.conv_text([mem_f], batch_norm_flag)
+            # mask based on the actual conditioning mask
+            #mem_conv = mem_conv * memory_condition_mask_mask[..., None]
+
+            mem_f = mem_f * memory_condition_mask_mask[..., None]
+
+            # use mask in BiLSTM
+            mem_lstm = model.bilstm_text([mem_f], input_mask=memory_condition_mask_mask)
+
+            # use mask in BiLSTM
+            # x currently batch, time, freq, 1
+            # mem time, batch, feat
+            # feed mask for attention calculations as well
+            #mn_out, alignment, attn_extras = model.mn_t([x], memory=mem_lstm, memory_mask=memory_condition_mask)
+            # centralized stack means we cannot do better than frame cuts
+            time_index = 0
+            freq_index = 0
+            is_initial_step = True
+            # b t f feat
+            mem_lstm = mem_lstm
+            memory_condition_mask = memory_condition_mask
+            memory_condition_mask_mask = memory_condition_mask_mask
+            if bias_boundary == "default":
+                start_time_index = x.shape[1] // 2
+                start_freq_index = 0
+            else:
+                start_time_index = int(bias_boundary)
+                start_freq_index = 0
+
+            x_a = x[:, :start_time_index]
+
+            min_attention_step = .0
+            mn_out, alignment, attn_extras = model.mn_t.sample([x_a], time_index=time_index, freq_index=freq_index,
+                                                                      is_initial_step=is_initial_step,
+                                                                      memory=mem_lstm, memory_mask=memory_condition_mask_mask,
+                                                                      min_attention_step=min_attention_step)
+            is_initial_step = False
+
+            mem_lstm = mem_lstm
+            memory_condition_mask = memory_condition_mask
+            memory_condition_mask_mask = memory_condition_mask_mask
+            x[:, start_time_index:, :] *= 0
+
+            if verbose:
+                print("start sample step")
+            max_time_step = x.shape[1]
+            max_freq_step = x.shape[2]
+
+            total_alignment = alignment
+            total_extras = attn_extras
+
+            noise_random = np.random.RandomState(3142)
+
+            x_clean = copy.deepcopy(x)
+
+            for _ii in range(start_time_index, max_time_step):
+                for _jj in range(start_freq_index, max_freq_step):
+                    mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
+                                                                            is_initial_step=is_initial_step,
+                                                                            memory=mem_lstm, memory_mask=memory_condition_mask_mask,
+                                                                            min_attention_step=min_attention_step)
+
+                    x_clean[:, _ii, _jj, 0] = mn_out.squeeze()
+                    # this is the noisy one we use for teacher forcing
+                    x[:, _ii, _jj, 0] = mn_out.squeeze() + input_additive_noise_level * noise_random.randn()
+                    if verbose:
+                        if ((_ii % 10) == 0 and (_jj == 0)) or (_ii == (max_time_step - 1) and (_jj == 0)):
+                            print("sampled index {},{} out of total size ({},{})".format(_ii, _jj, max_time_step, max_freq_step))
+                total_alignment = torch.cat((total_alignment, alignment[None]), dim=0)
+                total_extras.append(attn_extras)
+            model.attention_alignment = total_alignment
+            model.attention_extras = total_extras
+        else:
+            x = x[0:1, 0:1]
+            spatial_condition = spatial_condition[0:1]
+            mn_out = model.mn_t.sample([x], list_of_spatial_conditions=[spatial_condition])
+        fin = time.time()
+        print("fast sampling complete, time {} sec".format(fin - frst))
+        return x_clean
+
+    """
+    if input_tier_condition_tag is None:
+        # no noise here in pred
+        with torch.no_grad():
+            pred_out = fast_sample(x_in, x_mask=x_mask_in,
+                                         memory_condition=torch_cond_seq_data_batch,
+                                         memory_condition_mask=torch_cond_seq_data_mask,
+                                         batch_norm_flag=batch_norm_flag)
+    else:
+        cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+        # conditioning input currently unnormalized
+        if input_stored_conditioning is not None:
+            cond_np = input_stored_conditioning
+        cond = torch.tensor(cond_np).contiguous().to(hp.use_device)
+        if use_half:
+            cond = torch.tensor(cond_np).contiguous().to(hp.use_device).half()
+        with torch.no_grad():
+            pred_out = tst(x_in, x_mask=x_mask_in,
+                                 spatial_condition=cond,
+                                 batch_norm_flag=batch_norm_flag)
+    """
+
+    """
+    unnormalized = pred_out.cpu().data.numpy() * saved_std + saved_mean
+    _i = 0
+    plt.imshow(unnormalized[_i, :, :, 0])
+    plt.savefig("tmpfast.png")
+
+    unnormalized = x_in.cpu().data.numpy() * saved_std + saved_mean
+    _i = 0
+    plt.imshow(unnormalized[_i, :, :, 0])
+    plt.savefig("tmpfast_orig.png")
+    """
+
+    def to_one_hot(tensor, n, fill_with=1.):
+        # we perform one hot encore with respect to the last axis
+        one_hot = torch.FloatTensor(tensor.size() + (n,)).zero_()
+        if tensor.is_cuda : one_hot = one_hot.cuda()
+        one_hot.scatter_(len(tensor.size()), tensor.unsqueeze(-1), fill_with)
+        return one_hot
+
+    def sample_dml(l, n_mix=10, only_mean=True, deterministic=True, sampling_temperature=1.):
+        sampling_temperature = float(sampling_temperature)
+        nr_mix = n_mix
+        # Pytorch ordering
+        #l = l.permute(0, 2, 3, 1)
+        ls = [int(y) for y in l.size()]
+        xs = ls[:-1] + [1]
+
+        # unpack parameters
+        logit_probs = l[:, :, :, :nr_mix]
+        l = l[:, :, :, nr_mix:].contiguous().view(xs + [nr_mix * 2])
+        # sample mixture indicator from softmax
+        noise = torch.FloatTensor(logit_probs.size())
+        if l.is_cuda : noise = noise.cuda()
+        noise.uniform_(1e-5, 1. - 1e-5)
+        # hack to make deterministic JRH
+        # could also just take argmax of logit_probs
+        if deterministic or only_mean:
+            # make temp small so logit_probs dominates equation
+            sampling_temperature = 1e-6
+        # sampling temperature from kk
+        # https://gist.github.com/kastnerkyle/ea08e1aed59a0896e4f7991ac7cdc147
+        # discussion on gumbel sm sampling -
+        # https://github.com/Rayhane-mamah/Tacotron-2/issues/155
+        noise = (logit_probs.data/sampling_temperature) - torch.log(- torch.log(noise))
+        _, argmax = noise.max(dim=3)
+
+        one_hot = to_one_hot(argmax, nr_mix)
+        sel = one_hot.view(xs[:-1] + [1, nr_mix])
+        # select logistic parameters
+        means = torch.sum(l[:, :, :, :, :nr_mix] * sel, dim=4)
+        log_scales = torch.clamp(torch.sum(l[:, :, :, :, nr_mix:2 * nr_mix] * sel, dim=4), min=-7.)
+        # sample from logistic & clip to interval
+        # we don't actually round to the nearest 8bit value when sampling
+        u = torch.FloatTensor(means.size())
+        if l.is_cuda : u = u.cuda()
+        u.uniform_(1e-5, 1. - 1e-5)
+        # hack to make deterministic
+        if deterministic:
+            u= u*0.0+0.5
+        if only_mean:
+            x = means
+        else:
+            x = means + torch.exp(log_scales) * (torch.log(u) - torch.log(1. - u))
+        out = torch.clamp(torch.clamp(x,min=-1.),max=1.)
+        # put back in Pytorch ordering
+        #out = out.permute(0, 3, 1, 2)
+        return out
+
+    folder = input_output_dir + "teacher_forced_images/"
     if not os.path.exists(input_output_dir):
         os.mkdir(input_output_dir)
 
     if not os.path.exists(folder):
         os.mkdir(folder)
 
-    teacher_forced_pred = pred_out
-    teacher_forced_attn = model.attention_alignment
+    import json
+    from collections import OrderedDict
+
+    if valid_el is not None:
+        sample_info_path = folder + "text_info.json"
+        cleaned_valid_el = valid_el[0][3]
+        with open(sample_info_path, 'w') as f:
+            json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
+            f.write(json_string)
 
     for _i in range(hp.real_batch_size):
-        mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
-        text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
-        # matshow vs imshow?
-        this_att = teacher_forced_attn[:, _i, 0].cpu().data.numpy()[:mel_cut, :text_cut]
-        this_att = this_att.astype("float32")
-        plt.imshow(this_att)
-        plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
-        plt.savefig(folder + "attn_{}.png".format(_i))
+        teacher_forced_pred = pred_out
+
+        reduced_mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
+        full_mel_cut = int(data_mask[_i].sum())
+
+        this_x_in = x_in[_i][None].cpu().data.numpy()
+        unnormalized = this_x_in * saved_std + saved_mean
+        plt.imshow(unnormalized[0, :reduced_mel_cut, :, 0])
+        plt.savefig(folder + os.sep + "small_x{}.png".format(_i))
         plt.close()
 
-    import sys
-    print("Terminating early after only plotting attention due to commandline flag --terminate_early_attention_plot")
-    sys.exit()
+        # no normalization on initial data
+        unnormalized_full = data_batch[_i, :full_mel_cut, :]
+        plt.imshow(unnormalized_full)
+        plt.savefig(folder + os.sep + "data_x{}.png".format(_i))
+        plt.close()
 
-def fast_sample(x, x_mask=None,
-                   spatial_condition=None,
-                   memory_condition=None, memory_condition_mask=None,
-                   memory_condition_mask_mask=None,
-                   bias_boundary="default",
-                   batch_norm_flag=0.,
-                   verbose=True):
-    frst = time.time()
-    new_x = copy.deepcopy(x)
-    x = new_x
-    if spatial_condition is None:
-        assert memory_condition is not None
-        mem_a, mem_a_e = model.embed_ascii(memory_condition)
-        mem_p, mem_p_e = model.embed_phone(memory_condition)
-        # condition mask is 0 where it is ascii, 1 where it is phone
-        mem_j = memory_condition_mask[..., None] * mem_p + (1. - memory_condition_mask[..., None]) * mem_a
-        mem_m, mem_m_e = model.embed_mask(memory_condition_mask[..., None])
+        teacher_forced_pred = pred_out
+        teacher_forced_attn = model.attention_alignment
 
-        mem_f = mem_j + mem_m
-
-        # doing bn in 16 bit is sketch to say the least
-        #mem_conv = model.conv_text([mem_f], batch_norm_flag)
-        # mask based on the actual conditioning mask
-        #mem_conv = mem_conv * memory_condition_mask_mask[..., None]
-
-        mem_f = mem_f * memory_condition_mask_mask[..., None]
-
-        # use mask in BiLSTM
-        mem_lstm = model.bilstm_text([mem_f], input_mask=memory_condition_mask_mask)
-
-        # use mask in BiLSTM
-        # x currently batch, time, freq, 1
-        # mem time, batch, feat
-        # feed mask for attention calculations as well
-        #mn_out, alignment, attn_extras = model.mn_t([x], memory=mem_lstm, memory_mask=memory_condition_mask)
-        # centralized stack means we cannot do better than frame cuts
-        time_index = 0
-        freq_index = 0
-        is_initial_step = True
-        # b t f feat
-        mem_lstm = mem_lstm
-        memory_condition_mask = memory_condition_mask
-        memory_condition_mask_mask = memory_condition_mask_mask
-        if bias_boundary == "default":
-            start_time_index = x.shape[1] // 2
-            start_freq_index = 0
+        if input_tier_condition_tag is None:
+            for _i in range(hp.real_batch_size):
+                mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
+                text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
+                # matshow vs imshow?
+                this_att = teacher_forced_attn[:, _i, 0][:mel_cut, :text_cut]
+                this_att = this_att.cpu().data.numpy().astype("float32")
+                plt.imshow(this_att)
+                plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
+                plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
+                plt.close()
         else:
-            start_time_index = int(bias_boundary)
-            start_freq_index = 0
+            plt.imshow(cond_np[_i, :, :, 0])
+            plt.savefig(folder + os.sep + "cond_small_x{}.png".format(_i))
+            plt.close()
 
-        x_a = x[:, :start_time_index]
-
-        min_attention_step = .0
-        mn_out, alignment, attn_extras = model.mn_t.sample([x_a], time_index=time_index, freq_index=freq_index,
-                                                                  is_initial_step=is_initial_step,
-                                                                  memory=mem_lstm, memory_mask=memory_condition_mask_mask,
-                                                                  min_attention_step=min_attention_step)
-        is_initial_step = False
-
-        mem_lstm = mem_lstm
-        memory_condition_mask = memory_condition_mask
-        memory_condition_mask_mask = memory_condition_mask_mask
-        x[:, start_time_index:, :] *= 0
-
-        if verbose:
-            print("start sample step")
-        max_time_step = x.shape[1]
-        max_freq_step = x.shape[2]
-
-        total_alignment = alignment
-        total_extras = attn_extras
-
-        noise_random = np.random.RandomState(3142)
-
-        x_clean = copy.deepcopy(x)
-
-        for _ii in range(start_time_index, max_time_step):
-            for _jj in range(start_freq_index, max_freq_step):
-                mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
-                                                                        is_initial_step=is_initial_step,
-                                                                        memory=mem_lstm, memory_mask=memory_condition_mask_mask,
-                                                                        min_attention_step=min_attention_step)
-
-                x_clean[:, _ii, _jj, 0] = mn_out.squeeze()
-                # this is the noisy one we use for teacher forcing
-                x[:, _ii, _jj, 0] = mn_out.squeeze() + input_additive_noise_level * noise_random.randn()
-                if verbose:
-                    if ((_ii % 10) == 0 and (_jj == 0)) or (_ii == (max_time_step - 1) and (_jj == 0)):
-                        print("sampled index {},{} out of total size ({},{})".format(_ii, _jj, max_time_step, max_freq_step))
-            total_alignment = torch.cat((total_alignment, alignment[None]), dim=0)
-            total_extras.append(attn_extras)
-        model.attention_alignment = total_alignment
-        model.attention_extras = total_extras
+    time_len = x_in_np.shape[1]
+    if len(valid_el) > 1:
+        print("Multiple output samples detected, using default sampling bias of 50% of input length")
+        bias_til = time_len // 2
     else:
-        x = x[0:1, 0:1]
-        spatial_condition = spatial_condition[0:1]
-        mn_out = model.mn_t.sample([x], list_of_spatial_conditions=[spatial_condition])
-    fin = time.time()
-    print("fast sampling complete, time {} sec".format(fin - frst))
-    return x_clean
+        # try to do a smart split
+        timing_info = valid_el[0][3][list(valid_el[0][3].keys())[0]]
+        words = [w for w in timing_info["full_alignment"]["words"]]
+        # this logic should find the biggest gap with at least 1/2 a second priming
+        # in the first half of the overall word sequence
+        # according to the speech recognizer
+        diffs = np.array([w["start"] for w in words[1:]]) - np.array([w["end"] for w in words[:-1]])
+        ends = np.array([w["end"] for w in words])
+        midpoint = ends[-1] / 2.
+        first_half = ends <= midpoint
+        gt_sec = ends >= .5
+        valid = first_half & gt_sec
+        gap_sort = np.argsort(diffs)[::-1]
+        chosen_index = None
+        for g in gap_sort:
+            if valid[g]:
+                chosen_index = g
+            else:
+                continue
+        if chosen_index is None:
+            bias_til = time_len // 2
+        else:
+            # now we need to figure out a time in frames which matches where the gap from ASR is
+            fs = float(speech.sample_rate)
+            stft_sz = speech.stft_size
+            stft_step = speech.stft_step
+            time_step_per_frame = 1./fs * stft_step
+            # due to overlap the neighbors might be valid too but for now just use the chosen index
+            base_full_size_frame_index = ends[chosen_index] / time_step_per_frame
+            # now we look at local energy of base data and find a min within +- 100 ms
+            lcl_window_s = .1
+            lcl_window_frames = int(lcl_window_s / (speech.stft_step * 1./ fs) + 1)
+            lcl_window_samples = int(np.round(lcl_window_frames * time_step_per_frame * fs))
+            # map that all the way back to raw timeseries sample point
+            # valid_el[0][1]
+            wav_sample_cut_point = int(np.round(base_full_size_frame_index * time_step_per_frame * fs))
+            orig_wav = valid_el[0][1]
+            # we need to find the quietest "proxy frame" in this wav, in a segment around wav_sample_cut_point
+            # then map it back 
+            # good discussion, we do it quick and dirty here but could do a proper A / E weighting etc
+            # https://dsp.stackexchange.com/questions/17628/python-audio-detecting-silence-in-audio-signal/17629
+            # https://github.com/endolith/waveform_analysis/blob/master/waveform_analysis/weighting_filters/ABC_weighting.py#L29
+            # https://stackoverflow.com/questions/30889748/how-to-obtain-sound-envelope-using-python
+            from scipy.signal import hilbert
+            analytic_wav = hilbert(orig_wav)
+            envelope_wav = np.abs(analytic_wav)
+            # use the combined rank from both sorts (min by env value, min by grad norm of env) to pick cut point
+            # roughly looking for a place where the envelope isnt really changing, and where the abs value of the signal is low
+            min_order = np.argsort(envelope_wav[wav_sample_cut_point - lcl_window_samples:wav_sample_cut_point + lcl_window_samples])
+            min_grad_order = np.argsort((envelope_wav[wav_sample_cut_point - lcl_window_samples + 1:wav_sample_cut_point + lcl_window_samples] - envelope_wav[wav_sample_cut_point - lcl_window_samples:wav_sample_cut_point + lcl_window_samples - 1]) ** 2)
 
-"""
-if input_tier_condition_tag is None:
-    # no noise here in pred
+            combined_ranking = [int(np.where(min_grad_order == a)[0][0]) + idx1 if len(np.where(min_grad_order == a)[0]) > 0 else np.inf for idx1, a in enumerate(min_order)]
+            min_ranked_pos = np.argmin(combined_ranking)
+            min_cut_point = min_order[min_ranked_pos]
+            min_cut_point_samples = (wav_sample_cut_point - lcl_window_samples) + min_cut_point
+            # now that we have the exact point in the waveform, map that to a frame value
+            # not necessarily integer here
+            min_cut_point_frames = min_cut_point_samples / speech.stft_step
+            downsampled_frame_index = min_cut_point_frames / float(axis1_m)
+            # now we map the min cut point back to approximate frame value
+            # because there is overlap in the frame calcs, take the nearest frame boundary
+            bias_til = int(downsampled_frame_index)
+
+    # dont go smaller than 0
+    bias_til = max(0, bias_til - input_bias_data_frame_offset)
+
+    remaining_steps = time_len - bias_til
+    sample_buffer = 0. * x_in_np
+    # 1. means value is used, 0. means it is masked. Can be different with transformers...
+    sample_mask = 0. * x_mask_in_np + 1.
+    # blend boundary
+    btl = min(bias_til - 3, 0)
+    btm = bias_til + 2
+    sample_buffer[:, :btl] = x_in_np[:, :btl]
+    sample_buffer[:, btl] = .6 * x_in_np[:, btl]
+    sample_buffer[:, btl + 1] = .3 * x_in_np[:, btl + 1]
+    sample_buffer[:, btl + 2] = 0. * x_in_np[:, btl + 2]
+    original_buffer = copy.deepcopy(x_in_np)
+
+    if input_custom_conditioning_json is not None:
+        # now we need to construct the combined input conditioning with the bias 
+        with open(input_custom_conditioning_json, "r") as f:
+            custom_conditioning_alignment = json.load(f)
+
+        frank_el = copy.deepcopy(valid_el)
+        if chosen_index == None:
+            raise ValueError("automatic bias selection failed and chose arbitrary midpoint. Need word-boundary cuts to use custom_conditioning, try another index with (e.g.) --use_sample_index=0,0")
+        # now we replace the old one with the merged and regenerate the minibatch
+        frank_info = []
+        # sample rate
+        frank_info.append(frank_el[0][0])
+        # blank wav to be sure no info leaks
+        frank_info.append(0. * frank_el[0][1])
+        # blank mel spec for the same reason
+        frank_info.append(0. * frank_el[0][2])
+        # now we need to blend the words of the 2 sequences and make a new el
+        tmp = frank_el[0][3]
+        new = custom_conditioning_alignment
+        k = list(tmp.keys())[0]
+        # first lets find the word where we need to split the bias and the followup
+        pre_words = tmp[k]["full_alignment"]["words"][:chosen_index + 1]
+        next_pre_word = tmp[k]["full_alignment"]["words"][chosen_index + 1]
+
+        # handle offset correction
+        pre_offset = next_pre_word["startOffset"]
+        pre_t = next_pre_word["start"]
+        # add optional time gap, should be respected when the minibatch conditioning is created
+        # model is sensitive to this, big gap -> model goes to silence
+        gap = input_bias_split_gap
+        post_words = new["words"]
+        for _i in range(len(post_words)):
+            post_words[_i]["start"] = post_words[_i]["start"] + pre_t + gap
+            post_words[_i]["end"] = post_words[_i]["end"] + pre_t + gap
+            # we dont use offset but maybe should figure out what gap should be in terms of offset?
+            post_words[_i]["startOffset"] = post_words[_i]["startOffset"] + pre_offset
+            post_words[_i]["endOffset"] = post_words[_i]["endOffset"] + pre_offset
+        # now put the words together
+        comb_words = pre_words + post_words
+
+        # now to splice the transcripts, find the first occurence of the word that would have followed, split on that
+        search_key = next_pre_word["word"]
+        matches = [(m.start(0), m.end(0)) for m in re.finditer(search_key, tmp[k]["transcript"])]
+        matches_in_pre = np.where([1 if ("alignedWord" in w and w["alignedWord"] == search_key) or ("word" in w and w["word"] == search_key) else 0 for w in pre_words])[0]
+
+        if len(matches_in_pre) > 0:
+            this_match = matches[len(matches_in_pre)]
+        else:
+            this_match = matches[0]
+        sl = this_match[0]
+        r = tmp[k]["transcript"][:sl] + new["transcript"]
+        tmp[k]["transcript"] = r
+        tmp[k]["full_alignment"]["transcript"] = r
+        tmp[k]["full_alignment"]["words"] = comb_words
+        frank_info.append(tmp)
+        old_valid_el = valid_el
+        valid_el = [tuple(frank_info)]
+
+        sample_info_path = folder + "bias_merged_text_info.json"
+        cleaned_valid_el = valid_el[0][3]
+        with open(sample_info_path, 'w') as f:
+            json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
+            f.write(json_string)
+
+        # need to form new cmd line here
+        r = speech.format_minibatch(valid_el,
+                                    is_sampling=True,
+                                    force_start_crop=True,
+                                    force_repr_mix_symbol_type=input_force_conditioning_type,
+                                    force_ascii_words=input_force_ascii_words,
+                                    force_phoneme_words=input_force_phoneme_words,
+                                    force_end_punctuation=input_force_end_punctuation)
+        cond_seq_data_repr_mix_batch = r[0]
+        cond_seq_repr_mix_mask = r[1]
+        cond_seq_repr_mix_mask_mask = r[2]
+        #cond_seq_data_ascii_batch = r[3]
+        #cond_seq_ascii_mask = r[4]
+        #cond_seq_data_phoneme_batch = r[5]
+        #cond_seq_phoneme_mask = r[6]
+        #data_batch = r[7]
+        #data_mask = r[8]
+
+
+        #r2 = speech.format_minibatch(old_valid_el,
+        #                             quantize_to_n_bins=None)
+        #old_cond_seq_data_repr_mix_batch = r2[0]
+        #old_cond_seq_repr_mix_mask = r2[1]
+        #old_cond_seq_repr_mix_mask_mask = r2[2]
+
+        #cond_seq_data_batch, cond_seq_mask, _, __ = speech.format_minibatch(valid_el)
+
+        torch_cond_seq_data_batch = torch.tensor(cond_seq_data_repr_mix_batch[..., None]).contiguous().to(hp.use_device)
+        torch_cond_seq_data_mask = torch.tensor(cond_seq_repr_mix_mask).contiguous().to(hp.use_device)
+        torch_cond_seq_data_mask_mask = torch.tensor(cond_seq_repr_mix_mask_mask).contiguous().to(hp.use_device)
+
+    if input_attention_early_termination_file == None:
+        last_sil_frame_scaled = np.inf
+    else:
+        with open(input_attention_early_termination_file, "r") as f:
+            lines = f.readlines()
+            last_sil_frame = int(float(lines[1].strip().split(":")[1]))
+            last_sil_resolution = int(float(lines[2].strip().split(":")[1]))
+            full_n_frames = axis1_m * input_size_at_depth[0]
+            this_resolution = full_n_frames / input_size_at_depth[0] # should always be integer value
+            # add in extra frame(s) based on the upsampling resolution due to ambiguity
+            last_sil_frame_scaled = last_sil_frame * int(last_sil_resolution / this_resolution) + (int(last_sil_resolution / this_resolution) - 1)
+
+    import time
+    begin_time = time.time()
+    #sample_buffer[:, :bias_til] = x_in_np[:, :bias_til]
+    # blend boundary
+    btl = max(bias_til - 3, 0)
+    btm = bias_til + 2
+    sample_buffer[:, :btl] = x_in_np[:, :btl]
+    sample_buffer[:, btl] = .6 * x_in_np[:, btl]
+    sample_buffer[:, btl + 1] = .3 * x_in_np[:, btl + 1]
+    sample_buffer[:, btl + 2] = 0. * x_in_np[:, btl + 2]
+    batch_norm_flag = 1.
+    sample_buffer = torch.tensor(sample_buffer).contiguous().to(hp.use_device)
+    sample_mask = torch.tensor(sample_mask).contiguous().to(hp.use_device)
+
+    # for checking / debugging converted symbols
+    rev_a = {v: k for k, v in speech.ascii_lookup.items()}
+    rev_p = {v: k for k, v in speech.phone_lookup.items()}
+
+    cond_syms = [(rev_p[int(l)], r) if r == 1 else (rev_a[int(l)], r)
+                 for l, r in zip(torch_cond_seq_data_batch.cpu().data.numpy().ravel(), torch_cond_seq_data_mask.cpu().data.numpy().ravel())]
+
+    ind = input_use_sample_index if input_use_sample_index is not None else "auto"
+    print("")
+    print("Conditional symbols (and symbol type) input for bias {}:".format(ind))
+    print(cond_syms)
+    print("".join([c[0] for c in cond_syms]))
+    print("")
+
+    if use_half:
+        torch_cond_seq_data_batch = torch.tensor(torch_cond_seq_data_batch.cpu().data.numpy()).contiguous().to(hp.use_device).half()
+        torch_cond_seq_data_mask = torch.tensor(torch_cond_seq_data_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
+        torch_cond_seq_data_mask_mask = torch.tensor(torch_cond_seq_data_mask_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
+        sample_buffer = torch.tensor(sample_buffer.cpu().data.numpy()).contiguous().to(hp.use_device).half()
+        sample_mask = torch.tensor(sample_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
+
+    if use_double:
+        torch_cond_seq_data_batch = torch.tensor(torch_cond_seq_data_batch.cpu().data.numpy()).contiguous().to(hp.use_device).double()
+        torch_cond_seq_data_mask = torch.tensor(torch_cond_seq_data_mask.cpu().data.numpy()).contiguous().to(hp.use_device).double()
+        torch_cond_seq_data_mask_mask = torch.tensor(torch_cond_seq_data_mask_mask.cpu().data.numpy()).contiguous().to(hp.use_device).double()
+        sample_buffer = torch.tensor(sample_buffer.cpu().data.numpy()).contiguous().to(hp.use_device).double()
+        sample_mask = torch.tensor(sample_mask.cpu().data.numpy()).contiguous().to(hp.use_device).double()
+
     with torch.no_grad():
-        pred_out = fast_sample(x_in, x_mask=x_mask_in,
+        pred_out = fast_sample(sample_buffer,
+                               x_mask=sample_mask,
+                               memory_condition=torch_cond_seq_data_batch,
+                               memory_condition_mask=torch_cond_seq_data_mask,
+                               memory_condition_mask_mask=torch_cond_seq_data_mask_mask,
+                               # boundary?
+                               bias_boundary=bias_til,
+                               batch_norm_flag=batch_norm_flag)
+    sample_buffer = pred_out
+    '''
+    for time_step in range(remaining_steps):
+        for mel_step in range(x_in_np.shape[2]):
+            cur_time = time.time()
+            this_step = bias_til + time_step
+            if this_step > last_sil_frame_scaled:
+                print("step {},{} of {},{} -> bypassed due to attention last frame of {}".format(this_step, mel_step, time_len, x_in_np.shape[2], last_sil_frame_scaled))
+                # if we have passed the attention termination, just copy the conditioning
+                cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+                if input_stored_conditioning is not None:
+                    cond_np = input_stored_conditioning
+                # cond is unnormalized, predictions are normalized
+                sample_buffer[:, this_step, mel_step] = ((cond_np - saved_mean) / saved_std)[:, this_step, mel_step]
+                continue
+            print("step {},{} of {},{}".format(this_step, mel_step, time_len, x_in_np.shape[2]))
+
+            """
+            all_x_splits = []
+            x_t = data_batch[..., None]
+            for aa in input_axis_split_list:
+                all_x_splits.append(split_np(x_t, axis=aa))
+                x_t = all_x_splits[-1][0]
+            x_in_np = all_x_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+            x_in_np = (x_in_np - saved_mean) / saved_std
+
+            all_x_mask_splits = []
+            # broadcast mask over frequency so we can downsample
+            x_mask_t = data_mask[..., None, None] + 0. * data_batch[..., None]
+            for aa in input_axis_split_list:
+                all_x_mask_splits.append(split_np(x_mask_t, axis=aa))
+                x_mask_t = all_x_mask_splits[-1][0]
+            x_mask_in_np = all_x_mask_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
+
+            x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
+            x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
+            """
+            x_in = torch.tensor(sample_buffer).contiguous().to(hp.use_device)
+            x_mask_in = torch.tensor(sample_mask).contiguous().to(hp.use_device)
+
+            if use_half:
+                torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device).half()
+                torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device).half()
+                x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device).half()
+                x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device).half()
+
+            if input_tier_condition_tag is None:
+                # no noise here in pred
+                with torch.no_grad():
+                    pred_out = model(x_in, x_mask=x_mask_in,
                                      memory_condition=torch_cond_seq_data_batch,
                                      memory_condition_mask=torch_cond_seq_data_mask,
                                      batch_norm_flag=batch_norm_flag)
-else:
-    cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
-    # conditioning input currently unnormalized
-    if input_stored_conditioning is not None:
-        cond_np = input_stored_conditioning
-    cond = torch.tensor(cond_np).contiguous().to(hp.use_device)
-    if use_half:
-        cond = torch.tensor(cond_np).contiguous().to(hp.use_device).half()
-    with torch.no_grad():
-        pred_out = tst(x_in, x_mask=x_mask_in,
-                             spatial_condition=cond,
-                             batch_norm_flag=batch_norm_flag)
-"""
+            else:
+                cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
+                #input_stored_conditioning = None
+                # conditioning input currently unnormalized
+                if input_stored_conditioning is not None:
+                    cond_np = input_stored_conditioning
+                cond = torch.tensor(cond_np).contiguous().to(hp.use_device)
+                if use_half:
+                    cond = torch.tensor(cond_np).contiguous().to(hp.use_device).half()
+                with torch.no_grad():
+                    pred_out = model(x_in, x_mask=x_mask_in,
+                                     spatial_condition=cond,
+                                     batch_norm_flag=batch_norm_flag)
 
-"""
-unnormalized = pred_out.cpu().data.numpy() * saved_std + saved_mean
-_i = 0
-plt.imshow(unnormalized[_i, :, :, 0])
-plt.savefig("tmpfast.png")
+            teacher_forced_pred = pred_out
+            #teacher_forced_attn = model.attention_alignment
+            sample_buffer[:, this_step, mel_step] = pred_out[:, this_step, mel_step].cpu().data.numpy()
+            end_time = time.time()
+            print("minibatch time {} secs".format(end_time - cur_time))
+    '''
 
-unnormalized = x_in.cpu().data.numpy() * saved_std + saved_mean
-_i = 0
-plt.imshow(unnormalized[_i, :, :, 0])
-plt.savefig("tmpfast_orig.png")
-"""
+    sample_completed = time.time()
 
-def to_one_hot(tensor, n, fill_with=1.):
-    # we perform one hot encore with respect to the last axis
-    one_hot = torch.FloatTensor(tensor.size() + (n,)).zero_()
-    if tensor.is_cuda : one_hot = one_hot.cuda()
-    one_hot.scatter_(len(tensor.size()), tensor.unsqueeze(-1), fill_with)
-    return one_hot
+    folder = input_output_dir + "sampled_forced_images/"
+    if not os.path.exists(folder):
+        os.mkdir(folder)
 
-def sample_dml(l, n_mix=10, only_mean=True, deterministic=True, sampling_temperature=1.):
-    sampling_temperature = float(sampling_temperature)
-    nr_mix = n_mix
-    # Pytorch ordering
-    #l = l.permute(0, 2, 3, 1)
-    ls = [int(y) for y in l.size()]
-    xs = ls[:-1] + [1]
+    if valid_el is not None:
+        sample_info_path = folder + "text_info.json"
+        with open(sample_info_path, 'w') as f:
+            cleaned_valid_el = valid_el[0][3]
+            json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
+            f.write(json_string)
 
-    # unpack parameters
-    logit_probs = l[:, :, :, :nr_mix]
-    l = l[:, :, :, nr_mix:].contiguous().view(xs + [nr_mix * 2])
-    # sample mixture indicator from softmax
-    noise = torch.FloatTensor(logit_probs.size())
-    if l.is_cuda : noise = noise.cuda()
-    noise.uniform_(1e-5, 1. - 1e-5)
-    # hack to make deterministic JRH
-    # could also just take argmax of logit_probs
-    if deterministic or only_mean:
-        # make temp small so logit_probs dominates equation
-        sampling_temperature = 1e-6
-    # sampling temperature from kk
-    # https://gist.github.com/kastnerkyle/ea08e1aed59a0896e4f7991ac7cdc147
-    # discussion on gumbel sm sampling -
-    # https://github.com/Rayhane-mamah/Tacotron-2/issues/155
-    noise = (logit_probs.data/sampling_temperature) - torch.log(- torch.log(noise))
-    _, argmax = noise.max(dim=3)
+    with open(folder + "bias_information.txt", "w") as f:
+        full_n_frames = axis1_m * input_axis_split_list[0] # 352 for current settings
+        time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
+        bias_in_seconds = bias_til * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
+        out_string = "Biased using groundtruth data until frame {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)\nstart_frame:{}\n".format(bias_til, time_downsample_ratio, bias_til * time_downsample_ratio, bias_in_seconds, bias_til)
+        f.write(out_string)
 
-    one_hot = to_one_hot(argmax, nr_mix)
-    sel = one_hot.view(xs[:-1] + [1, nr_mix])
-    # select logistic parameters
-    means = torch.sum(l[:, :, :, :, :nr_mix] * sel, dim=4)
-    log_scales = torch.clamp(torch.sum(l[:, :, :, :, nr_mix:2 * nr_mix] * sel, dim=4), min=-7.)
-    # sample from logistic & clip to interval
-    # we don't actually round to the nearest 8bit value when sampling
-    u = torch.FloatTensor(means.size())
-    if l.is_cuda : u = u.cuda()
-    u.uniform_(1e-5, 1. - 1e-5)
-    # hack to make deterministic
-    if deterministic:
-        u= u*0.0+0.5
-    if only_mean:
-        x = means
-    else:
-        x = means + torch.exp(log_scales) * (torch.log(u) - torch.log(1. - u))
-    out = torch.clamp(torch.clamp(x,min=-1.),max=1.)
-    # put back in Pytorch ordering
-    #out = out.permute(0, 3, 1, 2)
-    return out
+    # function to find contiguous subsequences in a list
+    def ranges(nums):
+        nums = sorted(set(nums))
+        gaps = [[s, e] for s, e in zip(nums, nums[1:]) if s+1 < e]
+        edges = iter(nums[:1] + sum(gaps, []) + nums[-1:])
+        return list(zip(edges, edges))
 
-folder = input_output_dir + "teacher_forced_images/"
-if not os.path.exists(input_output_dir):
-    os.mkdir(input_output_dir)
-
-if not os.path.exists(folder):
-    os.mkdir(folder)
-
-import json
-from collections import OrderedDict
-
-if valid_el is not None:
-    sample_info_path = folder + "text_info.json"
-    cleaned_valid_el = valid_el[0][3]
-    with open(sample_info_path, 'w') as f:
-        json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
-        f.write(json_string)
-
-for _i in range(hp.real_batch_size):
-    teacher_forced_pred = pred_out
-
-    reduced_mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
-    full_mel_cut = int(data_mask[_i].sum())
-
-    this_x_in = x_in[_i][None].cpu().data.numpy()
-    unnormalized = this_x_in * saved_std + saved_mean
-    plt.imshow(unnormalized[0, :reduced_mel_cut, :, 0])
-    plt.savefig(folder + os.sep + "small_x{}.png".format(_i))
-    plt.close()
-
-    # no normalization on initial data
-    unnormalized_full = data_batch[_i, :full_mel_cut, :]
-    plt.imshow(unnormalized_full)
-    plt.savefig(folder + os.sep + "data_x{}.png".format(_i))
-    plt.close()
-
-    teacher_forced_pred = pred_out
-    teacher_forced_attn = model.attention_alignment
-
-    if input_tier_condition_tag is None:
-        for _i in range(hp.real_batch_size):
-            mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
-            text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
-            # matshow vs imshow?
-            this_att = teacher_forced_attn[:, _i, 0][:mel_cut, :text_cut]
-            this_att = this_att.cpu().data.numpy().astype("float32")
-            plt.imshow(this_att)
-            plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
-            plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
-            plt.close()
-    else:
-        plt.imshow(cond_np[_i, :, :, 0])
-        plt.savefig(folder + os.sep + "cond_small_x{}.png".format(_i))
+    for _i in range(hp.real_batch_size):
+        unnormalized = sample_buffer.cpu().data.numpy() * saved_std + saved_mean
+        plt.imshow(unnormalized[_i, :, :, 0])
+        plt.savefig(folder + os.sep + "small_sampled_x{}.png".format(_i))
         plt.close()
-
-time_len = x_in_np.shape[1]
-if len(valid_el) > 1:
-    print("Multiple output samples detected, using default sampling bias of 50% of input length")
-    bias_til = time_len // 2
-else:
-    # try to do a smart split
-    timing_info = valid_el[0][3][list(valid_el[0][3].keys())[0]]
-    words = [w for w in timing_info["full_alignment"]["words"]]
-    # this logic should find the biggest gap with at least 1/2 a second priming
-    # in the first half of the overall word sequence
-    # according to the speech recognizer
-    diffs = np.array([w["start"] for w in words[1:]]) - np.array([w["end"] for w in words[:-1]])
-    ends = np.array([w["end"] for w in words])
-    midpoint = ends[-1] / 2.
-    first_half = ends <= midpoint
-    gt_sec = ends >= .5
-    valid = first_half & gt_sec
-    gap_sort = np.argsort(diffs)[::-1]
-    chosen_index = None
-    for g in gap_sort:
-        if valid[g]:
-            chosen_index = g
-        else:
-            continue
-    if chosen_index is None:
-        bias_til = time_len // 2
-    else:
-        # now we need to figure out a time in frames which matches where the gap from ASR is
-        fs = float(speech.sample_rate)
-        stft_sz = speech.stft_size
-        stft_step = speech.stft_step
-        time_step_per_frame = 1./fs * stft_step
-        # due to overlap the neighbors might be valid too but for now just use the chosen index
-        base_full_size_frame_index = ends[chosen_index] / time_step_per_frame
-        # now we look at local energy of base data and find a min within +- 100 ms
-        lcl_window_s = .1
-        lcl_window_frames = int(lcl_window_s / (speech.stft_step * 1./ fs) + 1)
-        lcl_window_samples = int(np.round(lcl_window_frames * time_step_per_frame * fs))
-        # map that all the way back to raw timeseries sample point
-        # valid_el[0][1]
-        wav_sample_cut_point = int(np.round(base_full_size_frame_index * time_step_per_frame * fs))
-        orig_wav = valid_el[0][1]
-        # we need to find the quietest "proxy frame" in this wav, in a segment around wav_sample_cut_point
-        # then map it back 
-        # good discussion, we do it quick and dirty here but could do a proper A / E weighting etc
-        # https://dsp.stackexchange.com/questions/17628/python-audio-detecting-silence-in-audio-signal/17629
-        # https://github.com/endolith/waveform_analysis/blob/master/waveform_analysis/weighting_filters/ABC_weighting.py#L29
-        # https://stackoverflow.com/questions/30889748/how-to-obtain-sound-envelope-using-python
-        from scipy.signal import hilbert
-        analytic_wav = hilbert(orig_wav)
-        envelope_wav = np.abs(analytic_wav)
-        # use the combined rank from both sorts (min by env value, min by grad norm of env) to pick cut point
-        # roughly looking for a place where the envelope isnt really changing, and where the abs value of the signal is low
-        min_order = np.argsort(envelope_wav[wav_sample_cut_point - lcl_window_samples:wav_sample_cut_point + lcl_window_samples])
-        min_grad_order = np.argsort((envelope_wav[wav_sample_cut_point - lcl_window_samples + 1:wav_sample_cut_point + lcl_window_samples] - envelope_wav[wav_sample_cut_point - lcl_window_samples:wav_sample_cut_point + lcl_window_samples - 1]) ** 2)
-
-        combined_ranking = [int(np.where(min_grad_order == a)[0][0]) + idx1 if len(np.where(min_grad_order == a)[0]) > 0 else np.inf for idx1, a in enumerate(min_order)]
-        min_ranked_pos = np.argmin(combined_ranking)
-        min_cut_point = min_order[min_ranked_pos]
-        min_cut_point_samples = (wav_sample_cut_point - lcl_window_samples) + min_cut_point
-        # now that we have the exact point in the waveform, map that to a frame value
-        # not necessarily integer here
-        min_cut_point_frames = min_cut_point_samples / speech.stft_step
-        downsampled_frame_index = min_cut_point_frames / float(axis1_m)
-        # now we map the min cut point back to approximate frame value
-        # because there is overlap in the frame calcs, take the nearest frame boundary
-        bias_til = int(downsampled_frame_index)
-
-# dont go smaller than 0
-bias_til = max(0, bias_til - input_bias_data_frame_offset)
-
-remaining_steps = time_len - bias_til
-sample_buffer = 0. * x_in_np
-# 1. means value is used, 0. means it is masked. Can be different with transformers...
-sample_mask = 0. * x_mask_in_np + 1.
-# blend boundary
-btl = min(bias_til - 3, 0)
-btm = bias_til + 2
-sample_buffer[:, :btl] = x_in_np[:, :btl]
-sample_buffer[:, btl] = .6 * x_in_np[:, btl]
-sample_buffer[:, btl + 1] = .3 * x_in_np[:, btl + 1]
-sample_buffer[:, btl + 2] = 0. * x_in_np[:, btl + 2]
-original_buffer = copy.deepcopy(x_in_np)
-
-if input_custom_conditioning_json is not None:
-    # now we need to construct the combined input conditioning with the bias 
-    with open(input_custom_conditioning_json, "r") as f:
-        custom_conditioning_alignment = json.load(f)
-
-    frank_el = copy.deepcopy(valid_el)
-    if chosen_index == None:
-        raise ValueError("automatic bias selection failed and chose arbitrary midpoint. Need word-boundary cuts to use custom_conditioning, try another index with (e.g.) --use_sample_index=0,0")
-    # now we replace the old one with the merged and regenerate the minibatch
-    frank_info = []
-    # sample rate
-    frank_info.append(frank_el[0][0])
-    # blank wav to be sure no info leaks
-    frank_info.append(0. * frank_el[0][1])
-    # blank mel spec for the same reason
-    frank_info.append(0. * frank_el[0][2])
-    # now we need to blend the words of the 2 sequences and make a new el
-    tmp = frank_el[0][3]
-    new = custom_conditioning_alignment
-    k = list(tmp.keys())[0]
-    # first lets find the word where we need to split the bias and the followup
-    pre_words = tmp[k]["full_alignment"]["words"][:chosen_index + 1]
-    next_pre_word = tmp[k]["full_alignment"]["words"][chosen_index + 1]
-
-    # handle offset correction
-    pre_offset = next_pre_word["startOffset"]
-    pre_t = next_pre_word["start"]
-    # add optional time gap, should be respected when the minibatch conditioning is created
-    # model is sensitive to this, big gap -> model goes to silence
-    gap = input_bias_split_gap
-    post_words = new["words"]
-    for _i in range(len(post_words)):
-        post_words[_i]["start"] = post_words[_i]["start"] + pre_t + gap
-        post_words[_i]["end"] = post_words[_i]["end"] + pre_t + gap
-        # we dont use offset but maybe should figure out what gap should be in terms of offset?
-        post_words[_i]["startOffset"] = post_words[_i]["startOffset"] + pre_offset
-        post_words[_i]["endOffset"] = post_words[_i]["endOffset"] + pre_offset
-    # now put the words together
-    comb_words = pre_words + post_words
-
-    # now to splice the transcripts, find the first occurence of the word that would have followed, split on that
-    search_key = next_pre_word["word"]
-    matches = [(m.start(0), m.end(0)) for m in re.finditer(search_key, tmp[k]["transcript"])]
-    matches_in_pre = np.where([1 if ("alignedWord" in w and w["alignedWord"] == search_key) or ("word" in w and w["word"] == search_key) else 0 for w in pre_words])[0]
-
-    if len(matches_in_pre) > 0:
-        this_match = matches[len(matches_in_pre)]
-    else:
-        this_match = matches[0]
-    sl = this_match[0]
-    r = tmp[k]["transcript"][:sl] + new["transcript"]
-    tmp[k]["transcript"] = r
-    tmp[k]["full_alignment"]["transcript"] = r
-    tmp[k]["full_alignment"]["words"] = comb_words
-    frank_info.append(tmp)
-    old_valid_el = valid_el
-    valid_el = [tuple(frank_info)]
-
-    sample_info_path = folder + "bias_merged_text_info.json"
-    cleaned_valid_el = valid_el[0][3]
-    with open(sample_info_path, 'w') as f:
-        json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
-        f.write(json_string)
-
-    # need to form new cmd line here
-    r = speech.format_minibatch(valid_el,
-                                is_sampling=True,
-                                force_start_crop=True,
-                                force_repr_mix_symbol_type=input_force_conditioning_type,
-                                force_ascii_words=input_force_ascii_words,
-                                force_phoneme_words=input_force_phoneme_words,
-                                force_end_punctuation=input_force_end_punctuation)
-    cond_seq_data_repr_mix_batch = r[0]
-    cond_seq_repr_mix_mask = r[1]
-    cond_seq_repr_mix_mask_mask = r[2]
-    #cond_seq_data_ascii_batch = r[3]
-    #cond_seq_ascii_mask = r[4]
-    #cond_seq_data_phoneme_batch = r[5]
-    #cond_seq_phoneme_mask = r[6]
-    #data_batch = r[7]
-    #data_mask = r[8]
-
-
-    #r2 = speech.format_minibatch(old_valid_el,
-    #                             quantize_to_n_bins=None)
-    #old_cond_seq_data_repr_mix_batch = r2[0]
-    #old_cond_seq_repr_mix_mask = r2[1]
-    #old_cond_seq_repr_mix_mask_mask = r2[2]
-
-    #cond_seq_data_batch, cond_seq_mask, _, __ = speech.format_minibatch(valid_el)
-
-    torch_cond_seq_data_batch = torch.tensor(cond_seq_data_repr_mix_batch[..., None]).contiguous().to(hp.use_device)
-    torch_cond_seq_data_mask = torch.tensor(cond_seq_repr_mix_mask).contiguous().to(hp.use_device)
-    torch_cond_seq_data_mask_mask = torch.tensor(cond_seq_repr_mix_mask_mask).contiguous().to(hp.use_device)
-
-if input_attention_early_termination_file == None:
-    last_sil_frame_scaled = np.inf
-else:
-    with open(input_attention_early_termination_file, "r") as f:
-        lines = f.readlines()
-        last_sil_frame = int(float(lines[1].strip().split(":")[1]))
-        last_sil_resolution = int(float(lines[2].strip().split(":")[1]))
-        full_n_frames = axis1_m * input_size_at_depth[0]
-        this_resolution = full_n_frames / input_size_at_depth[0] # should always be integer value
-        # add in extra frame(s) based on the upsampling resolution due to ambiguity
-        last_sil_frame_scaled = last_sil_frame * int(last_sil_resolution / this_resolution) + (int(last_sil_resolution / this_resolution) - 1)
-
-import time
-begin_time = time.time()
-#sample_buffer[:, :bias_til] = x_in_np[:, :bias_til]
-# blend boundary
-btl = max(bias_til - 3, 0)
-btm = bias_til + 2
-sample_buffer[:, :btl] = x_in_np[:, :btl]
-sample_buffer[:, btl] = .6 * x_in_np[:, btl]
-sample_buffer[:, btl + 1] = .3 * x_in_np[:, btl + 1]
-sample_buffer[:, btl + 2] = 0. * x_in_np[:, btl + 2]
-batch_norm_flag = 1.
-sample_buffer = torch.tensor(sample_buffer).contiguous().to(hp.use_device)
-sample_mask = torch.tensor(sample_mask).contiguous().to(hp.use_device)
-
-# for checking / debugging converted symbols
-rev_a = {v: k for k, v in speech.ascii_lookup.items()}
-rev_p = {v: k for k, v in speech.phone_lookup.items()}
-
-cond_syms = [(rev_p[int(l)], r) if r == 1 else (rev_a[int(l)], r)
-             for l, r in zip(torch_cond_seq_data_batch.cpu().data.numpy().ravel(), torch_cond_seq_data_mask.cpu().data.numpy().ravel())]
-print("")
-print("Conditional symbols (and symbol type) input:")
-print(cond_syms)
-print("".join([c[0] for c in cond_syms]))
-print("")
-
-if use_half:
-    torch_cond_seq_data_batch = torch.tensor(torch_cond_seq_data_batch.cpu().data.numpy()).contiguous().to(hp.use_device).half()
-    torch_cond_seq_data_mask = torch.tensor(torch_cond_seq_data_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
-    torch_cond_seq_data_mask_mask = torch.tensor(torch_cond_seq_data_mask_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
-    sample_buffer = torch.tensor(sample_buffer.cpu().data.numpy()).contiguous().to(hp.use_device).half()
-    sample_mask = torch.tensor(sample_mask.cpu().data.numpy()).contiguous().to(hp.use_device).half()
-
-if use_double:
-    torch_cond_seq_data_batch = torch.tensor(torch_cond_seq_data_batch.cpu().data.numpy()).contiguous().to(hp.use_device).double()
-    torch_cond_seq_data_mask = torch.tensor(torch_cond_seq_data_mask.cpu().data.numpy()).contiguous().to(hp.use_device).double()
-    torch_cond_seq_data_mask_mask = torch.tensor(torch_cond_seq_data_mask_mask.cpu().data.numpy()).contiguous().to(hp.use_device).double()
-    sample_buffer = torch.tensor(sample_buffer.cpu().data.numpy()).contiguous().to(hp.use_device).double()
-    sample_mask = torch.tensor(sample_mask.cpu().data.numpy()).contiguous().to(hp.use_device).double()
-
-with torch.no_grad():
-    pred_out = fast_sample(sample_buffer,
-                           x_mask=sample_mask,
-                           memory_condition=torch_cond_seq_data_batch,
-                           memory_condition_mask=torch_cond_seq_data_mask,
-                           memory_condition_mask_mask=torch_cond_seq_data_mask_mask,
-                           # boundary?
-                           bias_boundary=bias_til,
-                           batch_norm_flag=batch_norm_flag)
-sample_buffer = pred_out
-'''
-for time_step in range(remaining_steps):
-    for mel_step in range(x_in_np.shape[2]):
-        cur_time = time.time()
-        this_step = bias_til + time_step
-        if this_step > last_sil_frame_scaled:
-            print("step {},{} of {},{} -> bypassed due to attention last frame of {}".format(this_step, mel_step, time_len, x_in_np.shape[2], last_sil_frame_scaled))
-            # if we have passed the attention termination, just copy the conditioning
-            cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
-            if input_stored_conditioning is not None:
-                cond_np = input_stored_conditioning
-            # cond is unnormalized, predictions are normalized
-            sample_buffer[:, this_step, mel_step] = ((cond_np - saved_mean) / saved_std)[:, this_step, mel_step]
-            continue
-        print("step {},{} of {},{}".format(this_step, mel_step, time_len, x_in_np.shape[2]))
-
-        """
-        all_x_splits = []
-        x_t = data_batch[..., None]
-        for aa in input_axis_split_list:
-            all_x_splits.append(split_np(x_t, axis=aa))
-            x_t = all_x_splits[-1][0]
-        x_in_np = all_x_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
-        x_in_np = (x_in_np - saved_mean) / saved_std
-
-        all_x_mask_splits = []
-        # broadcast mask over frequency so we can downsample
-        x_mask_t = data_mask[..., None, None] + 0. * data_batch[..., None]
-        for aa in input_axis_split_list:
-            all_x_mask_splits.append(split_np(x_mask_t, axis=aa))
-            x_mask_t = all_x_mask_splits[-1][0]
-        x_mask_in_np = all_x_mask_splits[::-1][input_tier_input_tag[0]][input_tier_input_tag[1]]
-
-        x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device)
-        x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device)
-        """
-        x_in = torch.tensor(sample_buffer).contiguous().to(hp.use_device)
-        x_mask_in = torch.tensor(sample_mask).contiguous().to(hp.use_device)
-
-        if use_half:
-            torch_cond_seq_data_batch = torch.tensor(cond_seq_data_batch[..., None]).contiguous().to(hp.use_device).half()
-            torch_cond_seq_data_mask = torch.tensor(cond_seq_mask).contiguous().to(hp.use_device).half()
-            x_in = torch.tensor(x_in_np).contiguous().to(hp.use_device).half()
-            x_mask_in = torch.tensor(x_mask_in_np).contiguous().to(hp.use_device).half()
-
-        if input_tier_condition_tag is None:
-            # no noise here in pred
-            with torch.no_grad():
-                pred_out = model(x_in, x_mask=x_mask_in,
-                                 memory_condition=torch_cond_seq_data_batch,
-                                 memory_condition_mask=torch_cond_seq_data_mask,
-                                 batch_norm_flag=batch_norm_flag)
-        else:
-            cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
-            #input_stored_conditioning = None
-            # conditioning input currently unnormalized
-            if input_stored_conditioning is not None:
-                cond_np = input_stored_conditioning
-            cond = torch.tensor(cond_np).contiguous().to(hp.use_device)
-            if use_half:
-                cond = torch.tensor(cond_np).contiguous().to(hp.use_device).half()
-            with torch.no_grad():
-                pred_out = model(x_in, x_mask=x_mask_in,
-                                 spatial_condition=cond,
-                                 batch_norm_flag=batch_norm_flag)
 
         teacher_forced_pred = pred_out
-        #teacher_forced_attn = model.attention_alignment
-        sample_buffer[:, this_step, mel_step] = pred_out[:, this_step, mel_step].cpu().data.numpy()
-        end_time = time.time()
-        print("minibatch time {} secs".format(end_time - cur_time))
-'''
+        teacher_forced_attn = model.attention_alignment
 
-sample_completed = time.time()
-
-folder = input_output_dir + "sampled_forced_images/"
-if not os.path.exists(folder):
-    os.mkdir(folder)
-
-if valid_el is not None:
-    sample_info_path = folder + "text_info.json"
-    with open(sample_info_path, 'w') as f:
-        cleaned_valid_el = valid_el[0][3]
-        json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
-        f.write(json_string)
-
-with open(folder + "bias_information.txt", "w") as f:
-    full_n_frames = axis1_m * input_axis_split_list[0] # 352 for current settings
-    time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
-    bias_in_seconds = bias_til * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
-    out_string = "Biased using groundtruth data until frame {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)\nstart_frame:{}\n".format(bias_til, time_downsample_ratio, bias_til * time_downsample_ratio, bias_in_seconds, bias_til)
-    f.write(out_string)
-
-# function to find contiguous subsequences in a list
-def ranges(nums):
-    nums = sorted(set(nums))
-    gaps = [[s, e] for s, e in zip(nums, nums[1:]) if s+1 < e]
-    edges = iter(nums[:1] + sum(gaps, []) + nums[-1:])
-    return list(zip(edges, edges))
-
-for _i in range(hp.real_batch_size):
-    unnormalized = sample_buffer.cpu().data.numpy() * saved_std + saved_mean
-    plt.imshow(unnormalized[_i, :, :, 0])
-    plt.savefig(folder + os.sep + "small_sampled_x{}.png".format(_i))
-    plt.close()
-
-    teacher_forced_pred = pred_out
-    teacher_forced_attn = model.attention_alignment
-
-    if input_tier_condition_tag is None:
-        for _i in range(hp.real_batch_size):
-            mel_cut = int(sample_mask[_i, :, 0, 0].cpu().data.numpy().sum())
-            text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
-            # matshow vs imshow?
-            this_att = teacher_forced_attn[:, _i, 0][:mel_cut, :text_cut]
-            this_att = this_att.cpu().data.numpy().astype("float32")
-            plt.imshow(this_att)
-            plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
-            plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
-            plt.close()
-    else:
-        plt.imshow(cond_np[_i, :, :, 0])
-        plt.savefig(folder + os.sep + "cond_small_x{}.png".format(_i))
-        plt.close()
-
-    # output length is first dim
-    # conditioning dim is last dim
-    if hasattr(model, "attention_extras"):
-        attention_positions = np.array([model.attention_extras[_el]["kappa"].cpu().data.numpy() for _el in range(len(model.attention_extras))])[:, _i]
-        attention_terminations = np.array([model.attention_extras[_el]["termination"].cpu().data.numpy() for _el in range(len(model.attention_extras))])[:, _i]
-
-        aa = np.where(unnormalized[_i, :, :, 0].mean(axis=1) < 1E-3)[0]
-        # get the start of the last contiguous subsequence with mean amplitude < 1E-3
-        # should represent the end silence with a well trained model
-
-        if len(aa) > 0:
-            silent_subs = ranges(aa)
-            last_sil_start = silent_subs[-1][0]
+        if input_tier_condition_tag is None:
+            for _i in range(hp.real_batch_size):
+                mel_cut = int(sample_mask[_i, :, 0, 0].cpu().data.numpy().sum())
+                text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
+                # matshow vs imshow?
+                this_att = teacher_forced_attn[:, _i, 0][:mel_cut, :text_cut]
+                this_att = this_att.cpu().data.numpy().astype("float32")
+                plt.imshow(this_att)
+                plt.title("{}\n{}\n".format("/".join(saved_model_path.split("/")[:-1]), saved_model_path.split("/")[-1]))
+                plt.savefig(folder + os.sep + "attn_{}.png".format(_i))
+                plt.close()
         else:
-            last_sil_start = unnormalized.shape[1]
-        with open(folder + "attention_termination_x{}.txt".format(_i), "w") as f:
-            full_n_frames = axis1_m * input_axis_split_list[0] # 352 for current settings
-            time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
-            sil_in_seconds = last_sil_start * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
-            out_string = "Sil frames begin at {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)\nend_frame:{}\nend_scale:{}".format(last_sil_start, time_downsample_ratio, last_sil_start * time_downsample_ratio, sil_in_seconds, last_sil_start, time_downsample_ratio)
-            f.write(out_string)
+            plt.imshow(cond_np[_i, :, :, 0])
+            plt.savefig(folder + os.sep + "cond_small_x{}.png".format(_i))
+            plt.close()
 
-np.save(folder + "/" + "raw_samples.npy", sample_buffer.cpu().data.numpy())
-np.save(folder + "/" + "unnormalized_samples.npy", sample_buffer.cpu().data.numpy() * saved_std + saved_mean)
-np.save(folder + "/" + "minibatch_input.npy", original_buffer)
-if input_tier_condition_tag is None:
-    np.save(folder + "/" + "attn_activation.npy", teacher_forced_attn.cpu().data.numpy())
-else:
-    np.save(folder + "/" + "unnormalized_cond_input.npy", cond_np)
-print("finished sampling in {} sec".format(sample_completed - begin_time))
+        # output length is first dim
+        # conditioning dim is last dim
+        if hasattr(model, "attention_extras"):
+            attention_positions = np.array([model.attention_extras[_el]["kappa"].cpu().data.numpy() for _el in range(len(model.attention_extras))])[:, _i]
+            attention_terminations = np.array([model.attention_extras[_el]["termination"].cpu().data.numpy() for _el in range(len(model.attention_extras))])[:, _i]
+
+            aa = np.where(unnormalized[_i, :, :, 0].mean(axis=1) < 1E-3)[0]
+            # get the start of the last contiguous subsequence with mean amplitude < 1E-3
+            # should represent the end silence with a well trained model
+
+            if len(aa) > 0:
+                silent_subs = ranges(aa)
+                last_sil_start = silent_subs[-1][0]
+            else:
+                last_sil_start = unnormalized.shape[1]
+            with open(folder + "attention_termination_x{}.txt".format(_i), "w") as f:
+                full_n_frames = axis1_m * input_axis_split_list[0] # 352 for current settings
+                time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
+                sil_in_seconds = last_sil_start * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
+                out_string = "Sil frames begin at {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)\nend_frame:{}\nend_scale:{}".format(last_sil_start, time_downsample_ratio, last_sil_start * time_downsample_ratio, sil_in_seconds, last_sil_start, time_downsample_ratio)
+                f.write(out_string)
+
+    np.save(folder + "/" + "raw_samples.npy", sample_buffer.cpu().data.numpy())
+    np.save(folder + "/" + "unnormalized_samples.npy", sample_buffer.cpu().data.numpy() * saved_std + saved_mean)
+    np.save(folder + "/" + "minibatch_input.npy", original_buffer)
+    if input_tier_condition_tag is None:
+        np.save(folder + "/" + "attn_activation.npy", teacher_forced_attn.cpu().data.numpy())
+    else:
+        np.save(folder + "/" + "unnormalized_cond_input.npy", cond_np)
+    ind = input_use_sample_index if input_use_sample_index is not None else "auto"
+    print("finished sampling using bias {} in {} sec".format(ind, sample_completed - begin_time))
+    if input_output_dir[-1] == os.sep:
+        fldr = input_output_dir[:-1]
+    else:
+        fldr = input_output_dir
+
+    if os.path.exists(fldr + "_bias{}".format(ind)):
+        shutil.rmtree(fldr + "_bias{}".format(ind))
+
+    shutil.move(fldr, fldr + "_bias{}".format(ind))
