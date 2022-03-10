@@ -95,10 +95,15 @@ parser.add_argument('--bias_data_frame_offset', type=int, default=0,
                     help='offset to mix into automatic data bias cuts, negative is "forward" in time, positive is "backward" in time')
 parser.add_argument('--bias_split_gap', type=float, default=0.05,
                     help='gap between bias text and generation')
+
 parser.add_argument('--force_end_punctuation', type=str, default=None,
                     help='string that overrides the end of conditioning sequence symbol(s)')
 parser.add_argument('--force_conditioning_type', type=str, default=None,
                     help='string that overrides the text conditioning type, either "ascii" or "phoneme" (default is mixed)')
+parser.add_argument('--force_ascii_words', type=str, default=None,
+                    help='string that overrides the text conditioning type, forcing particular words to be ascii. provide multiple words with "hello,there" style comma separation')
+parser.add_argument('--force_phoneme_words', type=str, default=None,
+                    help='string that overrides the text conditioning type, forcing particular words to be phoneme. provide multiple words with "hello,there" style comma separation')
 
 parser.add_argument('--additive_noise_level', type=float, default=0.0,
                     help='noise level to add to the predictions, helps perturb out of flat attention spots')
@@ -185,6 +190,17 @@ input_bias_data_frame_offset = int(args.bias_data_frame_offset)
 input_bias_split_gap = float(args.bias_split_gap)
 input_override_dataset_path = str(args.override_dataset_path) if args.override_dataset_path is not None else None
 input_force_end_punctuation = str(args.force_end_punctuation) if args.force_end_punctuation is not None else None
+if args.force_ascii_words is not None:
+    arg_force_ascii_words = args.force_ascii_words if "," in args.force_ascii_words else args.force_ascii_words + ","
+    input_force_ascii_words = [str(el) for el in arg_force_ascii_words.split(",") if str(el) != ""]
+else:
+    input_force_ascii_words = None
+
+if args.force_phoneme_words is not None:
+    arg_force_phoneme_words = args.force_phoneme_words if "," in args.force_phoneme_words else args.force_phoneme_words + ","
+    input_force_ascii_words = [str(el) for el in arg_force_phoneme_words.split(",") if str(el) != ""]
+else:
+    input_force_phoneme_words = None
 
 input_force_conditioning_type = str(args.force_conditioning_type) if args.force_conditioning_type is not None else None
 if input_force_conditioning_type not in ["ascii", "phoneme", None]:
@@ -912,6 +928,8 @@ if input_custom_conditioning_json is not None:
                                 is_sampling=True,
                                 force_start_crop=True,
                                 force_repr_mix_symbol_type=input_force_conditioning_type,
+                                force_ascii_words=input_force_ascii_words,
+                                force_phoneme_words=input_force_phoneme_words,
                                 force_end_punctuation=input_force_end_punctuation)
     cond_seq_data_repr_mix_batch = r[0]
     cond_seq_repr_mix_mask = r[1]

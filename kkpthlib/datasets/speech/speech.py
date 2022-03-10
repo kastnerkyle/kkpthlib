@@ -568,6 +568,8 @@ class EnglishSpeechCorpus(object):
                          force_start_crop=False,
                          force_end_punctuation=None,
                          force_repr_mix_symbol_type=None,
+                         force_ascii_words=None,
+                         force_phoneme_words=None,
                          pause_duration_breakpoints=None,
                          write_out_debug_info=False,
                          quantize_to_n_bins=None):
@@ -1098,6 +1100,13 @@ class EnglishSpeechCorpus(object):
                     choosing = 0 * choosing + 1
                 else:
                     raise ValueError("force_repr_mix_symbol was not None, but didn't recognize argument {}. Expected 'ascii' or 'phoneme'".format(force_repr_mix_symbol_type))
+            for _n in range(len(choosing)):
+                if force_ascii_words is not None:
+                    if a_nonspacing[_n][0] in force_ascii_words:
+                        choosing[_n] = 0
+                if force_phoneme_words is not None:
+                    if a_nonspacing[_n][0] in force_phoneme_words:
+                        choosing[_n] = 1
 
             for _n, c in enumerate(choosing):
                 # build ascii sequence at the same time for convenience
