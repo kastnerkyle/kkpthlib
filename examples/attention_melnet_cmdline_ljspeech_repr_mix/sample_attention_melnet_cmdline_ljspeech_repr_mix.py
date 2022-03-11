@@ -1175,6 +1175,7 @@ for input_use_sample_index in full_input_use_sample_index:
                 last_sil_start = silent_subs[-1][0]
             else:
                 last_sil_start = unnormalized.shape[1]
+
             with open(folder + "attention_termination_x{}.txt".format(_i), "w") as f:
                 full_n_frames = axis1_m * input_axis_split_list[0] # 352 for current settings
                 time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
@@ -1267,7 +1268,14 @@ for input_use_sample_index in full_input_use_sample_index:
             # terminate when the last character is attended
             end_att = int(torch_cond_seq_data_mask_mask.sum().cpu().data.numpy())
             #end_att_index = np.where(~mask_attn[:, end_att - 2] & mask_attn[:, end_att - 1])[0][0]
-            end_att_index = np.where(mask_attn[:, end_att - 1])[0][0]
+
+            end_att_index_all = np.where(mask_attn[:, end_att - 2])[0]
+            if len(end_att_index_all) > 0:
+                end_att_index = end_att_index_all
+            else:
+                end_att_index = mask_attn.shape[0] - 1
+                
+            # fine tune the termination by setting it to the quietest segment in between n-2 and n-1 (end symbol)
             # for now only write out the termination
             with open(folder + "attention_termination_x{}.txt".format(_i), "w") as f:
                 full_n_frames = axis1_m * input_axis_split_list[0] # 352 for current settings
