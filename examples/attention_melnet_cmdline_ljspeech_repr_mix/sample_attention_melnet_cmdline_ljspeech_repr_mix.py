@@ -1264,9 +1264,10 @@ for input_use_sample_index in full_input_use_sample_index:
                 start_post_att_tup = confirmed[0]
             # we can use this for our quality metric in the future
 
-            # the last character to attend
+            # terminate when the last character is attended
             end_att = int(torch_cond_seq_data_mask_mask.sum().cpu().data.numpy())
-            end_att_index = np.where(~mask_attn[:, end_att - 2] & mask_attn[:, end_att - 1])[0][0]
+            #end_att_index = np.where(~mask_attn[:, end_att - 2] & mask_attn[:, end_att - 1])[0][0]
+            end_att_index = np.where(mask_attn[:, end_att - 1])[0][0]
             # for now only write out the termination
             with open(folder + "attention_termination_x{}.txt".format(_i), "w") as f:
                 full_n_frames = axis1_m * input_axis_split_list[0] # 352 for current settings
