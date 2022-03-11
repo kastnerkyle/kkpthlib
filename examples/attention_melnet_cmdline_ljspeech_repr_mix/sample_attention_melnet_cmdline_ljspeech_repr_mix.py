@@ -1160,6 +1160,9 @@ for input_use_sample_index in full_input_use_sample_index:
         # output length is first dim
         # conditioning dim is last dim
         if hasattr(model, "attention_extras"):
+
+            '''
+            # old termination logic...
             attention_positions = np.array([model.attention_extras[_el]["kappa"].cpu().data.numpy() for _el in range(len(model.attention_extras))])[:, _i]
             attention_terminations = np.array([model.attention_extras[_el]["termination"].cpu().data.numpy() for _el in range(len(model.attention_extras))])[:, _i]
 
@@ -1177,6 +1180,99 @@ for input_use_sample_index in full_input_use_sample_index:
                 time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
                 sil_in_seconds = last_sil_start * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
                 out_string = "Sil frames begin at {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)\nend_frame:{}\nend_scale:{}".format(last_sil_start, time_downsample_ratio, last_sil_start * time_downsample_ratio, sil_in_seconds, last_sil_start, time_downsample_ratio)
+                f.write(out_string)
+            '''
+
+            thresh = np.percentile(model.attention_alignment[:, 0, 0, :].cpu().data.numpy(), 95)
+            mask_attn = model.attention_alignment[:, 0, 0, :].cpu().data.numpy() > thresh
+            # when we start attending
+
+            pre_words
+            post_words
+            comb_words
+
+            # when we stop attending
+            # for checking / debugging converted symbols
+
+            rev_a = {v: k for k, v in speech.ascii_lookup.items()}
+            rev_p = {v: k for k, v in speech.phone_lookup.items()}
+
+            cond_syms = [(rev_p[int(l)], r) if r == 1 else (rev_a[int(l)], r)
+                         for l, r in zip(torch_cond_seq_data_batch.cpu().data.numpy().ravel(), torch_cond_seq_data_mask.cpu().data.numpy().ravel())]
+            # we don't know which one it is in general since the mixing is internal to the speech class, and the speech class doesn't know about priming
+            # look for all places where end_pre_X happens surrounded by space on both sides
+            # then find where start_post_X happens with no other ascii (e.g. ignore " ", and ", ") between
+            # then take the first occurence (from the left) of such a pattern
+            # should be good enough to match
+            end_pre_phone = [p["phone"].split("_")[0] for p in pre_words[-1]["phones"]]
+            end_pre_word = [c for c in pre_words[-1]["alignedWord"]]
+
+            poss_pre_end = []
+            for pre_prop in [end_pre_phone, end_pre_word]:
+                s = pre_prop[0]
+                for _n in range(len(cond_syms) - len(pre_prop)):
+                    if cond_syms[_n][0] == s:
+                        if len(pre_prop) > 1:
+                            matched = True
+                            for _m in range(len(pre_prop[1:])):
+                                if pre_prop[_m + 1] != cond_syms[_n + 1][0]:
+                                    matched = False
+                                    break
+                            if matched:
+                                poss_pre_end.append(_n + _m + 1)
+                        else:
+                            poss_pre_end.append(_n)
+
+            start_post_phone = [p["phone"].split("_")[0] for p in post_words[0]["phones"]]
+            start_post_word = [c for c in post_words[0]["alignedWord"]]
+            poss_post_start = []
+            for post_prop in [start_post_phone, start_post_word]:
+                s = post_prop[0]
+                for _n in range(len(cond_syms) - len(post_prop)):
+                    if cond_syms[_n][0] == s:
+                        if len(post_prop) > 1:
+                            matched = True
+                            for _m in range(len(post_prop[1:])):
+                                if post_prop[_m + 1] != cond_syms[_n + 1][0]:
+                                    matched = False
+                                    break
+                            if matched:
+                                poss_post_start.append(_n)
+                        else:
+                            poss_post_start.append(_n)
+
+            # can be 4 possible matches
+            # phone 2 phone
+            # phone 2 word
+            # word 2 phone
+            # word 2 word
+            # form the matches, then take the first one from the left
+            confirmed = []
+            for pre_end in poss_pre_end:
+                for post_start in poss_post_start:
+                    between = [c[0] for c in cond_syms[pre_end + 1:post_start]]
+                    matched = True
+                    for b in between:
+                        if b not in[" ", ","]:
+                            matched = False
+                            break
+                    if matched:
+                        confirmed.append((pre_end, post_start))
+            if len(confirmed) > 1:
+                start_post_att_tup = sorted(confirmed, key=lambda x: x[0])[0]
+            else:
+                start_post_att_tup = confirmed[0]
+            # we can use this for our quality metric in the future
+
+            # the last character to attend
+            end_att = int(torch_cond_seq_data_mask_mask.sum().cpu().data.numpy())
+            end_att_index = np.where(~mask_attn[:, end_att - 2] & mask_attn[:, end_att - 1])[0][0]
+            # for now only write out the termination
+            with open(folder + "attention_termination_x{}.txt".format(_i), "w") as f:
+                full_n_frames = axis1_m * input_axis_split_list[0] # 352 for current settings
+                time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
+                sil_in_seconds = end_att_index * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
+                out_string = "Attention terminates at {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)\nend_frame:{}\nend_scale:{}".format(end_att_index, time_downsample_ratio, end_att_index * time_downsample_ratio, sil_in_seconds, end_att_index, time_downsample_ratio)
                 f.write(out_string)
 
     np.save(folder + "/" + "raw_samples.npy", sample_buffer.cpu().data.numpy())
