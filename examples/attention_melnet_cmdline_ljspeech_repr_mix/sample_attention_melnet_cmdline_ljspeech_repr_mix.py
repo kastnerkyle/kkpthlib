@@ -1271,10 +1271,9 @@ for input_use_sample_index in full_input_use_sample_index:
 
             end_att_index_all = np.where(mask_attn[:, end_att - 2])[0]
             if len(end_att_index_all) > 0:
-                end_att_index = end_att_index_all
+                end_att_index = end_att_index_all[0]
             else:
                 end_att_index = mask_attn.shape[0] - 1
-                
             # fine tune the termination by setting it to the quietest segment in between n-2 and n-1 (end symbol)
             # for now only write out the termination
             with open(folder + "attention_termination_x{}.txt".format(_i), "w") as f:
