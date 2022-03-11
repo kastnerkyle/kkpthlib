@@ -5826,7 +5826,7 @@ class AttentionMelNetTier(torch.nn.Module):
 
             #weights = torch.sum(alpha[..., None] * (termL - termR), keepdim=True, dim=1)
 
-            termination = 1. - torch.exp(termL[:, 0])
+            termination = 1. - termL[:, 0]
             weights = memory_mask.transpose(0, 1)[:, None, :] * weights
 
             weights = weights.to(orig_dtype)
@@ -5991,7 +5991,7 @@ class AttentionMelNetTier(torch.nn.Module):
 
             #weights = torch.sum(alpha[..., None] * (termL - termR), keepdim=True, dim=1)
 
-            termination = 1. - torch.exp(termL[:, 0])
+            termination = 1. - termL[:, 0]
             weights = memory_mask.transpose(0, 1)[:, None, :] * weights
 
             # grad scaling here

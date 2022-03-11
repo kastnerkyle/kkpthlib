@@ -108,6 +108,8 @@ parser.add_argument('--force_phoneme_words', type=str, default=None,
 
 parser.add_argument('--additive_noise_level', type=float, default=0.0,
                     help='noise level to add to the predictions, helps perturb out of flat attention spots')
+parser.add_argument('--attention_termination_tau', type=float, default=-1.63,
+                    help='cutoff boundary for attention termination estimate')
 
 parser.add_argument('--override_dataset_path', type=str, default=None,
                     help='string that overrides the default dataset path')
@@ -216,6 +218,7 @@ if input_force_conditioning_type not in ["ascii", "phoneme", None]:
     raise ValueError("Unknown input for --force_conditioning_type, got {} but expected 'ascii' or 'phoneme'".format(input_force_conditioning_type))
 
 input_additive_noise_level = float(args.additive_noise_level)
+input_attention_termination_tau = float(args.attention_termination_tau)
 
 assert len(input_size_at_depth) == 2
 assert len(input_tier_input_tag) == 2
@@ -1281,6 +1284,18 @@ for input_use_sample_index in full_input_use_sample_index:
 
             #end_att_index = np.where(~mask_attn[:, end_att - 2] & mask_attn[:, end_att - 1])[0][0]
             last_word_start = [n for n, c in enumerate(cond_syms) if c[0] == " "][-1]
+
+            for _n in range(len(model.attention_extras)):
+                tau_compare = model.attention_extras[_n]["termination"][0, end_att - 1] > input_attention_termination_tau
+                if tau_compare:
+                    end_att_index = _n
+                    break
+
+            # do ranking by:
+            # does it reach the end of the conditioning sequence?
+            # does it have gaps in the non-priming segment
+            # slope of the line from start of gen to end
+            # length of longest "flat" part
 
             # fine tune the termination by setting it to the quietest segment in between n-2 and n-1 (end symbol)
             # for now only write out the termination
