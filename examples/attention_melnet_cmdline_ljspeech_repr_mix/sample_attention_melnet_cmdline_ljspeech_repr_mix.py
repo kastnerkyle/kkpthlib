@@ -1186,6 +1186,13 @@ for input_use_sample_index in full_input_use_sample_index:
 
             thresh = np.percentile(model.attention_alignment[:, 0, 0, :].cpu().data.numpy(), 95)
             mask_attn = model.attention_alignment[:, 0, 0, :].cpu().data.numpy() > thresh
+            end_att = int(torch_cond_seq_data_mask_mask.sum().cpu().data.numpy())
+            end_att_index_all = np.where(mask_attn[:, end_att - 1])[0]
+            if len(end_att_index_all) > 0:
+                end_att_index = end_att_index_all[0]
+            else:
+                end_att_index = mask_attn.shape[0] - 1
+
             # when we start attending
 
             pre_words
@@ -1262,6 +1269,7 @@ for input_use_sample_index in full_input_use_sample_index:
             if len(confirmed) > 1:
                 start_post_att_tup = sorted(confirmed, key=lambda x: x[0])[0]
             elif len(confirmed) == 0:
+                print("error setting attention start point, bypassing for now")
                 print(poss_pre_end)
                 print(poss_post_start)
             else:
@@ -1270,13 +1278,10 @@ for input_use_sample_index in full_input_use_sample_index:
             # we can use this for our quality metric in the future
             # terminate when the last character is attended
             end_att = int(torch_cond_seq_data_mask_mask.sum().cpu().data.numpy())
-            #end_att_index = np.where(~mask_attn[:, end_att - 2] & mask_attn[:, end_att - 1])[0][0]
 
-            end_att_index_all = np.where(mask_attn[:, end_att - 2])[0]
-            if len(end_att_index_all) > 0:
-                end_att_index = end_att_index_all[0]
-            else:
-                end_att_index = mask_attn.shape[0] - 1
+            #end_att_index = np.where(~mask_attn[:, end_att - 2] & mask_attn[:, end_att - 1])[0][0]
+            last_word_start = [n for n, c in enumerate(cond_syms) if c[0] == " "][-1]
+
             # fine tune the termination by setting it to the quietest segment in between n-2 and n-1 (end symbol)
             # for now only write out the termination
             with open(folder + "attention_termination_x{}.txt".format(_i), "w") as f:
