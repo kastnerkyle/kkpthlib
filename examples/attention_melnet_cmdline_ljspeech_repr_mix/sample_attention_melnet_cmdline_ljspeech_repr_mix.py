@@ -1285,6 +1285,7 @@ for input_use_sample_index in full_input_use_sample_index:
             #end_att_index = np.where(~mask_attn[:, end_att - 2] & mask_attn[:, end_att - 1])[0][0]
             last_word_start = [n for n, c in enumerate(cond_syms) if c[0] == " "][-1]
 
+            end_att_index = len(model.attention_extras) - 1
             for _n in range(len(model.attention_extras)):
                 tau_compare = model.attention_extras[_n]["termination"][0, end_att - 1] > input_attention_termination_tau
                 if tau_compare:
