@@ -1254,17 +1254,20 @@ for input_use_sample_index in full_input_use_sample_index:
                     between = [c[0] for c in cond_syms[pre_end + 1:post_start]]
                     matched = True
                     for b in between:
-                        if b not in[" ", ","]:
+                        if b not in [" ", ","]:
                             matched = False
                             break
                     if matched:
                         confirmed.append((pre_end, post_start))
             if len(confirmed) > 1:
                 start_post_att_tup = sorted(confirmed, key=lambda x: x[0])[0]
+            elif len(confirmed) == 0:
+                print(poss_pre_end)
+                print(poss_post_start)
             else:
                 start_post_att_tup = confirmed[0]
-            # we can use this for our quality metric in the future
 
+            # we can use this for our quality metric in the future
             # terminate when the last character is attended
             end_att = int(torch_cond_seq_data_mask_mask.sum().cpu().data.numpy())
             #end_att_index = np.where(~mask_attn[:, end_att - 2] & mask_attn[:, end_att - 1])[0][0]
