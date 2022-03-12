@@ -633,7 +633,7 @@ for input_use_sample_index in full_input_use_sample_index:
                     x_clean[:, _ii, _jj, 0] = mn_out.squeeze()
                     # this is the noisy one we use for teacher forcing
                     # turn off noise near the end...
-                    if attn_extras["termination"][0, mem_lstm.shape[0] - 1] > input_attention_termination_tau * 1.1
+                    if attn_extras["termination"][0, mem_lstm.shape[0] - 1] > input_attention_termination_tau * 1.1:
                         x[:, _ii, _jj, 0] = mn_out.squeeze()
                     else:
                         x[:, _ii, _jj, 0] = mn_out.squeeze() + input_additive_noise_level * noise_random.randn()
