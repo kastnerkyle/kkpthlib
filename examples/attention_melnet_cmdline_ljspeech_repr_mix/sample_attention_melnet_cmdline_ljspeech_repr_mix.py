@@ -1305,6 +1305,7 @@ for input_use_sample_index in full_input_use_sample_index:
                 time_downsample_ratio = full_n_frames / input_size_at_depth[0] # should always be integer value
                 sil_in_seconds = end_att_index * time_downsample_ratio * (1./speech.sample_rate) * speech.stft_step
                 out_string = "Attention terminates at {}, (downsampling ratio {}, upscaled frame would be {}, approximately {} seconds)\nend_frame:{}\nend_scale:{}".format(end_att_index, time_downsample_ratio, end_att_index * time_downsample_ratio, sil_in_seconds, end_att_index, time_downsample_ratio)
+                print(out_string)
                 f.write(out_string)
 
     np.save(folder + "/" + "raw_samples.npy", sample_buffer.cpu().data.numpy())
