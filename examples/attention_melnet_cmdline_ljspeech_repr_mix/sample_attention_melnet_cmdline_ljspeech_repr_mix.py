@@ -108,7 +108,7 @@ parser.add_argument('--force_phoneme_words', type=str, default=None,
 
 parser.add_argument('--additive_noise_level', type=float, default=0.0,
                     help='noise level to add to the predictions, helps perturb out of flat attention spots')
-parser.add_argument('--attention_termination_tau', type=float, default=-1.63,
+parser.add_argument('--attention_termination_tau', type=float, default=-.5,
                     help='cutoff boundary for attention termination estimate')
 
 parser.add_argument('--override_dataset_path', type=str, default=None,
