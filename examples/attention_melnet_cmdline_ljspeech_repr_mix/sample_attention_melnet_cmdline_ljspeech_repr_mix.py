@@ -632,7 +632,11 @@ for input_use_sample_index in full_input_use_sample_index:
 
                     x_clean[:, _ii, _jj, 0] = mn_out.squeeze()
                     # this is the noisy one we use for teacher forcing
-                    x[:, _ii, _jj, 0] = mn_out.squeeze() + input_additive_noise_level * noise_random.randn()
+                    # turn off noise near the end...
+                    if attn_extras["termination"][0, mem_lstm.shape[0] - 1] > input_attention_termination_tau * 1.1
+                        x[:, _ii, _jj, 0] = mn_out.squeeze()
+                    else:
+                        x[:, _ii, _jj, 0] = mn_out.squeeze() + input_additive_noise_level * noise_random.randn()
                     if verbose:
                         if ((_ii % 10) == 0 and (_jj == 0)) or (_ii == (max_time_step - 1) and (_jj == 0)):
                             print("sampled index {},{} out of total size ({},{})".format(_ii, _jj, max_time_step, max_freq_step))
