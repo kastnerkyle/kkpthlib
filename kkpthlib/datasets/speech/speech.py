@@ -58,19 +58,9 @@ class EnglishSpeechCorpus(object):
         self.extract_subsequences = extract_subsequences
 
         self.bypass_checks = bypass_checks
-        if bypass_checks == True:
-            raise ValueError("Unable to bypass safety checks at this time - do cleaning at the dataset level")
+
         self.build_skiplist = build_skiplist
         self.combine_all_into_valid = combine_all_into_valid
-
-        if get_username() == "root" or force_mini_sample:
-            if get_username() == "root":
-                print("WARNING: detected colab environment (due to username 'root'), using mini settings to sample!\nThese settings will use all data in {} for both train and valid sets!".format(metadata_csv))
-            else:
-                print("WARNING: force_mini_sample=True, using mini settings to sample!\nThese settings will use all data in {} for both train and valid sets!".format(metadata_csv))
-            self.bypass_checks = True
-            self.combine_all_info_valid = True
-            self.build_skiplist = False
 
         self.cached_mean_vec_ = None
         self.cached_std_vec_ = None
@@ -100,6 +90,20 @@ class EnglishSpeechCorpus(object):
         self.preemphasis_coef = 0.97
         self.ref_level_db = 20
         self.min_level_db = -90
+        if bypass_checks == True:
+            print("WARNING: Bypassing safety checks and terminating init - this instance of EnglishSpeechCorpus class will only be useful for mel preprocessing")
+            return
+
+
+        if get_username() == "root" or force_mini_sample:
+            if get_username() == "root":
+                print("WARNING: detected colab environment (due to username 'root'), using mini settings to sample!\nThese settings will use all data in {} for both train and valid sets!".format(metadata_csv))
+            else:
+                print("WARNING: force_mini_sample=True, using mini settings to sample!\nThese settings will use all data in {} for both train and valid sets!".format(metadata_csv))
+            self.bypass_checks = True
+            self.combine_all_info_valid = True
+            self.build_skiplist = False
+
 
         info = {}
         with open(metadata_csv, encoding='utf-8') as f:
