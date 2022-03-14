@@ -622,6 +622,10 @@ for input_use_sample_index in full_input_use_sample_index:
             noise_random = np.random.RandomState(3142)
 
             x_clean = copy.deepcopy(x)
+            rev_p = {v: k for k, v in speech.phone_lookup.items()}
+            rev_a = {v: k for k, v in speech.ascii_lookup.items()}
+            cond_seq_sym = [rev_a[int(a)] if b == 0 else rev_p[int(a)] for a, b in zip(memory_condition[:, 0, 0].cpu().data.numpy(), memory_condition_mask[:, 0].cpu().data.numpy())]
+
 
             for _ii in range(start_time_index, max_time_step):
                 for _jj in range(start_freq_index, max_freq_step):
@@ -636,7 +640,16 @@ for input_use_sample_index in full_input_use_sample_index:
                     if attn_extras["termination"][0, mem_lstm.shape[0] - 1] > input_attention_termination_tau * 1.1:
                         x[:, _ii, _jj, 0] = mn_out.squeeze()
                     else:
-                        x[:, _ii, _jj, 0] = mn_out.squeeze() + input_additive_noise_level * noise_random.randn()
+                        was_space = False
+                        for _p, _c in enumerate(cond_seq_sym):
+                            if _c == " ":
+                                # add noise around space chars
+                                if attn_extras["termination"][0, _p] > input_attention_termination_tau * 1.1:
+                                    x[:, _ii, _jj, 0] = mn_out.squeeze() + input_additive_noise_level * noise_random.randn()
+                                    was_space = True
+                                    break
+                        if not was_space:
+                            x[:, _ii, _jj, 0] = mn_out.squeeze()
                     if verbose:
                         if ((_ii % 10) == 0 and (_jj == 0)) or (_ii == (max_time_step - 1) and (_jj == 0)):
                             print("sampled index {},{} out of total size ({},{})".format(_ii, _jj, max_time_step, max_freq_step))
