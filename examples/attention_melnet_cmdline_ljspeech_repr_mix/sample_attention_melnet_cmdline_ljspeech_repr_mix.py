@@ -599,11 +599,16 @@ for input_use_sample_index in full_input_use_sample_index:
 
             x_a = x[:, :start_time_index]
 
+            noise_random = np.random.RandomState(3142)
+            noise_levels = noise_random.rand(*x_a.shape) * input_additive_noise_level
+
+            x_a_noisy = x_a + noise_levels * noise_random.randn(*x_a.shape)
+
             min_attention_step = .0
-            mn_out, alignment, attn_extras = model.mn_t.sample([x_a], time_index=time_index, freq_index=freq_index,
-                                                                      is_initial_step=is_initial_step,
-                                                                      memory=mem_lstm, memory_mask=memory_condition_mask_mask,
-                                                                      min_attention_step=min_attention_step)
+            mn_out, alignment, attn_extras = model.mn_t.sample([x_a_noisy], time_index=time_index, freq_index=freq_index,
+                                                                is_initial_step=is_initial_step,
+                                                                memory=mem_lstm, memory_mask=memory_condition_mask_mask,
+                                                                min_attention_step=min_attention_step)
             is_initial_step = False
 
             mem_lstm = mem_lstm
@@ -619,7 +624,6 @@ for input_use_sample_index in full_input_use_sample_index:
             total_alignment = alignment
             total_extras = attn_extras
 
-            noise_random = np.random.RandomState(3142)
 
             x_clean = copy.deepcopy(x)
             rev_p = {v: k for k, v in speech.phone_lookup.items()}
@@ -1219,74 +1223,6 @@ for input_use_sample_index in full_input_use_sample_index:
 
             cond_syms = [(rev_p[int(l)], r) if r == 1 else (rev_a[int(l)], r)
                          for l, r in zip(torch_cond_seq_data_batch.cpu().data.numpy().ravel(), torch_cond_seq_data_mask.cpu().data.numpy().ravel())]
-            # we don't know which one it is in general since the mixing is internal to the speech class, and the speech class doesn't know about priming
-            # look for all places where end_pre_X happens surrounded by space on both sides
-            # then find where start_post_X happens with no other ascii (e.g. ignore " ", and ", ") between
-            # then take the first occurence (from the left) of such a pattern
-            # should be good enough to match
-            end_pre_phone = [p["phone"].split("_")[0] for p in pre_words[-1]["phones"]]
-            end_pre_word = [c for c in pre_words[-1]["alignedWord"]]
-
-            poss_pre_end = []
-            for pre_prop in [end_pre_phone, end_pre_word]:
-                s = pre_prop[0]
-                for _n in range(len(cond_syms) - len(pre_prop)):
-                    if cond_syms[_n][0] == s:
-                        if len(pre_prop) > 1:
-                            matched = True
-                            for _m in range(len(pre_prop[1:])):
-                                if pre_prop[_m + 1] != cond_syms[_n + 1][0]:
-                                    matched = False
-                                    break
-                            if matched:
-                                poss_pre_end.append(_n + _m + 1)
-                        else:
-                            poss_pre_end.append(_n)
-
-            start_post_phone = [p["phone"].split("_")[0] for p in post_words[0]["phones"]]
-            start_post_word = [c for c in post_words[0]["alignedWord"]]
-            poss_post_start = []
-            for post_prop in [start_post_phone, start_post_word]:
-                s = post_prop[0]
-                for _n in range(len(cond_syms) - len(post_prop)):
-                    if cond_syms[_n][0] == s:
-                        if len(post_prop) > 1:
-                            matched = True
-                            for _m in range(len(post_prop[1:])):
-                                if post_prop[_m + 1] != cond_syms[_n + 1][0]:
-                                    matched = False
-                                    break
-                            if matched:
-                                poss_post_start.append(_n)
-                        else:
-                            poss_post_start.append(_n)
-
-            # can be 4 possible matches
-            # phone 2 phone
-            # phone 2 word
-            # word 2 phone
-            # word 2 word
-            # form the matches, then take the first one from the left
-            confirmed = []
-            for pre_end in poss_pre_end:
-                for post_start in poss_post_start:
-                    between = [c[0] for c in cond_syms[pre_end + 1:post_start]]
-                    matched = True
-                    for b in between:
-                        if b not in [" ", ","]:
-                            matched = False
-                            break
-                    if matched:
-                        confirmed.append((pre_end, post_start))
-            if len(confirmed) > 1:
-                start_post_att_tup = sorted(confirmed, key=lambda x: x[0])[0]
-            elif len(confirmed) == 0:
-                print("error setting attention start point, bypassing for now")
-                print(poss_pre_end)
-                print(poss_post_start)
-            else:
-                start_post_att_tup = confirmed[0]
-
             # we can use this for our quality metric in the future
             # terminate when the last character is attended
             end_att = int(torch_cond_seq_data_mask_mask.sum().cpu().data.numpy())
@@ -1300,12 +1236,6 @@ for input_use_sample_index in full_input_use_sample_index:
                 if tau_compare:
                     end_att_index = _n
                     break
-
-            # do ranking by:
-            # does it reach the end of the conditioning sequence?
-            # does it have gaps in the non-priming segment
-            # slope of the line from start of gen to end
-            # length of longest "flat" part
 
             # fine tune the termination by setting it to the quietest segment in between n-2 and n-1 (end symbol)
             # for now only write out the termination
