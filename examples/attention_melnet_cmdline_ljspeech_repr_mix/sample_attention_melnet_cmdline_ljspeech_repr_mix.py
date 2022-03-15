@@ -931,8 +931,8 @@ for input_use_sample_index in full_input_use_sample_index:
             if "end" not in post_words[_i]:
                 # use the last word as a guess for length?
                 if _i == (len(post_words) - 1):
-                    post_words[_i]["end"] = post_words[_i - 1]["end"] + (post_words[_i - 1]["end"] - post_words[_i - 1]["start"]
-                    post_words[_i]["endOffset"] = post_words[_i - 1]["endOffset"] + (post_words[_i - 1]["endOffset"] - post_words[_i - 1]["startOffset"]
+                    post_words[_i]["end"] = post_words[_i - 1]["end"] + (post_words[_i - 1]["end"] - post_words[_i - 1]["start"])
+                    post_words[_i]["endOffset"] = post_words[_i - 1]["endOffset"] + (post_words[_i - 1]["endOffset"] - post_words[_i - 1]["startOffset"])
                 else:
                     post_words[_i]["end"] = post_words[_i + 1]["start"]
                     post_words[_i]["endOffset"] = post_words[_i + 1]["startOffset"]
