@@ -921,6 +921,23 @@ for input_use_sample_index in full_input_use_sample_index:
         gap = input_bias_split_gap
         post_words = new["words"]
         for _i in range(len(post_words)):
+            if "start" not in post_words[_i]
+                if _i == 0:
+                    post_words[_i]["start"] = 0.0
+                    post_words[_i]["startOffset"] = 0
+                else:
+                    post_words[_i]["start"] = post_words[_i - 1]["end"]
+                    post_words[_i]["startOffset"] = post_words[_i - 1]["endOffset"]
+            if "end" not in post_words[_i]:
+                # use the last word as a guess for length?
+                if _i == (len(post_words) - 1):
+                    post_words[_i]["end"] = post_words[_i - 1]["end"] + (post_words[_i - 1]["end"] - post_words[_i - 1]["start"]
+                    post_words[_i]["endOffset"] = post_words[_i - 1]["endOffset"] + (post_words[_i - 1]["endOffset"] - post_words[_i - 1]["startOffset"]
+                else:
+                    post_words[_i]["end"] = post_words[_i + 1]["start"]
+                    post_words[_i]["endOffset"] = post_words[_i + 1]["startOffset"]
+
+        for _i in range(len(post_words)):
             post_words[_i]["start"] = post_words[_i]["start"] + pre_t + gap
             post_words[_i]["end"] = post_words[_i]["end"] + pre_t + gap
             # we dont use offset but maybe should figure out what gap should be in terms of offset?
