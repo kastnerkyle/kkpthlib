@@ -928,6 +928,8 @@ for input_use_sample_index in full_input_use_sample_index:
                 else:
                     post_words[_i]["start"] = post_words[_i - 1]["end"]
                     post_words[_i]["startOffset"] = post_words[_i - 1]["endOffset"]
+
+        for _i in range(len(post_words)):
             if "end" not in post_words[_i]:
                 # use the last word as a guess for length?
                 if _i == (len(post_words) - 1):
