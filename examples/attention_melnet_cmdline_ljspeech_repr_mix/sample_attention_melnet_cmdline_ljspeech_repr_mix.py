@@ -921,7 +921,7 @@ for input_use_sample_index in full_input_use_sample_index:
         gap = input_bias_split_gap
         post_words = new["words"]
         for _i in range(len(post_words)):
-            if "start" not in post_words[_i]
+            if "start" not in post_words[_i]:
                 if _i == 0:
                     post_words[_i]["start"] = 0.0
                     post_words[_i]["startOffset"] = 0
