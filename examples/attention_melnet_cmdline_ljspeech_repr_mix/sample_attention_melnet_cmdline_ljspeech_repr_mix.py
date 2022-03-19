@@ -221,6 +221,12 @@ if input_force_conditioning_type not in ["ascii", "phoneme", None]:
 
 input_additive_noise_level = float(args.additive_noise_level)
 input_n_noise_samples = int(args.n_noise_samples)
+if input_n_noise_samples > 1:
+    assert input_real_batch_size == 1
+    assert input_virtual_batch_size == 1
+input_real_batch_size = input_n_noise_samples
+input_virtual_batch_size = input_n_noise_samples
+
 input_attention_termination_tau = float(args.attention_termination_tau)
 
 assert len(input_size_at_depth) == 2
@@ -304,6 +310,8 @@ build_model = getattr(mod, "build_model")
 sys.path.pop(0)
 
 hp = get_hparams()
+hp.real_batch_size = input_real_batch_size
+hp.virtual_batch_size = input_virtual_batch_size
 model = build_model(hp)
 
 use_half = args.use_half
@@ -374,7 +382,7 @@ post_load_time = time.time()
 for input_use_sample_index in full_input_use_sample_index:
     if input_batch_skips > 0:
         for _ in range(input_batch_skips):
-            tmp = speech.get_valid_utterances(hp.real_batch_size)
+            tmp = speech.get_valid_utterances(1)
 
     # TODO: fix?
     if input_use_sample_index is not None:
@@ -383,7 +391,7 @@ for input_use_sample_index in full_input_use_sample_index:
         # not used right now but may be logged in the future
         store_valid_els = []
         for _ii in range(input_use_sample_index + 1):
-            this_valid_el = speech.get_utterances(hp.real_batch_size, [speech.valid_keys[_ii]], do_not_filter=True)
+            this_valid_el = speech.get_utterances(1, [speech.valid_keys[_ii]], do_not_filter=True)
             store_valid_els.append(this_valid_el)
         names = []
         for _ii in range(len(store_valid_els)):
@@ -396,10 +404,10 @@ for input_use_sample_index in full_input_use_sample_index:
         # sample 50 minibatches, find longest N examples of that...
         print("Performing length selection to choose base samples for biasing")
         valid_el = None
-        kept_indices = [[0] * hp.real_batch_size, list(range(hp.real_batch_size))]
+        kept_indices = [[0] * 1, list(range(1))]
         itr_offset = 0
         for _ in range(50):
-            this_valid_el = speech.get_valid_utterances(hp.real_batch_size)
+            this_valid_el = speech.get_valid_utterances(1)
             itr_offset += 1
             if valid_el is None:
                 valid_el = this_valid_el
@@ -412,7 +420,8 @@ for input_use_sample_index in full_input_use_sample_index:
                             kept_indices[1][kept] = candidate
                             break
     else:
-        valid_el = speech.get_valid_utterances(hp.real_batch_size)
+        #valid_el = speech.get_valid_utterances(hp.real_batch_size)
+        valid_el = speech.get_valid_utterances(1)
 
     #cond_seq_data_batch, cond_seq_mask, data_batch, data_mask = speech.format_minibatch(valid_el)
     r = speech.format_minibatch(valid_el,
@@ -499,11 +508,19 @@ for input_use_sample_index in full_input_use_sample_index:
     if input_tier_condition_tag is None:
         # no noise here in pred
         with torch.no_grad():
-            pred_out = model(x_in, x_mask=x_mask_in,
-                             memory_condition=torch_cond_seq_data_batch,
-                             memory_condition_mask=torch_cond_seq_data_mask,
-                             memory_condition_mask_mask=torch_cond_seq_data_mask_mask,
+            # ensure proper batch size right here
+            this_x_in = torch.cat([x_in for _ in range(input_real_batch_size)], axis=0)
+            this_x_mask_in = torch.cat([x_mask_in for _ in range(input_real_batch_size)], axis=0)
+            this_torch_cond_seq_data_batch = torch.cat([torch_cond_seq_data_batch for _ in range(input_real_batch_size)], axis=1)
+            this_torch_cond_seq_data_mask = torch.cat([torch_cond_seq_data_mask for _ in range(input_real_batch_size)], axis=1)
+            this_torch_cond_seq_data_mask_mask = torch.cat([torch_cond_seq_data_mask_mask for _ in range(input_real_batch_size)], axis=1)
+            pred_out = model(this_x_in, x_mask=this_x_mask_in,
+                             memory_condition=this_torch_cond_seq_data_batch,
+                             memory_condition_mask=this_torch_cond_seq_data_mask,
+                             memory_condition_mask_mask=this_torch_cond_seq_data_mask_mask,
                              batch_norm_flag=batch_norm_flag)
+            # slice it back down
+            pred_out = pred_out[:1]
     else:
         cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
         # conditioning input currently unnormalized
@@ -535,7 +552,7 @@ for input_use_sample_index in full_input_use_sample_index:
         teacher_forced_pred = pred_out
         teacher_forced_attn = model.attention_alignment
 
-        for _i in range(hp.real_batch_size):
+        for _i in range(1):
             mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
             text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
             # matshow vs imshow?
@@ -600,12 +617,20 @@ for input_use_sample_index in full_input_use_sample_index:
                 start_time_index = int(bias_boundary)
                 start_freq_index = 0
 
+            # expand 
+            if input_n_noise_samples > 1:
+                x = torch.cat([x for _ in range(input_n_noise_samples)], axis=0)
+                mem_lstm = torch.cat([mem_lstm for _ in range(input_n_noise_samples)], axis=1)
+                memory_condition_mask_mask = torch.cat([memory_condition_mask_mask for _ in range(input_n_noise_samples)], axis=1)
+
             x_a = x[:, :start_time_index]
 
             noise_random = np.random.RandomState(3142)
             noise_levels = noise_random.rand(*x_a.shape) * input_additive_noise_level
 
             x_a_noisy = x_a + torch.Tensor(noise_levels * noise_random.randn(*x_a.shape)).to(x_a.device)
+
+            # need to correct the minibatch size here...
 
             min_attention_step = .0
             mn_out, alignment, attn_extras = model.mn_t.sample([x_a_noisy], time_index=time_index, freq_index=freq_index,
@@ -640,31 +665,24 @@ for input_use_sample_index in full_input_use_sample_index:
             marginal_samples = input_n_noise_samples
             for _ii in range(start_time_index, max_time_step):
                 for _jj in range(start_freq_index, max_freq_step):
+                    #for _kk in range(marginal_samples):
                     stored_mn_out = []
-                    for _kk in range(marginal_samples):
-                        # multiple samples...
-                        if prev_ii_jj is not None:
-                            if attn_extras["termination"][0, mem_lstm.shape[0] - 1] > input_attention_termination_tau * 1.1:
-                                x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out
-                            else:
-                                this_noise_level = noise_random.rand() * input_additive_noise_level
-                                x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out + this_noise_level * noise_random.randn()
-                        if _kk == (marginal_samples - 1) or (_ii == start_time_index and _jj == start_freq_index):
-                            enable_cache = True
+                    # multiple samples in parallel via batching
+                    if prev_ii_jj is not None:
+                        if attn_extras["termination"][0, mem_lstm.shape[0] - 1] > input_attention_termination_tau * 1.1:
+                            x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out
                         else:
-                            enable_cache = False
-                        # how to handle attn...
-                        mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
-                                                                           is_initial_step=is_initial_step,
-                                                                           memory=mem_lstm, memory_mask=memory_condition_mask_mask,
-                                                                           min_attention_step=min_attention_step,
-                                                                           do_cache=enable_cache)
-                        stored_mn_out.append(mn_out.squeeze())
-                        if _ii == start_time_index and _jj == start_freq_index:
-                            break
+                            this_noise_level = noise_random.rand(marginal_samples) * input_additive_noise_level
+                            x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out + torch.Tensor(this_noise_level * noise_random.randn(marginal_samples)).to(x.device)
+                    enable_cache = True
+                    mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
+                                                                       is_initial_step=is_initial_step,
+                                                                       memory=mem_lstm, memory_mask=memory_condition_mask_mask,
+                                                                       min_attention_step=min_attention_step,
+                                                                       do_cache=enable_cache)
                     if prev_ii_jj is not None:
                         x_clean[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out
-                    last_mn_out = torch.mean(torch.cat([s[None] for s in stored_mn_out], axis=0))
+                    last_mn_out = torch.mean(mn_out, axis=0).squeeze().detach()
                     prev_ii_jj = (_ii, _jj)
                     # this is the noisy one we use for teacher forcing
                     # turn off noise near the end...
@@ -791,7 +809,7 @@ for input_use_sample_index in full_input_use_sample_index:
             json_string = json.dumps(cleaned_valid_el, default=lambda o: o.__dict__, sort_keys=True, indent=2)
             f.write(json_string)
 
-    for _i in range(hp.real_batch_size):
+    for _i in range(1):
         teacher_forced_pred = pred_out
 
         reduced_mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
@@ -813,7 +831,7 @@ for input_use_sample_index in full_input_use_sample_index:
         teacher_forced_attn = model.attention_alignment
 
         if input_tier_condition_tag is None:
-            for _i in range(hp.real_batch_size):
+            for _i in range(1):
                 mel_cut = int(x_mask_in[_i, :, 0, 0].cpu().data.numpy().sum())
                 text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
                 # matshow vs imshow?
@@ -1194,7 +1212,7 @@ for input_use_sample_index in full_input_use_sample_index:
         edges = iter(nums[:1] + sum(gaps, []) + nums[-1:])
         return list(zip(edges, edges))
 
-    for _i in range(hp.real_batch_size):
+    for _i in range(1):
         unnormalized = sample_buffer.cpu().data.numpy() * saved_std + saved_mean
         plt.imshow(unnormalized[_i, :, :, 0])
         plt.savefig(folder + os.sep + "small_sampled_x{}.png".format(_i))
@@ -1204,7 +1222,7 @@ for input_use_sample_index in full_input_use_sample_index:
         teacher_forced_attn = model.attention_alignment
 
         if input_tier_condition_tag is None:
-            for _i in range(hp.real_batch_size):
+            for _i in range(1):
                 mel_cut = int(sample_mask[_i, :, 0, 0].cpu().data.numpy().sum())
                 text_cut = int(torch_cond_seq_data_mask_mask[:, _i].cpu().data.numpy().sum())
                 # matshow vs imshow?

@@ -6534,8 +6534,9 @@ class AttentionMelNetTier(torch.nn.Module):
                 freq_lstm_stack = tds + fds
 
             freq_lstm_h, _, freq_lstm_c = self.fds_lstms_freq_fw[layer]([freq_lstm_stack])
+            # cache the full thing?
             # we cache the minimal version for step sampling here
-            self._sample_cache["layer{}".format(layer)]["fd_stack"]["freq_lstm_h"] = freq_lstm_h[-1, -1][None, None]
+            self._sample_cache["layer{}".format(layer)]["fd_stack"]["freq_lstm_h"] = freq_lstm_h[-1, :self.batch_size][None]
             # GRU so cell is None...
             #self._sample_cache["layer{}".format(layer)]["fd_stack"]["freq_lstm_c"] = freq_lstm_c
             res = self.fds_projs[layer]([freq_lstm_h])
@@ -6828,7 +6829,7 @@ class AttentionMelNetTier(torch.nn.Module):
 
                 new_context, attn_weight, extras = self._attention_step_sample(h_comb, memory, memory_mask, prev_attn)
 
-                out = new_context + h_t[None]
+                out = new_context.permute(1, 0, 2) + h_t[None]
 
                 self._sample_cache["layer{}".format(layer)]["attention"]["attn_context"].append(new_context)
                 self._sample_cache["layer{}".format(layer)]["attention"]["attn_h"].append(h_t)
