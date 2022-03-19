@@ -629,6 +629,8 @@ for input_use_sample_index in full_input_use_sample_index:
             noise_levels = noise_random.rand(*x_a.shape) * input_additive_noise_level
 
             x_a_noisy = x_a + torch.Tensor(noise_levels * noise_random.randn(*x_a.shape)).to(x_a.device)
+            if use_half:
+                x_a_noisy = x_a_noisy.half()
 
             # need to correct the minibatch size here...
 
