@@ -5991,7 +5991,7 @@ class AttentionMelNetTier(torch.nn.Module):
 
             #weights = torch.sum(alpha[..., None] * (termL - termR), keepdim=True, dim=1)
 
-            termination = 1. - termL[:, 0]
+            termination = 1. - torch.exp(termL[:, 0])
             weights = memory_mask.transpose(0, 1)[:, None, :] * weights
 
             # grad scaling here
@@ -6275,7 +6275,6 @@ class AttentionMelNetTier(torch.nn.Module):
             var = torch.square(x - mean).mean(dim=dim, keepdim=True)
             return (x - mean) / torch.sqrt(var + eps)
 
-
         for _i in range(self.n_layers):
             td_x_o = self._td_stack(td_x_i, _i)
             if self.has_centralized_stack:
@@ -6312,7 +6311,7 @@ class AttentionMelNetTier(torch.nn.Module):
         else:
             return out
 
-    def _td_stack_sample(self, tds, layer, time_index, freq_index):
+    def _td_stack_sample(self, tds, layer, time_index, freq_index, do_cache=True):
         if self._sample_initial:
             self._sample_cache["layer{}".format(layer)]["td_stack"] = {}
             """
@@ -6355,19 +6354,20 @@ class AttentionMelNetTier(torch.nn.Module):
             res = self.tds_projs[layer]([combined_h])
             res = self._time2freq(res)
 
-            if layer == 0:
-                self._sample_last_time_index = {}
-                self._sample_last_freq_index = {}
+            if do_cache:
+                if layer == 0:
+                    self._sample_last_time_index = {}
+                    self._sample_last_freq_index = {}
 
-            self._sample_last_time_index["layer{}".format(layer)] = {}
-            self._sample_last_freq_index["layer{}".format(layer)] = {}
+                self._sample_last_time_index["layer{}".format(layer)] = {}
+                self._sample_last_freq_index["layer{}".format(layer)] = {}
 
-            self._sample_last_time_index["layer{}".format(layer)]["td_stack"] = time_index
-            self._sample_last_freq_index["layer{}".format(layer)]["td_stack"] = freq_index
+                self._sample_last_time_index["layer{}".format(layer)]["td_stack"] = time_index
+                self._sample_last_freq_index["layer{}".format(layer)]["td_stack"] = freq_index
             return res
         else:
             assert self._sample_step
-            if self._sample_last_time_index["layer{}".format(layer)]["td_stack"] != time_index:
+            if self._sample_last_time_index["layer{}".format(layer)]["td_stack"] != time_index and do_cache:
                 freq_lstm_fw_h, _, freq_lstm_fw_c = self.tds_lstms_freq_fw[layer]([tds])
                 freq_lstm_bw_h, _, freq_lstm_bw_c = self.tds_lstms_freq_bw[layer]([torch.flip(tds, [0])])
                 freq_lstm_h = torch.cat((freq_lstm_fw_h, torch.flip(freq_lstm_bw_h, [0])), dim=-1)
@@ -6378,14 +6378,14 @@ class AttentionMelNetTier(torch.nn.Module):
                 prev_freq_lstm_bw_h = self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_bw_h"]
                 #prev_freq_lstm_bw_c = self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_bw_c"]
                 prev_freq_lstm_h = self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_h"]
+                if do_cache:
+                    self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_fw_h"] = torch.cat((prev_freq_lstm_fw_h, freq_lstm_fw_h), axis=1)
+                    #self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_fw_c"] = torch.cat((prev_freq_lstm_fw_c, freq_lstm_fw_c), axis=1)
 
-                self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_fw_h"] = torch.cat((prev_freq_lstm_fw_h, freq_lstm_fw_h), axis=1)
-                #self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_fw_c"] = torch.cat((prev_freq_lstm_fw_c, freq_lstm_fw_c), axis=1)
+                    self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_bw_h"] = torch.cat((prev_freq_lstm_bw_h, freq_lstm_bw_h), axis=1)
+                    #self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_bw_c"] = torch.cat((prev_freq_lstm_bw_c, freq_lstm_bw_c), axis=1)
 
-                self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_bw_h"] = torch.cat((prev_freq_lstm_bw_h, freq_lstm_bw_h), axis=1)
-                #self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_bw_c"] = torch.cat((prev_freq_lstm_bw_c, freq_lstm_bw_c), axis=1)
-
-                self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_h"] = torch.cat((prev_freq_lstm_h, freq_lstm_h), axis=1)
+                    self._sample_cache["layer{}".format(layer)]["td_stack"]["freq_lstm_h"] = torch.cat((prev_freq_lstm_h, freq_lstm_h), axis=1)
 
                 # _freq2time
                 #freq_lstm_h = self._freq2time(freq_lstm_h)
@@ -6457,16 +6457,17 @@ class AttentionMelNetTier(torch.nn.Module):
                 res = res.permute(2, 1, 0, 3)
                 res = res.reshape((self.n_horiz, self.batch_size * 1, -1))
 
-                self._sample_cache["layer{}".format(layer)]["td_stack"]["time_lstm_h"] = torch.cat((prev_time_lstm_h, time_lstm_h[None]), dim=0)
-                self._sample_cache["layer{}".format(layer)]["td_stack"]["res"] = res
+                if do_cache:
+                    self._sample_cache["layer{}".format(layer)]["td_stack"]["time_lstm_h"] = torch.cat((prev_time_lstm_h, time_lstm_h[None]), dim=0)
+                    self._sample_cache["layer{}".format(layer)]["td_stack"]["res"] = res
 
-                self._sample_last_time_index["layer{}".format(layer)]["td_stack"] = time_index
-                self._sample_last_freq_index["layer{}".format(layer)]["td_stack"] = freq_index
+                    self._sample_last_time_index["layer{}".format(layer)]["td_stack"] = time_index
+                    self._sample_last_freq_index["layer{}".format(layer)]["td_stack"] = freq_index
             else:
                 res = self._sample_cache["layer{}".format(layer)]["td_stack"]["res"]
             return res
 
-    def _cd_centralized_stack_sample(self, cds, layer, time_index, freq_index):
+    def _cd_centralized_stack_sample(self, cds, layer, time_index, freq_index, do_cache=True):
         if self._sample_initial:
             self._sample_cache["layer{}".format(layer)]["cd_stack"] = {}
             cent_lstm_h, _, cent_lstm_c = self.cds_centralized_lstms[layer]([cds])
@@ -6479,7 +6480,7 @@ class AttentionMelNetTier(torch.nn.Module):
             return res
         else:
             assert self._sample_step
-            if self._sample_last_time_index["layer{}".format(layer)]["cd_stack"] != time_index:
+            if self._sample_last_time_index["layer{}".format(layer)]["cd_stack"] != time_index and do_cache:
                 prev_cent_lstm_h = self._sample_cache["layer{}".format(layer)]["cd_stack"]["cent_lstm_h"]
                 cds_proj = self.cds_centralized_lstms[layer].in_proj_obj([cds])
                 _m = 0. * cds_proj[..., 0] + 1.
@@ -6497,17 +6498,18 @@ class AttentionMelNetTier(torch.nn.Module):
                 res = self.cds_projs[layer]([cent_lstm_h[None]])
 
                 new_cent_lstm_h = torch.cat((prev_cent_lstm_h, cent_lstm_h[None]), dim=0)
-                self._sample_cache["layer{}".format(layer)]["cd_stack"]["cent_lstm_h"] = new_cent_lstm_h
-                self._sample_cache["layer{}".format(layer)]["cd_stack"]["res"] = res
+                if do_cache:
+                    self._sample_cache["layer{}".format(layer)]["cd_stack"]["cent_lstm_h"] = new_cent_lstm_h
+                    self._sample_cache["layer{}".format(layer)]["cd_stack"]["res"] = res
 
-                # this is tied to td_sample as well - updating this value should mean they BOTH cached successfully
-                self._sample_last_time_index["layer{}".format(layer)]["cd_stack"] = time_index
+                    # this is tied to td_sample as well - updating this value should mean they BOTH cached successfully
+                    self._sample_last_time_index["layer{}".format(layer)]["cd_stack"] = time_index
             else:
                 # we already cached the activation for this time index
                 res = self._sample_cache["layer{}".format(layer)]["cd_stack"]["res"]
             return res
 
-    def _fd_stack_sample(self, tds, fds, layer, time_index, freq_index, tds_cent=None):
+    def _fd_stack_sample(self, tds, fds, layer, time_index, freq_index, tds_cent=None, do_cache=True):
         if self._sample_initial:
             self._sample_cache["layer{}".format(layer)]["fd_stack"] = {}
             # broadcast tds_cent across frequency axis
@@ -6571,15 +6573,14 @@ class AttentionMelNetTier(torch.nn.Module):
             freq_lstm_h = s[0][0, 0]
             freq_lstm_h = freq_lstm_h[None]
 
-            self._sample_last_time_index["layer{}".format(layer)]["fd_stack"] = time_index
-            self._sample_last_freq_index["layer{}".format(layer)]["fd_stack"] = freq_index
-            self._sample_cache["layer{}".format(layer)]["fd_stack"]["freq_lstm_h"] = freq_lstm_h
-
+            if do_cache:
+                self._sample_last_time_index["layer{}".format(layer)]["fd_stack"] = time_index
+                self._sample_last_freq_index["layer{}".format(layer)]["fd_stack"] = freq_index
+                self._sample_cache["layer{}".format(layer)]["fd_stack"]["freq_lstm_h"] = freq_lstm_h
             res = self.fds_projs[layer]([freq_lstm_h])
-
             return res
 
-    def _attention_step_sample(self, h_i, memory, memory_mask, previous_attn):
+    def _attention_step_sample(self, h_i, memory, memory_mask, previous_attn, do_cache=True):
         min_attention_step = self._sample_min_attention_step
         if self.attention_type == "sigmoid_logistic_alt":
             # condition on input sequence length?
@@ -6733,7 +6734,7 @@ class AttentionMelNetTier(torch.nn.Module):
             raise ValueError("Unknown attention type specified {}".format(self.attention_type))
         return context, weights, extras
 
-    def _attention_sample(self, cds, layer, memory, memory_mask, time_index, freq_index):
+    def _attention_sample(self, cds, layer, memory, memory_mask, time_index, freq_index, do_cache=True):
         if self._sample_initial:
             self._sample_cache["layer{}".format(layer)]["attention"] = {}
             T, B, D = cds.size()
@@ -6763,7 +6764,7 @@ class AttentionMelNetTier(torch.nn.Module):
 
                 h_comb = torch.cat([cds[_i], context.squeeze(1), h_t], dim=-1)
                 #context, attn_weight, extras = self._attention_step(h_t, memory, memory_mask, prev_attn)
-                context, attn_weight, extras = self._attention_step_sample(h_comb, memory, memory_mask, prev_attn)
+                context, attn_weight, extras = self._attention_step_sample(h_comb, memory, memory_mask, prev_attn, do_cache)
 
                 if self.attention_type == "sigmoid_logistic_alt":
                     prev_attn = extras["kappa"]
@@ -6787,19 +6788,20 @@ class AttentionMelNetTier(torch.nn.Module):
             # absolutely no bypassing this?
             # decoder_T, B, encoder_T
             alignments = torch.cat(weights, axis=0)
-            self._sample_cache["layer{}".format(layer)]["attention"]["attn_h"] = all_hiddens
-            # GRU so c is invisible
-            #self._sample_cache["layer{}".format(layer)]["attention"]["attn_c"] = all_cells
-            self._sample_cache["layer{}".format(layer)]["attention"]["attn_kappa"] = all_attn_pos
-            self._sample_cache["layer{}".format(layer)]["attention"]["attn_context"] = contexts
 
-            self._sample_last_time_index["layer{}".format(layer)]["attention"] = time_index
-            self._sample_last_freq_index["layer{}".format(layer)]["attention"] = freq_index
+            if do_cache:
+                self._sample_cache["layer{}".format(layer)]["attention"]["attn_h"] = all_hiddens
+                # GRU so c is invisible
+                #self._sample_cache["layer{}".format(layer)]["attention"]["attn_c"] = all_cells
+                self._sample_cache["layer{}".format(layer)]["attention"]["attn_kappa"] = all_attn_pos
+                self._sample_cache["layer{}".format(layer)]["attention"]["attn_context"] = contexts
 
+                self._sample_last_time_index["layer{}".format(layer)]["attention"] = time_index
+                self._sample_last_freq_index["layer{}".format(layer)]["attention"] = freq_index
             return out_contexts, alignments, all_extras
         else:
             assert self._sample_step
-            if self._sample_last_time_index["layer{}".format(layer)]["attention"] != time_index:
+            if self._sample_last_time_index["layer{}".format(layer)]["attention"] != time_index and do_cache:
                 T, B, D = cds.size()
                 # make init a function of the mean of the 
                 # use h_t
@@ -6852,7 +6854,8 @@ class AttentionMelNetTier(torch.nn.Module):
                      list_of_spatial_conditions=None,
                      bypass_td=None, bypass_fd=None, skip_input_embed=False,
                      memory=None, memory_mask=None,
-                     min_attention_step=None):
+                     min_attention_step=None,
+                     do_cache=True):
         if min_attention_step is not None:
             self._sample_min_attention_step = min_attention_step
         else:
@@ -6862,19 +6865,21 @@ class AttentionMelNetTier(torch.nn.Module):
                                         list_of_spatial_conditions=list_of_spatial_conditions,
                                         bypass_td=bypass_td, bypass_fd=bypass_fd,
                                         skip_input_embed=skip_input_embed,
-                                        memory=memory, memory_mask=memory_mask)
+                                        memory=memory, memory_mask=memory_mask,
+                                        do_cache=do_cache)
         else:
             return self._sample_inc_fn(list_of_inputs, time_index, freq_index,
                                     list_of_spatial_conditions=list_of_spatial_conditions,
                                     bypass_td=bypass_td, bypass_fd=bypass_fd,
                                     skip_input_embed=skip_input_embed,
-                                    memory=memory, memory_mask=memory_mask)
+                                    memory=memory, memory_mask=memory_mask, do_cache=do_cache)
 
     def _sample_inc_fn(self, list_of_inputs,
-                     time_index, freq_index,
-                     list_of_spatial_conditions=None,
-                     bypass_td=None, bypass_fd=None, skip_input_embed=False,
-                     memory=None, memory_mask=None):
+                       time_index, freq_index,
+                       list_of_spatial_conditions=None,
+                       bypass_td=None, bypass_fd=None, skip_input_embed=False,
+                       memory=None, memory_mask=None,
+                       do_cache=True):
         # by default embed the inputs, otherwise bypass
         # batch, mel_time, mel_freq, feats
 
@@ -6981,23 +6986,23 @@ class AttentionMelNetTier(torch.nn.Module):
             return (x - mean) / torch.sqrt(var + eps)
 
         for _i in range(self.n_layers):
-            td_x_o = self._td_stack_sample(td_x_i, _i, time_index, freq_index)
+            td_x_o = self._td_stack_sample(td_x_i, _i, time_index, freq_index, do_cache=do_cache)
             if self.has_centralized_stack:
                 if _i == (self.n_layers // 2) and self.has_attention:
-                    cd_att, alignment, attn_extras = self._attention_sample(cd_x_i, _i, memory, memory_mask, time_index, freq_index)
+                    cd_att, alignment, attn_extras = self._attention_sample(cd_x_i, _i, memory, memory_mask, time_index, freq_index, do_cache=do_cache)
                     has_cd_att = True
                     # should this just replace the centralized stack here?
-                    cd_x_o = self._cd_centralized_stack_sample(res(cd_x_i + cd_att), _i, time_index, freq_index)
-                    fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_o + cd_x_i + cd_att))
+                    cd_x_o = self._cd_centralized_stack_sample(res(cd_x_i + cd_att), _i, time_index, freq_index, do_cache=do_cache)
+                    fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_o + cd_x_i + cd_att), do_cache=do_cache)
                 else:
                     if has_cd_att is False:
-                        cd_x_o = self._cd_centralized_stack_sample(cd_x_i, _i, time_index, freq_index)
-                        fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_i + cd_x_o))
+                        cd_x_o = self._cd_centralized_stack_sample(cd_x_i, _i, time_index, freq_index, do_cache=do_cache)
+                        fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_i + cd_x_o), do_cache=do_cache)
                     else:
-                        cd_x_o = self._cd_centralized_stack_sample(cd_x_i + cd_att, _i, time_index, freq_index)
-                        fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_o + cd_x_i + cd_att))
+                        cd_x_o = self._cd_centralized_stack_sample(cd_x_i + cd_att, _i, time_index, freq_index, do_cache=do_cache)
+                        fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_o + cd_x_i + cd_att), do_cache=do_cache)
             else:
-                fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index)
+                fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, do_cache=do_cache)
             fd_x_i = res(fd_x_o + fd_x_i)
             td_x_i = res(td_x_o + td_x_i)
             if self.has_centralized_stack:
@@ -7022,7 +7027,8 @@ class AttentionMelNetTier(torch.nn.Module):
                         time_index, freq_index,
                         list_of_spatial_conditions=None,
                         bypass_td=None, bypass_fd=None, skip_input_embed=False,
-                        memory=None, memory_mask=None):
+                        memory=None, memory_mask=None,
+                        do_cache=True):
         # this basically the same as the training method with exta caching to interact with sample when it is not an 
         # by default embed the inputs, otherwise bypass
         # batch, mel_time, mel_freq, feats
@@ -7126,20 +7132,20 @@ class AttentionMelNetTier(torch.nn.Module):
             td_x_o = self._td_stack_sample(td_x_i, _i, time_index, freq_index)
             if self.has_centralized_stack:
                 if _i == (self.n_layers // 2) and self.has_attention:
-                    cd_att, alignment, attn_extras = self._attention_sample(cd_x_i, _i, memory, memory_mask, time_index, freq_index)
+                    cd_att, alignment, attn_extras = self._attention_sample(cd_x_i, _i, memory, memory_mask, time_index, freq_index, do_cache=do_cache)
                     has_cd_att = True
                     # should this just replace the centralized stack here?
-                    cd_x_o = self._cd_centralized_stack_sample(res(cd_x_i + cd_att), _i, time_index, freq_index)
-                    fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_o + cd_x_i + cd_att))
+                    cd_x_o = self._cd_centralized_stack_sample(res(cd_x_i + cd_att), _i, time_index, freq_index, do_cache=do_cache)
+                    fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_o + cd_x_i + cd_att), do_cache=do_cache)
                 else:
                     if has_cd_att is False:
-                        cd_x_o = self._cd_centralized_stack_sample(cd_x_i, _i, time_index, freq_index)
-                        fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_i + cd_x_o))
+                        cd_x_o = self._cd_centralized_stack_sample(cd_x_i, _i, time_index, freq_index, do_cache=do_cache)
+                        fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_i + cd_x_o), do_cache=do_cache)
                     else:
-                        cd_x_o = self._cd_centralized_stack_sample(cd_x_i + cd_att, _i, time_index, freq_index)
-                        fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_o + cd_x_i + cd_att))
+                        cd_x_o = self._cd_centralized_stack_sample(cd_x_i + cd_att, _i, time_index, freq_index, do_cache=do_cache)
+                        fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, tds_cent=res(cd_x_o + cd_x_i + cd_att), do_cache=do_cache)
             else:
-                fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index)
+                fd_x_o = self._fd_stack_sample(res(td_x_o + td_x_i), fd_x_i, _i, time_index, freq_index, do_cache=do_cache)
             fd_x_i = res(fd_x_o + fd_x_i)
             td_x_i = res(td_x_o + td_x_i)
             if self.has_centralized_stack:

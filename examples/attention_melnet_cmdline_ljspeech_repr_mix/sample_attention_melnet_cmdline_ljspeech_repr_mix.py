@@ -106,9 +106,11 @@ parser.add_argument('--force_ascii_words', type=str, default=None,
 parser.add_argument('--force_phoneme_words', type=str, default=None,
                     help='string that overrides the text conditioning type, forcing particular words to be phoneme. provide multiple words with "hello,there" style comma separation')
 
-parser.add_argument('--additive_noise_level', type=float, default=0.0,
+parser.add_argument('--additive_noise_level', type=float, default=0.25,
                     help='noise level to add to the predictions, helps perturb out of flat attention spots')
-parser.add_argument('--attention_termination_tau', type=float, default=-.5,
+parser.add_argument('--n_noise_samples', type=int, default=1,
+                    help='number of noise samples to take per step')
+parser.add_argument('--attention_termination_tau', type=float, default=-.45,
                     help='cutoff boundary for attention termination estimate')
 
 parser.add_argument('--override_dataset_path', type=str, default=None,
@@ -218,6 +220,7 @@ if input_force_conditioning_type not in ["ascii", "phoneme", None]:
     raise ValueError("Unknown input for --force_conditioning_type, got {} but expected 'ascii' or 'phoneme'".format(input_force_conditioning_type))
 
 input_additive_noise_level = float(args.additive_noise_level)
+input_n_noise_samples = int(args.n_noise_samples)
 input_attention_termination_tau = float(args.attention_termination_tau)
 
 assert len(input_size_at_depth) == 2
@@ -631,21 +634,41 @@ for input_use_sample_index in full_input_use_sample_index:
             cond_seq_sym = [rev_a[int(a)] if b == 0 else rev_p[int(a)] for a, b in zip(memory_condition[:, 0, 0].cpu().data.numpy(), memory_condition_mask[:, 0].cpu().data.numpy())]
 
 
+            first = True
+            last_mn_out = None
+            prev_ii_jj = None
+            marginal_samples = input_n_noise_samples
             for _ii in range(start_time_index, max_time_step):
                 for _jj in range(start_freq_index, max_freq_step):
-                    mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
-                                                                            is_initial_step=is_initial_step,
-                                                                            memory=mem_lstm, memory_mask=memory_condition_mask_mask,
-                                                                            min_attention_step=min_attention_step)
-
-                    x_clean[:, _ii, _jj, 0] = mn_out.squeeze()
+                    stored_mn_out = []
+                    for _kk in range(marginal_samples):
+                        # multiple samples...
+                        if prev_ii_jj is not None:
+                            if attn_extras["termination"][0, mem_lstm.shape[0] - 1] > input_attention_termination_tau * 1.1:
+                                x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out
+                            else:
+                                this_noise_level = noise_random.rand() * input_additive_noise_level
+                                x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out + this_noise_level * noise_random.randn()
+                        if _kk == (marginal_samples - 1) or (_ii == start_time_index and _jj == start_freq_index):
+                            enable_cache = True
+                        else:
+                            enable_cache = False
+                        # how to handle attn...
+                        mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
+                                                                           is_initial_step=is_initial_step,
+                                                                           memory=mem_lstm, memory_mask=memory_condition_mask_mask,
+                                                                           min_attention_step=min_attention_step,
+                                                                           do_cache=enable_cache)
+                        stored_mn_out.append(mn_out.squeeze())
+                        if _ii == start_time_index and _jj == start_freq_index:
+                            break
+                    if prev_ii_jj is not None:
+                        x_clean[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out
+                    last_mn_out = torch.mean(torch.cat([s[None] for s in stored_mn_out], axis=0))
+                    prev_ii_jj = (_ii, _jj)
                     # this is the noisy one we use for teacher forcing
                     # turn off noise near the end...
-                    if attn_extras["termination"][0, mem_lstm.shape[0] - 1] > input_attention_termination_tau * 1.1:
-                        x[:, _ii, _jj, 0] = mn_out.squeeze()
-                    else:
-                        this_noise_level = noise_random.rand() * input_additive_noise_level
-                        x[:, _ii, _jj, 0] = mn_out.squeeze() + this_noise_level * noise_random.randn()
+
                     if verbose:
                         if ((_ii % 10) == 0 and (_jj == 0)) or (_ii == (max_time_step - 1) and (_jj == 0)):
                             print("sampled index {},{} out of total size ({},{})".format(_ii, _jj, max_time_step, max_freq_step))
@@ -921,23 +944,27 @@ for input_use_sample_index in full_input_use_sample_index:
         gap = input_bias_split_gap
         post_words = new["words"]
         for _i in range(len(post_words)):
-            if "start" not in post_words[_i]:
-                if _i == 0:
+            if _i == 0:
+                if "start" not in post_words[_i]:
                     post_words[_i]["start"] = 0.0
                     post_words[_i]["startOffset"] = 0
-                else:
-                    post_words[_i]["start"] = post_words[_i - 1]["end"]
-                    post_words[_i]["startOffset"] = post_words[_i - 1]["endOffset"]
-
-        for _i in range(len(post_words)):
-            if "end" not in post_words[_i]:
-                # use the last word as a guess for length?
-                if _i == (len(post_words) - 1):
-                    post_words[_i]["end"] = post_words[_i - 1]["end"] + (post_words[_i - 1]["end"] - post_words[_i - 1]["start"])
-                    post_words[_i]["endOffset"] = post_words[_i - 1]["endOffset"] + (post_words[_i - 1]["endOffset"] - post_words[_i - 1]["startOffset"])
-                else:
+                if "end" not in post_words[_i]:
                     post_words[_i]["end"] = post_words[_i + 1]["start"]
                     post_words[_i]["endOffset"] = post_words[_i + 1]["startOffset"]
+            elif _i == (len(post_words) - 1):
+                if "start" not in post_words[_i]:
+                    post_words[_i]["start"] = post_words[_i - 1]["end"]
+                    post_words[_i]["startOffset"] = post_words[_i - 1]["endOffset"]
+                if "end" not in post_words[_i]:
+                    post_words[_i]["end"] = post_words[_i - 1]["end"] + (post_words[_i - 1]["end"] - post_words[_i - 1]["start"])
+                    post_words[_i]["endOffset"] = post_words[_i - 1]["endOffset"] + (post_words[_i - 1]["endOffset"] - post_words[_i - 1]["startOffset"])
+            else:
+                if "start" not in post_words[_i]:
+                    post_words[_i]["start"] = post_words[_i - 1]["end"]
+                    post_words[_i]["startOffset"] = post_words[_i - 1]["endOffset"]
+                if "end" not in post_words[_i]:
+                    post_words[_i]["end"] = post_words[_i - 1]["end"] + (post_words[_i - 1]["end"] - post_words[_i - 1]["start"])
+                    post_words[_i]["endOffset"] = post_words[_i - 1]["endOffset"] + (post_words[_i - 1]["endOffset"] - post_words[_i - 1]["startOffset"])
 
         for _i in range(len(post_words)):
             post_words[_i]["start"] = post_words[_i]["start"] + pre_t + gap
