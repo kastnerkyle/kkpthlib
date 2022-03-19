@@ -399,7 +399,7 @@ for input_use_sample_index in full_input_use_sample_index:
                 n = list(store_valid_els[_ii][_jj][3].keys())[0]
                 names.append(n)
         #valid_el = [store_valid_els[input_use_sample_index[0]][input_use_sample_index[1]]] * hp.real_batch_size
-        valid_el = [store_valid_els[input_use_sample_index][0]] * hp.real_batch_size
+        valid_el = [store_valid_els[input_use_sample_index][0]] * 1
     elif args.use_longest:
         # sample 50 minibatches, find longest N examples of that...
         print("Performing length selection to choose base samples for biasing")
@@ -521,6 +521,11 @@ for input_use_sample_index in full_input_use_sample_index:
                              batch_norm_flag=batch_norm_flag)
             # slice it back down
             pred_out = pred_out[:1]
+            del this_x_in
+            del this_x_mask_in
+            del this_torch_cond_seq_data_batch
+            del this_torch_cond_seq_data_mask
+            del this_torch_cond_seq_data_mask_mask
     else:
         cond_np = all_x_splits[::-1][input_tier_condition_tag[0]][input_tier_condition_tag[1]]
         # conditioning input currently unnormalized
@@ -1331,4 +1336,10 @@ for input_use_sample_index in full_input_use_sample_index:
         shutil.rmtree(fldr + "_bias{}".format(ind))
 
     shutil.move(fldr, fldr + "_bias{}".format(ind))
+    import gc
+    del sample_buffer
+    del model.attention_alignment
+    del model.attention_extras
+    gc.collect()
+
 print("overall sampling time {} sec".format(time.time() - post_load_time))
