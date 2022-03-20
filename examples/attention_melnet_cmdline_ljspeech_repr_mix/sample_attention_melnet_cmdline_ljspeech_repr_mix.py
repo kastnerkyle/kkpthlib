@@ -446,7 +446,6 @@ for input_use_sample_index in full_input_use_sample_index:
     saved_mean = speech.cached_mean_vec_[None, None, :, None]
     saved_std = speech.cached_std_vec_[None, None, :, None]
 
-    from IPython import embed; embed(); raise ValueError()
     if use_half:
         model.half()  # convert to half precision
         for layer in model.modules():
