@@ -676,11 +676,11 @@ for input_use_sample_index in full_input_use_sample_index:
                     stored_mn_out = []
                     # multiple samples in parallel via batching
                     if prev_ii_jj is not None:
-                        if attn_extras["termination"][0, mem_lstm.shape[0] - 1] > input_attention_termination_tau * 1.05:
-                            x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out
-                        else:
-                            this_noise_level = noise_random.rand(marginal_samples) * input_additive_noise_level
-                            x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out + torch.Tensor(this_noise_level * noise_random.randn(marginal_samples)).to(x.device)
+                        #if attn_extras["termination"][0, mem_lstm.shape[0] - 1] > input_attention_termination_tau * 1.05:
+                        #    x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out
+                        #else:
+                        this_noise_level = noise_random.rand(marginal_samples) * input_additive_noise_level
+                        x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out + torch.Tensor(this_noise_level * noise_random.randn(marginal_samples)).to(x.device)
                     enable_cache = True
                     mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
                                                                        is_initial_step=is_initial_step,
