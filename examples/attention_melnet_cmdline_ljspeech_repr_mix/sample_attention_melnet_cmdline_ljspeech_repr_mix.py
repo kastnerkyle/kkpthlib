@@ -689,8 +689,8 @@ for input_use_sample_index in full_input_use_sample_index:
                                                                        do_cache=enable_cache)
                     if prev_ii_jj is not None:
                         x_clean[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out
-                    #last_mn_out = torch.mean(mn_out, axis=0).squeeze().detach()
-                    last_mn_out = torch.median(mn_out, axis=0)[0].squeeze().detach()
+                    last_mn_out = torch.mean(mn_out, axis=0).squeeze().detach()
+                    #last_mn_out = torch.median(mn_out, axis=0)[0].squeeze().detach()
                     prev_ii_jj = (_ii, _jj)
                     # this is the noisy one we use for teacher forcing
                     # turn off noise near the end...
