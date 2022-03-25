@@ -682,7 +682,8 @@ for input_use_sample_index in full_input_use_sample_index:
                 """ Sample `n` points from truncated normal distribution """
                 x = np.linspace(mu - 5. * sig, mu + 5. * sig, 10000)
                 y = trunc_normal(x, mu, sig, bounds)
-                y_cum = np.cumsum(y) / y.sum()
+                y_cum = np.cumsum(y.astype("float128")) / y.sum()
+                y_cum = y_cum.astype(x.dtype)
 
                 yrand = lcl_rand.rand(n)
                 sample = np.interp(yrand, y_cum, x)
@@ -705,7 +706,8 @@ for input_use_sample_index in full_input_use_sample_index:
                         #if attn_extras["termination"][0, mem_lstm.shape[0] - 1] > input_attention_termination_tau * 1.05:
                         #    x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out
                         #else:
-                        this_noise_level = noise_random.rand(marginal_samples) * input_additive_noise_level + .001
+                        this_noise_level = 0. * noise_random.rand(marginal_samples) + noise_random.rand() * input_additive_noise_level
+                        """
                         lower, upper = -2, 2
                         mu = last_mn_out.cpu().data.numpy()
                         sigma = this_noise_level
@@ -715,7 +717,29 @@ for input_use_sample_index in full_input_use_sample_index:
                             samp = sample_trunc(1, mu, sigma_i, (lb, rb))
                             return samp
 
-                        x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = torch.Tensor(np.array([wrap(sigma[_step]) for _step in range(marginal_samples)])).squeeze().to(x.device)
+                        #x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = torch.Tensor(np.array([wrap(sigma[_step]) for _step in range(marginal_samples)])).squeeze().to(x.device)
+                        """
+                        mu = last_mn_out.cpu().data.numpy()
+                        sigma = this_noise_level
+                        def risky_trunc(sigma_i):
+                            lower = -2
+                            upper = 2
+                            if sigma_i < 1E-4:
+                                return mu
+                            lb = (lower - mu) / sigma_i
+                            rb = (upper - mu) / sigma_i
+                            # if we really cant make it out in 10k....
+                            for i in range(10000):
+                                s = mu + sigma_i * noise_random.randn()
+                                if s >= lb:
+                                    if s <= rb:
+                                        return s
+                            return s
+
+                        tmp = np.array([risky_trunc(sigma[_step]) for _step in range(marginal_samples)])
+                        x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = torch.Tensor(tmp).to(x.device)
+                        #x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = torch.Tensor(np.array([risky_trunc(sigma[_step]) for _step in range(marginal_samples)])).to(x.device)
+
                         #x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out + torch.Tensor(this_noise_level * noise_random.randn(marginal_samples)).to(x.device)
                     enable_cache = True
                     mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
