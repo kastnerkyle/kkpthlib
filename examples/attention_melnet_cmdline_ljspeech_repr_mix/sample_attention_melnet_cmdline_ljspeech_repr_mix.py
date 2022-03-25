@@ -665,6 +665,32 @@ for input_use_sample_index in full_input_use_sample_index:
             rev_a = {v: k for k, v in speech.ascii_lookup.items()}
             cond_seq_sym = [rev_a[int(a)] if b == 0 else rev_p[int(a)] for a, b in zip(memory_condition[:, 0, 0].cpu().data.numpy(), memory_condition_mask[:, 0].cpu().data.numpy())]
 
+            def normal(x, mu, sig):
+                return 1. / (np.sqrt(2 * np.pi) * sig) * np.exp(-0.5 * np.square(x - mu) / np.square(sig))
+
+
+            def trunc_normal(x, mu, sig, bounds=None):
+                if bounds is None:
+                    bounds = (-np.inf, np.inf)
+                norm = normal(x, mu, sig)
+                norm[x < bounds[0]] = 0
+                norm[x > bounds[1]] = 0
+                return norm
+
+            lcl_rand = np.random.RandomState(11123)
+            def sample_trunc(n, mu, sig, bounds=None):
+                """ Sample `n` points from truncated normal distribution """
+                x = np.linspace(mu - 5. * sig, mu + 5. * sig, 10000)
+                y = trunc_normal(x, mu, sig, bounds)
+                y_cum = np.cumsum(y) / y.sum()
+
+                yrand = lcl_rand.rand(n)
+                sample = np.interp(yrand, y_cum, x)
+                return sample
+            # https://stackoverflow.com/questions/54609381/how-to-sample-from-a-truncated-gaussian-distribution-without-using-scipy
+            #X = stats.truncnorm(
+            #    (lower - mu) / sigma, (upper - mu) / sigma, loc=mu, scale=sigma)
+            #samples = sample_trunc(10000, 0, 1, (-1, 1))
 
             first = True
             last_mn_out = None
@@ -680,7 +706,17 @@ for input_use_sample_index in full_input_use_sample_index:
                         #    x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out
                         #else:
                         this_noise_level = noise_random.rand(marginal_samples) * input_additive_noise_level
-                        x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out + torch.Tensor(this_noise_level * noise_random.randn(marginal_samples)).to(x.device)
+                        lower, upper = -2, 2
+                        mu = last_mn_out.cpu().data.numpy()
+                        sigma = this_noise_level
+                        def wrap(sigma_i):
+                            lb = (lower - mu) / sigma_i
+                            rb = (upper - mu) / sigma_i
+                            samp = sample_trunc(1, mu, sigma_i, (lb, rb))
+                            return samp
+
+                        x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = torch.Tensor(np.array([wrap(sigma[_step]) for _step in range(marginal_samples)])).squeeze().to(x.device)
+                        #x[:, prev_ii_jj[0], prev_ii_jj[1], 0] = last_mn_out + torch.Tensor(this_noise_level * noise_random.randn(marginal_samples)).to(x.device)
                     enable_cache = True
                     mn_out, alignment, attn_extras = model.mn_t.sample([x], time_index=_ii, freq_index=_jj,
                                                                        is_initial_step=is_initial_step,
