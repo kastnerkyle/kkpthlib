@@ -890,11 +890,17 @@ for input_use_sample_index in full_input_use_sample_index:
         plt.savefig(folder + os.sep + "small_x{}.png".format(_i))
         plt.close()
 
+        # dump as npy as well
+        np.save(folder + os.sep + "small_x{}.npy".format(_i), unnormalized[0, :, :, 0])
+
         # no normalization on initial data
         unnormalized_full = data_batch[_i, :full_mel_cut, :]
         plt.imshow(unnormalized_full)
         plt.savefig(folder + os.sep + "data_x{}.png".format(_i))
         plt.close()
+
+        # dump as npy
+        np.save(folder + os.sep + "data_x{}.npy".format(_i), data_batch[_i, :, :])
 
         teacher_forced_pred = pred_out
         teacher_forced_attn = model.attention_alignment
