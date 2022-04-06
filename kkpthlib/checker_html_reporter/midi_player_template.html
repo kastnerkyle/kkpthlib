@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+    <script>
+        function move_bar(leftStart = '0') {
+            var els = document.getElementsByClassName('vertical');
+            for (var i = 0; i < els.length; i++) {
+                el = els.item(i)
+                var maxLS = String(Math.max(0, Math.min(parseFloat(leftStart), 100)))
+                el.style.setProperty('--leftStart', maxLS + '%')
+
+                el.style.animation = 'none';
+                el.offsetHeight; /* trigger reflow */
+                el.style.animation = null; 
+            }
+        }
+    </script>
+    <script>
+    function hideShowCntls() {
+      var x = document.getElementById("cntls");
+        if (x.style.display === "none") {
+            x.style.display = "block";
+        } else {
+            x.style.display = "none";
+        }
+    }
+
+    console.log('start');
+    var audioContext = null;
+    var player = null;
+    var reverberator = null;
+    var songStart = 0;
+    var input = null;
+    var currentSongTime = 0;
+    var nextStepTime = 0;
+    var nextPositionTime = 0;
+    var loadedsong = null;
+
+    function reset() {
+        console.log('start');
+        audioContext = null;
+        player = null;
+        reverberator = null;
+        songStart = 0;
+        input = null;
+        currentSongTime = 0;
+        nextStepTime = 0;
+        nextPositionTime = 0;
+        loadedsong = null;
+    }
+
+    function changeFunc() {
+        var selectBox = document.getElementById("selectBox");
+        var selectedValue = selectBox.options[selectBox.selectedIndex].value;
+        reset()
+        //handleExample(selectedValue);
+        handleB64Example(selectedValue);
+        //alert(selectedValue);
+    }
+		//<ul>
+		//	<li>Sample0 <a href='sampled0.midi'>download</a> | <a href='#' onclick='handleExample("sampled0.midi")'>open</a></li>
+		//	<li>Sample9 <a href='sampled9.midi'>download</a> | <a href='#' onclick='handleExample("sampled9.midi")'>open</a></li>
+		//</ul>
+
+    </script>
+
+	<div id='cntls2'>
+        <button onclick="hideShowCntls()">Hide/Show Audio Player</button>
+        <button onclick="reset()">Reset Audio Player Buffer</button>
+        <select id="selectBox" onchange="changeFunc();">
+             <option value="Select a preset midi file">Select a preset midi file</option>
+             $MIDI_FILES_OPTION_LIST
+        </select>
+	</div>
+    <div id="songref"></div>
+	<div id='cntls'>
+		<p><input type="file" id="filesinput" name="filesarr[]" />v1.16</p>
+	</div>
+	<hr />
+	<script>
+        reset()
+
+		function go() {
+			document.getElementById('tmr').innerHTML = 'starting...';
+			try {
+				startPlay(loadedsong);
+				document.getElementById('tmr').innerHTML = 'playing...';
+                //move_bar("0")
+
+                var els = document.getElementsByClassName('vertical');
+                var leftStart = 0.0
+                for (var i = 0; i < els.length; i++) {
+                    el = els.item(i)
+                    var maxLS = String(Math.max(0, Math.min(parseFloat(leftStart), 100)))
+                    el.style.setProperty('--leftStart', maxLS + '%')
+
+                    el.style.animation = 'none';
+                    el.offsetHeight; /* trigger reflow */
+                    el.style.animation = null; 
+                }
+			} catch (expt) {
+				document.getElementById('tmr').innerHTML = 'error ' + expt;
+			}
+		}
+
+        function mutechannel0(checkboxElem) {
+            if (checkboxElem.checked) {
+                var song = document.getElementById('songref').value
+                var vlm = document.getElementById('channel0');
+                vlm.value = 0.000001;
+				song.tracks[0].volume = 0.0;
+            } else {
+                var song = document.getElementById('songref').value
+                var vlm = document.getElementById('channel0');
+                vlm.value = 100;
+                song.tracks[0].volume = 1.0;
+            }
+        }
+
+		function startPlay(song) {
+			currentSongTime = 0;
+			songStart = audioContext.currentTime;
+			nextStepTime = audioContext.currentTime;
+			var stepDuration = 44 / 1000;
+			tick(song, stepDuration);
+		}
+
+		function tick(song, stepDuration) {
+			if (audioContext.currentTime > nextStepTime - stepDuration) {
+				sendNotes(song, songStart, currentSongTime, currentSongTime + stepDuration, audioContext, input, player);
+				currentSongTime = currentSongTime + stepDuration;
+				nextStepTime = nextStepTime + stepDuration;
+				if (currentSongTime > song.duration) {
+					currentSongTime = currentSongTime - song.duration;
+					sendNotes(song, songStart, 0, currentSongTime, audioContext, input, player);
+					songStart = songStart + song.duration;
+				}
+			}
+			if (nextPositionTime < audioContext.currentTime) {
+				var o = document.getElementById('position');
+                var userTempo = parseInt(document.getElementById('tmpo1').value)
+
+                var mult = (userTempo / 120.0)
+
+				o.value = 100 * currentSongTime / song.duration;
+
+                var pct = Math.min(100, Math.round((100 * currentSongTime) / (song.duration * mult)))
+
+				document.getElementById('tmr').innerHTML = 'Restart (' + pct + '%)';
+
+                //move_bar((100.0 * currentSongTime) / (song.duration * mult))
+
+                var els = document.getElementsByClassName('vertical');
+                for (var i = 0; i < els.length; i++) {
+                    el = els.item(i)
+
+                    var cht = parseFloat(el.getAttribute("data-charttime"))
+                    leftStart = 100.0 * (currentSongTime / cht) * mult * 2.0;
+
+                    var res = leftStart
+
+                    var maxLS = String(Math.max(0, Math.min(res, 100)))
+                    el.style.setProperty('--leftStart', maxLS + '%')
+
+                    el.style.animation = 'none';
+                    el.offsetHeight; /* trigger reflow */
+                    el.style.animation = null; 
+                }
+
+				//nextPositionTime = audioContext.currentTime + 3;
+				nextPositionTime = audioContext.currentTime + .0001;
+			}
+			window.requestAnimationFrame(function (t) {
+				tick(song, stepDuration);
+			});
+		}
+
+		function sendNotes(song, songStart, start, end, audioContext, input, player) {
+			for (var t = 0; t < song.tracks.length; t++) {
+				var track = song.tracks[t];
+                var userTempo = parseInt(document.getElementById('tmpo1').value)
+                var mult = (120.0 / userTempo)
+				for (var i = 0; i < track.notes.length; i++) {
+					if (track.notes[i].when * mult >= start && track.notes[i].when * mult < end) {
+						var when = songStart + track.notes[i].when * mult;
+						var duration = mult * track.notes[i].duration;
+						if (duration > 3) {
+							duration = 3;
+						}
+						var instr = track.info.variable;
+						var v = track.volume / 7;
+						player.queueWaveTable(audioContext, input, window[instr], when, track.notes[i].pitch, duration, v, track.notes[i].slides);
+					}
+				}
+			}
+			for (var b = 0; b < song.beats.length; b++) {
+				var beat = song.beats[b];
+				for (var i = 0; i < beat.notes.length; i++) {
+					if (beat.notes[i].when >= start && beat.notes[i].when < end) {
+						var when = songStart + beat.notes[i].when;
+						var duration = 1.5;
+						var instr = beat.info.variable;
+						var v = beat.volume / 2;
+						player.queueWaveTable(audioContext, input, window[instr], when, beat.n, duration, v);
+					}
+				}
+			}
+		}
+		function startLoad(song) {
+            document.getElementById('songref').value = song
+			console.log(song);
+			var AudioContextFunc = window.AudioContext || window.webkitAudioContext;
+			audioContext = new AudioContextFunc();
+			player = new WebAudioFontPlayer();
+			reverberator = player.createReverberator(audioContext);
+			reverberator.output.connect(audioContext.destination);
+			input = reverberator.input;
+			for (var i = 0; i < song.tracks.length; i++) {
+				var nn = player.loader.findInstrument(song.tracks[i].program);
+				var info = player.loader.instrumentInfo(nn);
+				song.tracks[i].info = info;
+				song.tracks[i].id = nn;
+				player.loader.startLoad(audioContext, info.url, info.variable);
+			}
+			for (var i = 0; i < song.beats.length; i++) {
+				var nn = player.loader.findDrum(song.beats[i].n);
+				var info = player.loader.drumInfo(nn);
+				song.beats[i].info = info;
+				song.beats[i].id = nn;
+				player.loader.startLoad(audioContext, info.url, info.variable);
+			}
+			player.loader.waitLoad(function () {
+				console.log('buildControls');
+				buildControls(song);
+			});
+		}
+		function buildControls(song) {
+			audioContext.resume();
+			var o = document.getElementById('cntls');
+			var html = ''
+            //html = html + '<h2 id="title"></h2>';
+            //html = html + '<h2 id="wrng">Controls</h2>';
+            html = html + '<small id="title"></small>';
+			html = html + '<div display="flex"><button id="tmr" onclick="go();">Play (Tempo)</button><input name="tempobox1" value="160" type="text" id="tmpo1"/></div>';
+			html = html + '<p><input id="position" type="range" min="0" max="100" value="0" step="1" /></p>';
+
+			//html = html + '<h2>Channels</h2>';
+			//for (var i = 0; i < song.tracks.length; i++) {
+			//	var v = 100 * song.tracks[i].volume;
+			//	html = html + '<p>' + chooserIns(song.tracks[i].id, i) + '<input id="channel' + i + '" type="range" min="0" max="100" value="' + v + '" step="1" /></p>';
+			//}
+
+			//html = html + '<h2>Drums</h2>';
+			//for (var i = 0; i < song.beats.length; i++) {
+			//	var v = 100 * song.beats[i].volume;
+			//	html = html + '<p>' + chooserDrum(song.beats[i].id, i) + '<input id="drum' + i + '" type="range" min="0" max="100" value="' + v + '" step="1" /></p>';
+			//}
+
+            html = html + '<table>\n    <tr>\n';
+			for (var i = 0; i < song.tracks.length; i++) {
+				var v = 100 * song.tracks[i].volume;
+				html = html + '\n    <td>\n    ' + chooserIns(song.tracks[i].id, i) + '\n    </td>\n';
+			}
+            html = html + '\n    </tr>\n    <tr>\n';
+
+			for (var i = 0; i < song.tracks.length; i++) {
+				var v = 100 * song.tracks[i].volume;
+				html = html + '<td><input id="channel' + i + '" type="range" min="0" max="100" value="' + v + '" step="1" />';
+                html = html + '<input type="checkbox" name="checkfield' + i + '" id="mute' + i + '"/>Mute</td>';
+			}
+            html = html + '\n    </tr>\n    </table>\n';
+
+			for (var i = 0; i < song.beats.length; i++) {
+				var v = 100 * song.beats[i].volume;
+				html = html + '<p>' + chooserDrum(song.beats[i].id, i) + '<input id="drum' + i + '" type="range" min="0" max="100" value="' + v + '" step="1" /></p>';
+			}
+
+			o.innerHTML = html;
+			console.log('Loaded');
+
+            document.getElementById("position").style.display = "none";
+            var tmp = document.getElementById('title')
+            var selectBox = document.getElementById("selectBox");
+            var selectedValue = selectBox.options[selectBox.selectedIndex].value;
+            tmp.innerHTML = "Loaded file: " + selectBox.options[selectBox.selectedIndex].innerHTML
+			var pos = document.getElementById('position');
+			pos.oninput = function (e) {
+				if (loadedsong) {
+					player.cancelQueue(audioContext);
+					var next = song.duration * (pos.value / 100.0);
+					songStart = songStart - (next - currentSongTime);
+					currentSongTime = next;
+				}
+			};
+			console.log('Tracks');
+			for (var i = 0; i < song.tracks.length; i++) {
+                setMuteAction(i, song);
+				setVolumeAction(i, song);
+			}
+			console.log('Drums');
+			for (var i = 0; i < song.beats.length; i++) {
+				setDrVolAction(i, song);
+			}
+			loadedsong = song;
+		}
+
+		function setMuteAction(i, song) {
+			var ck = document.getElementById('mute' + i);
+			ck.onclick = function (e) {
+				player.cancelQueue(audioContext);
+                var v = 1.0;
+                if (ck.checked) {
+				    v = 0.0;
+                }
+				if (v < 0.000001) {
+					v = 0.000001;
+				}
+				song.tracks[i].volume = v;
+                var vlm = document.getElementById('channel' + i);
+                vlm.value = 100 * v;
+			};
+			var sl = document.getElementById('selins' + i);
+			sl.onchange = function (e) {
+				var nn = sl.value;
+				var info = player.loader.instrumentInfo(nn);
+				player.loader.startLoad(audioContext, info.url, info.variable);
+				player.loader.waitLoad(function () {
+					console.log('loaded');
+					song.tracks[i].info = info;
+					song.tracks[i].id = nn;
+				});
+			};
+		}
+
+		function setVolumeAction(i, song) {
+			var vlm = document.getElementById('channel' + i);
+			vlm.oninput = function (e) {
+				player.cancelQueue(audioContext);
+				var v = vlm.value / 100;
+				if (v < 0.000001) {
+					v = 0.000001;
+				}
+				song.tracks[i].volume = v;
+			};
+			var sl = document.getElementById('selins' + i);
+			sl.onchange = function (e) {
+				var nn = sl.value;
+				var info = player.loader.instrumentInfo(nn);
+				player.loader.startLoad(audioContext, info.url, info.variable);
+				player.loader.waitLoad(function () {
+					console.log('loaded');
+					song.tracks[i].info = info;
+					song.tracks[i].id = nn;
+				});
+			};
+		}
+		function setDrVolAction(i, song) {
+			var vlm = document.getElementById('drum' + i);
+			vlm.oninput = function (e) {
+				player.cancelQueue(audioContext);
+				var v = vlm.value / 100;
+				if (v < 0.000001) {
+					v = 0.000001;
+				}
+				song.beats[i].volume = v;
+			};
+			var sl = document.getElementById('seldrm' + i);
+			sl.onchange = function (e) {
+				var nn = sl.value;
+				var info = player.loader.drumInfo(nn);
+				player.loader.startLoad(audioContext, info.url, info.variable);
+				player.loader.waitLoad(function () {
+					console.log('loaded');
+					song.beats[i].info = info;
+					song.beats[i].id = nn;
+				});
+			};
+		}
+		function chooserIns(n, track) {
+			var html = '<select id="selins' + track + '">';
+			for (var i = 0; i < player.loader.instrumentKeys().length; i++) {
+				var sel = '';
+				if (i == n) {
+					sel = ' selected';
+				}
+				html = html + '<option value="' + i + '"' + sel + '>' + i + ': ' + player.loader.instrumentInfo(i).title + '</option>';
+			}
+			html = html + '</select>';
+			return html;
+		}
+		function chooserDrum(n, beat) {
+			var html = '<select id="seldrm' + beat + '">';
+			for (var i = 0; i < player.loader.drumKeys().length; i++) {
+				var sel = '';
+				if (i == n) {
+					sel = ' selected';
+				}
+				html = html + '<option value="' + i + '"' + sel + '>' + i + ': ' + player.loader.drumInfo(i).title + '</option>';
+			}
+			html = html + '</select>';
+			return html;
+		}
+		function handleFileSelect(event) {
+			console.log(event);
+			var file = event.target.files[0];
+			console.log(file);
+			var fileReader = new FileReader();
+			fileReader.onload = function (progressEvent) {
+				console.log(progressEvent);
+				var arrayBuffer = progressEvent.target.result;
+				console.log(arrayBuffer);
+				var midiFile = new MIDIFile(arrayBuffer);
+				var song = midiFile.parseSong();
+                console.log(song)
+				startLoad(song);
+			};
+			fileReader.readAsArrayBuffer(file);
+		}
+		function handleExample(path) {
+			console.log(path);
+			var xmlHttpRequest = new XMLHttpRequest();
+			xmlHttpRequest.open("GET", path, true);
+			xmlHttpRequest.responseType = "arraybuffer";
+			xmlHttpRequest.onload = function (e) {
+				var arrayBuffer = xmlHttpRequest.response;
+				var midiFile = new MIDIFile(arrayBuffer);
+				var song = midiFile.parseSong();
+				startLoad(song);
+			};
+			xmlHttpRequest.send(null);
+		}
+
+        function base64ToBytesArr(str) {
+          const abc = [..."ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"]; // base64 alphabet
+          let result = [];
+
+          for(let i=0; i<str.length/4; i++) {
+            let chunk = [...str.slice(4*i,4*i+4)]
+            let bin = chunk.map(x=> abc.indexOf(x).toString(2).padStart(6,0)).join(''); 
+            let bytes = bin.match(/.{1,8}/g).map(x=> +('0b'+x));
+            result.push(...bytes.slice(0,3 - (str[4*i+2]=="=") - (str[4*i+3]=="=")));
+          }
+          return result;
+        }
+
+		function handleB64Example(b64) {
+			//console.log(path);
+			//var xmlHttpRequest = new XMLHttpRequest();
+			//xmlHttpRequest.open("GET", path, true);
+			//xmlHttpRequest.responseType = "arraybuffer";
+			//xmlHttpRequest.onload = function (e) {
+			//	var arrayBuffer = xmlHttpRequest.response;
+			//	var midiFile = new MIDIFile(arrayBuffer);
+			//	var song = midiFile.parseSong();
+			//	startLoad(song);
+			//};
+			//xmlHttpRequest.send(null);
+            //var arrayBuffer = atob(b64);
+            // https://stackoverflow.com/questions/21797299/convert-base64-string-to-arraybuffer
+            var arrayBuffer = new Uint8Array(base64ToBytesArr(b64));
+            var midiFile = new MIDIFile(arrayBuffer);
+            var song = midiFile.parseSong();
+            startLoad(song);
+		}
+		document.getElementById('filesinput').addEventListener('change', handleFileSelect, false);
+	</script>
+    </body>
+</html>
