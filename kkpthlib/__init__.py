@@ -5,7 +5,9 @@ from .core import *
 from .hparams import HParams
 from .iterators import *
 from .datasets import fetch_jsb_chorales
+from .datasets import fetch_josquin
 from .datasets import fetch_pop909
+from .datasets import MusicJSONCorpus
 from .datasets import MusicJSONRasterCorpus
 from .datasets import MusicJSONRowRasterCorpus
 from .datasets import MusicPklCorpus
