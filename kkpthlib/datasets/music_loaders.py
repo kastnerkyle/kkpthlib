@@ -1264,22 +1264,27 @@ def _parse_music21_internal(music21_parsed_score, only_pieces_with_n_voices=[4],
             #if str(p_class).split(" ")[-1].split(">")[0] in ["Soprano", "Alto", "Tenor", "Bass"]:
             key = str(p_class).split(" ")[-1][:-1]
             if key not in notes_and_durations:
-                notes_and_durations[key] = [[]]
+                notes_and_durations[key] = collections.OrderedDict()
             for pi in p.flat:
                 if "Note" in pi.classes or "Rest" in pi.classes:
+                    if j not in notes_and_durations[key]:
+                        notes_and_durations[key][j] = []
                     if "Note" in pi.classes:
-                        notes_and_durations[key][-1].append((pi.pitch.midi, pi.nameWithOctave, _n, j, float(pi.offset), float(pi.duration.quarterLength)))
+                        notes_and_durations[key][j].append((pi.pitch.midi, pi.nameWithOctave, _n, j, float(pi.offset), float(pi.duration.quarterLength)))
                     else:
-                        notes_and_durations[key][-1].append((0, "R", _n, j, float(pi.offset), float(pi.duration.quarterLength)))
+                        notes_and_durations[key][j].append((0, "R", _n, j, float(pi.offset), float(pi.duration.quarterLength)))
     d = collections.OrderedDict()
     k = el.analyze('key')
-    ts = el.getTimeSignatures()[0]
+    all_ts = [ts for ts in el.getTimeSignatures()]
+    ts = all_ts[0]
 
     # cannot store music21 :(
     #d["stream"] = el
     d["global_key"] = k.name
     d["global_time_signature_numerator"] = float(ts.numerator)
     d["global_time_signature_denominator"] = float(ts.denominator)
+    d["global_all_time_signature_numerator"] = [float(tsi.numerator) for tsi in all_ts]
+    d["global_all_time_signature_denominator"] = [float(tsi.denominator) for tsi in all_ts]
     d["original_fpath"] = str(el.filePath)
     d["measure_map"] = global_measure_map
     # dont serialize per measure stuff
